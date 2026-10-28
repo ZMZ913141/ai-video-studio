@@ -187,7 +187,11 @@ def llm_json(user, system=None, timeout=180):
     from llm_router import LLMRouter
     r = LLMRouter()
     d = r.chat([{"role": "system", "content": system or SYSTEM},
-                {"role": "user", "content": user}])
+                {"role": "user", "content": user}],
+               # ★ sensitive=True 是默认值，这里写出来是因为它是一条**安全边界**：
+                #   喂进去的是客户台词，一旦有人图省事改成 False，这些台词就会流进
+                #   「提示词可能被上游记录」的第三方免费池。显式写 = 改动时能被 review 到。
+                sensitive=True)
     content = d["choices"][0]["message"].get("content", "")
     global LAST_RAW
     LAST_RAW = content

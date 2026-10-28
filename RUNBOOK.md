@@ -126,6 +126,43 @@ $ vstudio job-new 老王 "M01_开业第一条"
 ⚠ **客户档案默认禁止内容上云**（`card.json` 里 `policy.allow_cloud_llm: false`），
 文案走本地 9B。本人 IP 是 `true`。
 
+### LLM 路由：按「能力」选通道，而不是按模型名
+
+以前要记住「智谱不能看图、硅基某个 VL 能看图」，写在人脑子里，人一走就丢。
+现在能力写在 `config/providers.json` 里，代码只读它：
+
+```bash
+set -a && . config/llm.env && set +a
+
+python3 bin/llm_router.py status          # 看各家额度、能力(视觉)、付费/免费池
+python3 bin/llm_router.py models          # 核对手写能力与上游实际声明是否还对得上
+python3 bin/llm_router.py vision "这帧字幕有没有压边？" --image 帧.png
+```
+
+两个新参数：
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `need="vision"` | 无 | 只在**支持该能力**的通道里挑。写 `text`/`image` 也行 |
+| `sensitive` | **True** | True = 这段内容属于客户/商业信息 → **自动跳过第三方免费池** |
+
+⚠ `sensitive=False` 只用于**不含客户信息**的场合（视觉自检、草稿）。
+客户台词、IP 档案、出片提示词**一律不许传 False**——免费池的官方说明就写着
+「提示词可能被上游记录」。
+
+路由**不做静默降级**：付费视觉全挂时，涉密请求会直接报错而不是悄悄落到免费池。
+宁可跑不动，也不能把客户的片子喂给第三方。
+
+```python
+from llm_router import LLMRouter
+r = LLMRouter()
+r.chat(msgs, need="vision")                    # 客户成片 → 只走付费 VL
+r.chat(msgs, need="vision", sensitive=False)   # 自己的自检 → 可以用免费 VL
+```
+
+当前: 付费 VL 走硅基 `Qwen/Qwen3-VL-8B-Instruct`（实测 1.1s，几分钱），
+腾讯混元视觉做厂商冗余；免费 VL 兜底用本地 zen-gate 网关（`:8787`）。
+
 ---
 
 ## 三、出一套片的完整动线

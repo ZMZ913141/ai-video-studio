@@ -5,34 +5,13 @@
     "对应的 key（写在 config/llm.env）、把 model 换成控制台里实际的模型 id。",
     "配额冷却状态写在 config/.llm_state.json（自动生成，勿手改）。"
   ],
-
   "defaults": {
     "timeout_sec": 90,
     "rate_limit_cooldown_min": 5,
     "quota_cooldown_min": 120,
     "daily_reset": false
   },
-
   "providers": [
-    {
-      "name": "siliconflow",
-      "note": "已注册。旗舰模型付费（DeepSeek-V3.2 质量最好、工具调用最稳），所以排在最后当兜底；9B 以下小模型永久免费",
-      "base_url": "https://api.siliconflow.cn/v1",
-      "key_env": "SF_API_KEY",
-      "model": "deepseek-ai/DeepSeek-V3.2",
-      "priority": 35,
-      "enabled": true
-    },
-    {
-      "name": "modelscope",
-      "note": "已注册。魔搭，约 2000 次调用/天，每天重置",
-      "base_url": "https://api-inference.modelscope.cn/v1",
-      "key_env": "MS_API_KEY",
-      "model": "Qwen/Qwen3.8-27B",
-      "priority": 20,
-      "enabled": true,
-      "daily_reset": true
-    },
     {
       "name": "zhipu",
       "note": "智谱。已实测：glm-4.7-flash 免费但限流明显（约 1/3 概率返回 1305 访问量过大），所以限流只冷却 1 分钟；glm-4.6 / glm-5.3-flash 等需付费（报 1113 余额不足）",
@@ -44,17 +23,11 @@
       "daily_reset": false,
       "rate_limit_cooldown_min": 1,
       "quota_cooldown_min": 60,
-      "extra_body": {"thinking": {"type": "disabled"}}
-    },
-    {
-      "name": "qianfan",
-      "note": "百度千帆。已实测：ernie-4.5-turbo-128k 可用且工具调用标准（ernie-lite/speed 已无权限）。/v2/models 接口本身有 QPS 限制，别频繁探",
-      "base_url": "https://qianfan.baidubce.com/v2",
-      "key_env": "QIANFAN_API_KEY",
-      "model": "ernie-4.5-turbo-128k",
-      "priority": 25,
-      "enabled": true,
-      "rate_limit_cooldown_min": 2
+      "extra_body": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
     },
     {
       "name": "volcengine",
@@ -67,13 +40,24 @@
       "daily_reset": true
     },
     {
-      "name": "bailian",
-      "note": "阿里云百炼。每模型约 100 万 token（90 天有效期），实名后超额转按量付费，注意关掉自动扣费",
-      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "key_env": "DASHSCOPE_API_KEY",
-      "model": "qwen-plus",
-      "priority": 50,
-      "enabled": false
+      "name": "modelscope",
+      "note": "已注册。魔搭，约 2000 次调用/天，每天重置",
+      "base_url": "https://api-inference.modelscope.cn/v1",
+      "key_env": "MS_API_KEY",
+      "model": "Qwen/Qwen3.8-27B",
+      "priority": 20,
+      "enabled": true,
+      "daily_reset": true
+    },
+    {
+      "name": "qianfan",
+      "note": "百度千帆。已实测：ernie-4.5-turbo-128k 可用且工具调用标准（ernie-lite/speed 已无权限）。/v2/models 接口本身有 QPS 限制，别频繁探",
+      "base_url": "https://qianfan.baidubce.com/v2",
+      "key_env": "QIANFAN_API_KEY",
+      "model": "ernie-4.5-turbo-128k",
+      "priority": 25,
+      "enabled": true,
+      "rate_limit_cooldown_min": 2
     },
     {
       "name": "tokenhub",
@@ -83,7 +67,11 @@
       "model": "hy3",
       "priority": 30,
       "enabled": true,
-      "extra_body": {"thinking": {"type": "disabled"}}
+      "extra_body": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
     },
     {
       "name": "tokenhub-ds",
@@ -93,7 +81,88 @@
       "model": "deepseek-v4.1-flash",
       "priority": 32,
       "enabled": true,
-      "extra_body": {"thinking": {"type": "disabled"}}
+      "extra_body": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
+    },
+    {
+      "name": "siliconflow",
+      "note": "已注册。旗舰模型付费（DeepSeek-V3.2 质量最好、工具调用最稳），所以排在最后当兜底；9B 以下小模型永久免费",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "key_env": "SF_API_KEY",
+      "model": "deepseek-ai/DeepSeek-V3.2",
+      "priority": 35,
+      "enabled": true
+    },
+    {
+      "name": "siliconflow-vl",
+      "note": "付费视觉通道。付费 → sensitive 默认 true，客户成片/未发布素材的视觉验收走这条。模型 id 从硅基 /v1/models 实查得来（2026-10-29），别凭记忆写：Qwen3-VL 有 -Instruct / -Thinking / -Embedding / -Reranker 四种子型，只有 Instruct/Thinking 能对话。8B 几分钱一次，S05 用它读过烧录字幕；要更准换 Qwen/Qwen3-VL-32B-Instruct",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "key_env": "SF_API_KEY",
+      "model": "Qwen/Qwen3-VL-8B-Instruct",
+      "priority": 42,
+      "enabled": true,
+      "capabilities": [
+        "text",
+        "image"
+      ],
+      "timeout_sec": 120
+    },
+    {
+      "name": "tokenhub-vl",
+      "note": "付费视觉通道（混元视觉）。用途是厂商级冗余：万一硅基 VL 侧故障还有另一家。★ 同一个腾讯 key，模型 id 实查自 tokenhub /v1/models（当时 125 个 online）。注意 hy-vision 与 hunyuan-t1-vision 是两个不同模型，别写混",
+      "base_url": "https://tokenhub.tencentmaas.com/v1",
+      "key_env": "TENCENT_API_KEY",
+      "model": "hy-vision-2.0-instruct",
+      "priority": 43,
+      "enabled": true,
+      "capabilities": [
+        "text",
+        "image"
+      ],
+      "timeout_sec": 120
+    },
+    {
+      "name": "zengate-vl",
+      "note": "本地 zen-gate 网关（127.0.0.1:8787）转发的免费视觉车道。2026-10-29 实测：nemotron-3.5-super-vl-free 5.6s 准确描述测试卡；mimo-v2.6-flash-free 11.3s 也可。⚠ 免费池的提示词可能被上游记录 → sensitive=false，客户内容一律不落这条道（路由会自动跳过）。给它的 CAPABILITY 更简单：网关自己会在 SERVICES 失效时换模型，我们只负责「不选它处理涉密内容」",
+      "base_url": "http://127.0.0.1:8787/v1",
+      "key_env": "ZENGATE_API_KEY",
+      "model": "nemotron-3.5-super-vl-free",
+      "priority": 45,
+      "enabled": true,
+      "sensitive": false,
+      "capabilities": [
+        "text",
+        "image"
+      ],
+      "timeout_sec": 120,
+      "daily_reset": true
+    },
+    {
+      "name": "zengate",
+      "note": "同一网关的纯文本兜底（beam-free / kilo-auto/free 实测 4s 通）。⚠ 同样是免费池，sensitive=false。排在付费通道之后当最后一道冗余，正常情况下用不到",
+      "base_url": "http://127.0.0.1:8787/v1",
+      "key_env": "ZENGATE_API_KEY",
+      "model": "beam-free",
+      "priority": 46,
+      "enabled": true,
+      "sensitive": false,
+      "capabilities": [
+        "text"
+      ],
+      "timeout_sec": 120,
+      "daily_reset": true
+    },
+    {
+      "name": "bailian",
+      "note": "阿里云百炼。每模型约 100 万 token（90 天有效期），实名后超额转按量付费，注意关掉自动扣费",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "key_env": "DASHSCOPE_API_KEY",
+      "model": "qwen-plus",
+      "priority": 50,
+      "enabled": false
     },
     {
       "name": "moonshot",
@@ -172,5 +241,14 @@
       "enabled": false,
       "daily_reset": true
     }
+  ],
+  "_cap_note": [
+    "capabilities：这条通道支持什么。默认 ['text']；含 'image' 才能接看图任务。",
+    "  chat(need='vision') 时，路由器只选 capabilities 含 image 的通道，",
+    "  不用再硬编码记「智谱不能看图」——那种靠人记住的约定，人一走就丢。",
+    "sensitive：false = 第三方免费池，提示词可能被上游记录。",
+    "  chat() 默认 sensitive=True → 自动跳过所有免费池（客户内容走这个默认值）。",
+    "  只有显式传 sensitive=False 才会用到 zen-gate（视觉验收、不涉密的通用活）。",
+    "  客户台词 / IP 档案 / 出片提示词，一律不许传 False。"
   ]
 }

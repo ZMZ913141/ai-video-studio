@@ -133,6 +133,44 @@ class LLMRouter:
         return _now() + 60 * float(p.get("rate_limit_cooldown_min",
                                          self.defaults.get("rate_limit_cooldown_min", 5)))
 
+    # ------------------------------------------------- 能力 / 涉密 过滤
+    # need="vision" 要的是「能看图」这条能力，不是某个模型名。
+    # 以前是硬编码记「智谱不能看图、硅基 Qwen3-VL 能看图」，人一走这个约定就丢，
+    # 而且新加一家还要回头改代码。现在能力写在 providers.json 里，代码只读它。
+    NEED_CAPABILITY = {"vision": "image", "image": "image", "text": "text"}
+
+    def _pool(self, sensitive: bool = True, need: str | None = None) -> list[dict]:
+        """按「能力」+「能不能碰涉密内容」挑通道。
+
+        sensitive=True（默认）→ 排除所有 sensitive=false 的第三方免费池。
+        ⚠ 这里**不做静默降级**：宁可报错让人明说，也不能为了跑通
+        就把客户台词悄悄送进「提示词可能被上游记录」的免费池。
+        """
+        ps = self.providers
+        if need:
+            want = self.NEED_CAPABILITY.get(need, need)
+            ps = [p for p in ps if want in (p.get("capabilities") or ["text"])]
+        if sensitive:
+            ps = [p for p in ps if p.get("sensitive", True)]
+        return ps
+
+    def list_models(self, provider: str) -> list[dict]:
+        """查某条通道实际有哪些模型 + 能力元数据（网关类通道带 input_modalities）。
+
+        这是「provider 自己声明的能力」的取数口，用来核对 providers.json
+        里手写的能力对不对 —— 网关/聚合型通道的模型会变，channels 一改就可能对不上。
+        """
+        ps = [p for p in self.cfg["providers"] if p["name"] == provider]
+        if not ps:
+            raise RuntimeError(f"没有叫 {provider} 的通道")
+        p = ps[0]
+        key = os.environ.get(p.get("key_env", ""), "")
+        req = urllib.request.Request(
+            p["base_url"].rstrip("/") + "/models",
+            headers={"Authorization": f"Bearer {key}"} if key else {})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode()).get("data", [])
+
     # ---------------------------------------------------------------- 请求
     @staticmethod
     def _classify(code: int, body: str) -> str:
@@ -166,8 +204,15 @@ class LLMRouter:
 
     def chat(self, messages: list, tools: list | None = None, tool_choice=None,
              response_format: dict | None = None, max_tokens: int = 1024,
-             temperature: float = 0.2, verbose: bool = True) -> dict:
-        """依次尝试所有可用供应商；全部失败才抛异常。"""
+             temperature: float = 0.2, verbose: bool = True,
+             sensitive: bool = True, need: str | None = None) -> dict:
+        """依次尝试所有可用供应商；全部失败才抛异常。
+
+        sensitive  默认 True =「这段内容属于客户/商业信息」→ 自动跳过第三方免费池
+                   （providers.json 里 sensitive=false 的那些）。
+                   只有视觉验收、通用草稿这类不含客户信息的场合才显式传 False。
+        need       'vision' 等能力名 → 只在支持该能力的通道里挑（见 _pool）。
+        """
         body_base = {"messages": messages, "max_tokens": max_tokens,
                      "temperature": temperature}
         if tools:
@@ -177,12 +222,19 @@ class LLMRouter:
         if response_format:
             body_base["response_format"] = response_format
 
-        if not self.providers:
-            raise RuntimeError("providers.json 里没有任何 enabled=true 的供应商")
+        pool = self._pool(sensitive=sensitive, need=need)
+        if not pool:
+            raise RuntimeError(
+                f"没有可用通道（need={need}, sensitive={sensitive}）。\n"
+                + (f"  需要 {need} 能力，但没有一条既支持它、又允许处理涉密内容的通道。\n"
+                   f"  若这些内容不含客户信息，显式传 sensitive=False 才会用到免费视觉池。\n"
+                   if need else "")
+                + f"  当前 enabled 通道：{[p['name'] for p in self.providers]}")
+        pool = sorted(pool, key=lambda p: p.get("priority", 999))
 
         errors = []
         for attempt in range(2):          # 第二轮：强制解除最早到期的冷却再试
-            for p in self.providers:
+            for p in pool:
                 if attempt == 0 and not self._available(p):
                     continue
                 body = dict(body_base, model=p["model"])
@@ -192,6 +244,7 @@ class LLMRouter:
                 t0 = _now()
                 try:
                     d = self._call(p, body)
+                    d = self._normalize(d)
                     self.state.pop(p["name"], None)
                     self.state[p["name"] + "_last_ok"] = {"at": t0}
                     self._save()
@@ -241,6 +294,25 @@ class LLMRouter:
 
         raise RuntimeError("所有供应商均不可用：\n  " + "\n  ".join(errors))
 
+    def _normalize(self, d: dict) -> dict:
+        """把各家返回里的怪格式统一成 OpenAI 形状。
+
+        ⚠ 网关和部分 Anthropic 兼容层会把 content 返回成
+        `[{"type":"text","text":"..."}]` 而不是字符串。上层（prompts.py 等）
+        直接拿 content 当字符串拼，拿到 list 会崩在半路，
+        报错还跟「答案错了」长得一模一样，很难查。统一在这里抹平。
+        """
+        try:
+            msg = d["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError):
+            return d
+        c = msg.get("content")
+        if isinstance(c, list):
+            msg["content"] = "".join(
+                part.get("text", "") for part in c
+                if isinstance(part, dict) and part.get("type") == "text")
+        return d
+
     # ---------------------------------------------------------------- 运维
     def status(self) -> list[dict]:
         rows = []
@@ -248,12 +320,15 @@ class LLMRouter:
             key = os.environ.get(p.get("key_env", ""), "")
             st = self.state.get(p["name"], {})
             cooling = bool(st.get("until")) and st["until"] > _now()
+            caps = p.get("capabilities") or ["text"]
             rows.append({
                 "name": p["name"], "enabled": p.get("enabled", False),
                 "priority": p.get("priority"), "model": p.get("model"),
                 "key": ("已配置" if key else "缺 key"),
                 "state": ("冷却至 " + _fmt(st["until"])) if cooling else "可用",
                 "reason": st.get("reason", ""),
+                "vision": "✓" if "image" in caps else "",
+                "pool": "免费池" if p.get("sensitive", True) is False else "付费",
             })
         return rows
 
@@ -265,8 +340,10 @@ class LLMRouter:
 def main():
     ap = argparse.ArgumentParser(description="多供应商 LLM 路由")
     ap.add_argument("cmd", nargs="?", default="status",
-                    choices=["status", "chat", "reset"])
+                    choices=["status", "chat", "reset", "models", "vision"])
     ap.add_argument("text", nargs="?", default="回复四个字：路由正常")
+    ap.add_argument("--image", help="看图任务的图片路径（need=vision）")
+    ap.add_argument("--provider", help="models 命令限定某条通道")
     a = ap.parse_args()
 
     r = LLMRouter()
@@ -279,12 +356,45 @@ def main():
             # 但已恢复的家不该继续挂着上次的原因
             tail = f"  ← {x['reason']}" if (x['reason'] and x['state'] != "可用") else ""
             print(f"  {x['priority']:>4}  {x['name']:<12} {x['key']:<7} "
-                  f"{x['state']:<18} {x['model']}{tail}")
+                  f"{x['state']:<18} {x['vision'] or ' '} {x['pool']:<4} "
+                  f"{x['model']}{tail}")
         dis = [x["name"] for x in r.status() if not x["enabled"]]
         print(f"\n  未启用（注册后打开）: {', '.join(dis)}")
+        print("  视觉 = 支不支持看图；付费/免费池 = 客户内容只走「付费」那一栏")
     elif a.cmd == "reset":
         r.reset()
         print("✓ 已清空所有冷却状态")
+    elif a.cmd == "models":
+        # 核对手写能力与上游实际声明是否一致（网关类通道模型会变，得能查）
+        names = [a.provider] if a.provider else [
+            p["name"] for p in r.cfg["providers"] if p.get("enabled")]
+        for n in names:
+            try:
+                ms = r.list_models(n)
+            except Exception as e:
+                print(f"  {n:<14} 查不到：{type(e).__name__} {e}")
+                continue
+            vis = [m["id"] for m in ms
+                   if "image" in (m.get("input_modalities") or [])
+                   or m.get("supportsImages")]
+            print(f"  {n:<14} {len(ms):>3} 个模型，其中 {len(vis)} 个声明支持看图")
+            for m in vis[:6]:
+                print(f"      · {m['id']}")
+    elif a.cmd == "vision":
+        if not a.image:
+            sys.exit("vision 需要 --image 图片路径")
+        import base64, mimetypes
+        mime = mimetypes.guess_type(a.image)[0] or "image/png"
+        b64 = base64.b64encode(open(a.image, "rb").read()).decode()
+        msgs = [{"role": "user", "content": [
+            {"type": "text", "text": a.text},
+            {"type": "image_url",
+             "image_url": {"url": f"data:{mime};base64,{b64}"}}]}]
+        # ⚠ 视觉能力目前只有免费池提供，所以这条命令必须 sensitive=False。
+        #   看图内容若涉及客户素材/未发布成片，别用这里，改走付费 VL（硅基 Qwen3-VL）。
+        d = r.chat(msgs, need="vision", sensitive=False, max_tokens=600)
+        print(f"通道: {d['_provider']}")
+        print(d["choices"][0]["message"].get("content", "")[:800])
     else:
         d = r.chat([{"role": "user", "content": a.text}])
         msg = d["choices"][0]["message"]

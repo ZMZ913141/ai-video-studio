@@ -46,3 +46,6 @@ OpenMontage
 
 # LLM 路由的运行时状态（冷却时间戳），不该进版本库
 config/.llm_state.json
+
+# 视觉能力自检用的临时测试图
+.cache/
