@@ -17,14 +17,17 @@ ui_server —— 本地网页工作台的后端（零第三方依赖）
     python3 bin/ui_server.py --port 9000 --open
 """
 import argparse
+import atexit
 import hashlib
 import json
 import mimetypes
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -38,6 +41,8 @@ ARCHIVE = os.environ.get("STUDIO_ARCHIVE") or "/cfu/ai视频档案库"
 CACHE_DIR = os.path.join(ROOT, ".cache", "ui")
 THUMB_DIR = os.path.join(CACHE_DIR, "thumbs")
 CHANGELOG_GLOBAL = os.path.join(ROOT, "config", ".ui_changelog.jsonl")
+# 端口会被自动顺延，光看命令猜不准。写个小纸条，谁来查地址都一致。
+PORTFILE = os.path.join(tempfile.gettempdir(), "vstudio-ui.json")
 
 PY = sys.executable if sys.version_info >= (3, 9) else "python3"
 VSTUDIO = os.path.join(BIN_DIR, "vstudio.py")
@@ -723,12 +728,101 @@ def die_safe(msg):
     sys.exit(1)
 
 
+def write_portfile(url, port):
+    """把真实端口和 PID 落到固定小纸条 —— 端口会自动顺延，
+    光看启动命令猜不出地址，第二次开时常一堆旧实例堆在那儿。"""
+    try:
+        info = {"pid": os.getpid(), "port": port, "url": url,
+                "started": now(), "root": ROOT}
+        with open(PORTFILE, "w", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False, indent=2)
+        atexit.register(lambda: os.path.exists(PORTFILE) and os.remove(PORTFILE))
+    except Exception:
+        pass
+
+
+def read_portfile():
+    if not os.path.exists(PORTFILE):
+        return None
+    try:
+        with open(PORTFILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def pid_is_ours(pid):
+    """★ 杀之前先验明正身：PID 是会复用的，纸条上那个号可能早就是别的进程了。
+    不做这一步，--stop 会变成隔了半天的误杀。"""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmd = f.read().decode("utf-8", "replace")
+    except Exception:
+        return None          # 读不到 = 进程不在了
+    return "ui_server.py" in cmd
+
+
+def stop_running():
+    info = read_portfile()
+    if not info:
+        print("没有发现正在运行的实例（小纸条不在：" + PORTFILE + "）")
+        return 1
+    pid = info.get("pid")
+    who = pid_is_ours(pid)
+    if who is None:
+        os.path.exists(PORTFILE) and os.remove(PORTFILE)
+        print(f"进程 {pid} 已经不在了，小纸条清掉")
+        return 0
+    if not who:
+        print(f"✗ pid={pid} 已经不是 UI 服务了（系统把号复用给了别的进程），不敢动手。")
+        print(f"  自己查一下：ps -p {pid} -o pid,cmd")
+        return 1
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        print(f"进程 {pid} 早就不在了，清掉小纸条")
+    except PermissionError:
+        print(f"没权限停 {pid}，你自己 kill 一下")
+        return 1
+    for _ in range(30):
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+    print(f"✓ 已停 pid={pid} port={info.get('port')}（起于 {info.get('started')}）")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="洁斌视频工作台 · 本地网页 UI")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--open", action="store_true", help="起来后自动开浏览器")
+    ap.add_argument("--stop", action="store_true", help="停掉上一次起的那一个")
+    ap.add_argument("--status", action="store_true", help="看当前有没有在跑、地址是多少")
     a = ap.parse_args()
+
+    if a.status:
+        info = read_portfile()
+        if not info:
+            print("没在跑。启动：python3 bin/ui_server.py")
+            return 0
+        alive = pid_is_ours(info["pid"])          # 顺便确认那个号确实是我们的
+        print(f"{'运行中' if alive else '小纸条还在但进程已不是它了'}："
+              f"{info['url']}  pid={info['pid']}  起于 {info['started']}")
+        return 0
+    if a.stop:
+        sys.exit(stop_running())
+
+    old = read_portfile()
+    if old:
+        try:
+            os.kill(old["pid"], 0)
+            print(f"⚠ 已经有一个在跑了：{old['url']} (pid={old['pid']}，起于 {old['started']})")
+            print(f"  要到 {old['port'] + 1} 之后的端口？加 --port；要换掉它？先 --stop")
+        except OSError:
+            pass
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     os.makedirs(THUMB_DIR, exist_ok=True)
@@ -748,10 +842,12 @@ def main():
         die_safe(f"连续 30 个端口都被占用，换 --port 试试")
 
     url = f"http://{a.host}:{port}"
+    write_portfile(url, port)
     print(f"✓ UI 服务已启动 {url}" + (f"   （{a.port} 被占，已顺延）" if port != a.port else ""))
     print(f"  引擎根 {ROOT}")
     print(f"  档案区 {ARCHIVE}")
-    print("  Ctrl+C 停")
+    print(f"  小纸条 {PORTFILE}   ← 记着 pid 和真实端口，查地址/停服都看它")
+    print("  Ctrl+C 停，或另开一个终端跑：python3 bin/ui_server.py --stop")
     if a.open:
         try:
             subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

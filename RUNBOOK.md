@@ -77,10 +77,26 @@ $V guard 洁斌     # 开工前自检（素材不齐非零退出）
 
 ```bash
 cd /home/qmr/github/ai-video-studio
-python3 bin/ui_server.py            # → http://127.0.0.1:8790
+python3 bin/ui_server.py            # 前台跑，Ctrl+C 停
 python3 bin/ui_server.py --open     # 顺便开浏览器
-python3 bin/ui_server.py --port 9000
+python3 bin/ui_server.py --status   # 有没有在跑、地址是多少
+python3 bin/ui_server.py --stop     # 停掉上一次起的那个
 ```
+
+端口撞车会自动往后顺延，**所以别靠命令行猜地址** —— 起完看这三条中的任意一条：
+启动时的那行 `✓ UI 服务已启动 http://…`、或者 `python3 bin/ui_server.py --status`、
+或者小纸条 `/tmp/vstudio-ui.json`（记着 pid、真实端口、启动时间，`--stop` 就是读它）。
+
+先把旧实例清干净（之前起过的进程看不见摸不着，会一直占着 8790）：
+
+```bash
+pkill -f "bin/ui_server.py"; sleep 1
+python3 bin/ui_server.py --status          # 应答「没在跑」
+python3 bin/ui_server.py                   # 干净的只有这一个
+```
+
+> `--stop` 动手前会先读 `/proc/<pid>/cmdline` 验明正身：PID 会被系统复用，
+> 号对着但人不对时它拒绝执行，让你自己去 `ps -p <pid> -o pid,cmd` 看清楚。
 
 ### 它能干什么
 
@@ -120,8 +136,9 @@ NODE_PATH=/home/qmr/.workbuddy/binaries/node/workspace/node_modules \
 
 - **不走 CDN、不引框架**：`ui_server.py` 是 `http.server` 零第三方依赖，前端无构建。断网照样能开。
 - **中文路径**：`http.server` 把 request line 按 iso-8859-1 解的，直接拿 `self.path` 会把「洁斌」读成乱码 —— 服务端统一重解码。
-- **端口被占自动往后顺延**（8790 撞车是这台机器的常态，不该让人去查 PID）。
+- **端口被占自动往后顺延**（撞车是这台机器的常态，不该让人去查 PID），真实端口写 `/tmp/vstudio-ui.json`。
 - **文件浏览关在笼子里**：请求的路径 `realpath` 必须落在档案区或项目根之内，越界一律拒绝。
+- **视频要能拖动**：`/api/raw` 实现了 HTTP Range（206），只返回整段的播放器拖不动进度条。
 
 ---
 
