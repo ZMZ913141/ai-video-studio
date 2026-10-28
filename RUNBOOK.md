@@ -165,6 +165,36 @@ r.chat(msgs, need="vision", sensitive=False)   # 自己的自检 → 可以用�
 
 ---
 
+### 换人 / 换环境 / 换配乐：改 ip.json，不要改脚本
+
+以前这套东西写在 `gen_video.py` 里（外貌、衣领、背景绿植、88BPM 吉他），
+换一个客户就得复制一份脚本再手改 → 20~50 个客户时改一个 bug 要改 50 处。
+
+现在 IP 的所有**名词**都在 `ip.json` 的 `video.prompt_vars`（24 个占位符，
+同名对应 `gen_video.py` 里的 `DEFAULT_PROMPT_VARS`）：
+
+```bash
+vstudio card-show 洁斌 --json | python3 -c "import json,sys;print(json.load(sys.stdin))"
+# 改 ip.json 里 video.prompt_vars 的任意一项 = 换人/换环境/换配乐
+```
+
+⚠ **引擎里的默认值必须保持中性**（不写具体的人/衣/物，一律把描述权交回 `<Picture 1>`）。
+否则新 IP 还没配 `prompt_vars` 时，这些词会**顶替静帧成为画面的描述来源**——
+等于把上一个客户的外貌和陈设灌给下一个客户。这是身份污染，比画质坏严重得多。
+
+引擎脚本只有一份真源：`templates/scripts/`（25 个脚本 + manifest）。
+
+```bash
+vstudio scripts-sync 老王            # 先看 diff
+vstudio scripts-sync 老王 --force    # 覆盖（旧文件进 08_过程/_脚本备份/时间戳/）
+vstudio scripts-diff                 # 各 IP 谁跑偏了
+```
+
+某个 IP 若真需要独占逻辑，先问「能不能变成 ip.json 的一个参数」——
+能变成参数才是正解，直接改脚本等于重新引入分叉。
+
+---
+
 ## 三、出一套片的完整动线
 
 阶段固定：**文案 → 音频 → 视频 → 后期 → 字幕 → 验收 → 交付**
@@ -332,7 +362,8 @@ LoRA 改权重所以紧跟 UNET；Sage 改 attention 实现；低显存分块必
 | `algo <ip> <套次> [--sec 秒] [--mp 1.26] [--segs N]` | 自适应参数预览（帧数/段数/留白/配乐） |
 | `scripts-diff [--base IP]` | 各 IP 脚本偏离比对（谁改了什么、哪些能抽回引擎） |
 | `scripts [ip]` | 该 IP 能跑的生产脚本 |
-| `llm "…"` | 走 LLM 路由（6 家自动切换） |
+| `scripts-sync <ip> [--file a.py,b.py] [--force]` | 把引擎真源推给某 IP（默认只预览，`--force` 才写，旧文件自动备份） |
+| `llm status\|chat\|models\|vision --image 帧.png "…"` | LLM 路由（见第二节） |
 | `index [--write]` | 重建索引 / 给旧套次补 job.json |
 | `status` | 总览（卡 + 套次 + 三个服务） |
 

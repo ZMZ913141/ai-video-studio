@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -798,6 +799,91 @@ def cmd_algo(a):
           f"  （手动锁定时用；不传则由脚本按停顿自适应）")
 
 
+def cmd_scripts_sync(a):
+    """把引擎真源 templates/scripts/ 推给某个 IP（——folders 收 1 份，别处都是副本）"""
+    import hashlib
+    import difflib
+    from datetime import datetime
+
+    mpath = os.path.join(ROOT, "templates", "scripts", "manifest.json")
+    if not os.path.exists(mpath):
+        die(f"引擎真源不存在：{mpath}")
+    man = json.loads(open(mpath, encoding="utf-8").read())
+    targets = man.get("targets", {})
+    if a.file:
+        want = set(a.file.split(","))
+        unknown = sorted(want - set(targets))
+        if unknown:
+            die(f"真源里没有这些文件：{unknown}")
+        targets = {k: v for k, v in targets.items() if k in want}
+
+    e = resolve_ip(a.ip)
+
+    def read(p):
+        return open(p, encoding="utf-8", errors="ignore").read().splitlines() if os.path.exists(p) else []
+
+    new, chg, same, miss_dir = [], [], [], []
+    for fn, sub in sorted(targets.items()):
+        src = os.path.join(ROOT, "templates", "scripts", fn)
+        dst_dir = os.path.join(e["path"], sub)
+        dst = os.path.join(dst_dir, fn)
+        if not os.path.isdir(dst_dir):
+            miss_dir.append((fn, sub))
+            continue
+        if not os.path.exists(dst):
+            new.append((fn, sub, src, dst))
+            continue
+        sh = hashlib.md5(open(src, "rb").read()).hexdigest()
+        dh = hashlib.md5(open(dst, "rb").read()).hexdigest()
+        if sh == dh:
+            same.append(fn)
+        else:
+            chg.append((fn, sub, src, dst))
+
+    if a.json:
+        print(json.dumps({"ip": e["name"], "path": e["path"],
+                          "new": [x[0] for x in new], "changed": [x[0] for x in chg],
+                          "same": same, "missing_dir": sorted({x[1] for x in miss_dir})},
+                         ensure_ascii=False, indent=2))
+        return
+
+    print(f"引擎真源 → {e['name']}（{e['path']}）\n")
+    print(f"① 需更新 {len(chg)} 个")
+    for fn, sub, src, dst in chg:
+        nd = len([x for x in difflib.unified_diff(read(dst), read(src), n=0)
+                  if x[:1] in "+-" and x[:3] not in ("+++", "---")])
+        print(f"   {fn:<22} → {sub}   差 {nd} 行")
+    if new:
+        print(f"\n② IP 里还没有 {len(new)} 个（会新增）")
+        for fn, sub, _s, _d in new:
+            print(f"   {fn:<22} → {sub}")
+    if miss_dir:
+        print(f"\n③ 目标目录不存在 {len(miss_dir)} 个：{sorted({x[1] for x in miss_dir})}")
+    print(f"\n④ 已一致 {len(same)} 个，不用动")
+
+    if not (chg or new):
+        print("\n没有需要同步的内容。")
+        return
+    if not a.force:
+        print("\n以上是预览。真要覆盖加 --force（旧文件会自动备份到 08_过程/_脚本备份/）。")
+        print("⚠ 覆盖前先确认 diff：某个 IP 若被手工改过且没写回 ip.json，覆盖会丢失那部分改动。")
+        return
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    bak = os.path.join(e["path"], "08_过程", "_脚本备份", stamp)
+    done = []
+    for fn, sub, src, dst in chg + new:
+        if os.path.exists(dst):
+            os.makedirs(bak, exist_ok=True)
+            os.replace(dst, os.path.join(bak, fn))   # 挪进备份（不是复制，保持目录干净）
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        done.append(fn)
+    print(f"\n✓ 已同步 {len(done)} 个到 {e['name']}")
+    if os.path.isdir(bak):
+        print(f"  旧文件备份在：{bak}（确认没问题后可以删）")
+
+
 def cmd_scripts_diff(a):
     """脚本偏离比对：50 个 IP 时，谁改了什么、哪些该抽回引擎"""
     import hashlib
@@ -988,6 +1074,13 @@ def main():
     p = sub.add_parser("scripts-diff", help="各 IP 脚本偏离比对")
     p.add_argument("--base", help="基准 IP（默认第一个）")
     p.set_defaults(func=cmd_scripts_diff)
+
+    p = sub.add_parser("scripts-sync", help="把引擎真源推给某个 IP（先预览，加 --force 才写）")
+    p.add_argument("ip", help="目标 IP 名/别名")
+    p.add_argument("--file", help="只同步指定文件，逗号分隔")
+    p.add_argument("--force", action="store_true", help="实际覆盖（旧文件备份到 08_过程/_脚本备份/）")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_scripts_sync)
 
     a = ap.parse_args()
     a.func(a)
