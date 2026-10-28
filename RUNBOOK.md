@@ -151,6 +151,55 @@ $V job-show 洁斌 S05
 
 ---
 
+## 三之二、一条龙出片（pipeline）
+
+上面那套 `job-set` 是**人工推进**用的；真出片用编排器，一条命令跑完 6~10 步。
+
+```bash
+V="python3 bin/vstudio.py"
+
+# ① 先算参数看看（不跑任何东西）
+$V algo 洁斌 S05                       # 片长/帧数/段数/留白，按文案字数估算
+$V algo 洁斌 S05 --mp 0.5 --segs 4     # 换档位、锁段数再算一遍
+
+# ② 提示词：AI 生成 → 过红线 → 落盘
+$V prompts 洁斌 S05 --gen              # 生成（未过红线则整批不落，被拒内容存 08_过程）
+$V prompts 洁斌 S05 --optimize         # 在现有基础上优化（旧版进 history）
+$V prompts 洁斌 S05 --set 2 --text "…" # 手动微调第 2 段（同样过红线）
+$V prompts 洁斌 S05                    # 看当前提示词
+
+# ③ 跑流水线
+$V pipeline 洁斌 S05 --tier fast       # 低分辨率试跑（544x960，约 5 分钟）
+$V pipeline 洁斌 S05 --tier std        # 正式档（864x1536，20 分钟左右）
+$V pipeline 洁斌 S05 --mode step       # 每步确认（回车/s 跳过/q 退出）
+$V pipeline 洁斌 S05 --from video      # 从某步接着跑（断点续跑）
+$V pipeline 洁斌 S05 --dry             # 只打印命令，不执行
+```
+
+**断点续跑**靠"产物在不在"判断，不靠记忆：产物已存在就跳过，加 `--force` 才重跑。
+每跑一次在 `08_过程/<套次>/pipeline-<时间>.json` 留一份日志（命令/耗时/产物/退出码）。
+
+**档位**（`config/pipeline.json` 的 `tiers`）：
+
+| 档位 | 分辨率 | 用途 |
+|---|---|---|
+| `fast` | 544x960 (0.5MP) | 验提示词/分段/口型。**不能**验清晰度与曝光 |
+| `pilot` | 864x1536 | 只出第 1 段，正式分辨率验画面细节 |
+| `std` | 864x1536 | ★ 正式出片 |
+| `high` | 864x1536 | 留位（后续接二采/长片参数） |
+
+**自适应**（`bin/studio_algo.py`，算法已抽回引擎，IP 只留参数）：
+- 总帧数吸附到 `5+17n`（H3 采样器硬约束）
+- 单段上限按**实际渲染面积**反比算（1.26MP → 141 帧；0.5MP → 192 帧）
+- 段数按目标段长（默认 8s）自适应，切点天生落在 17 的倍数上
+- 音频前后自动留白（前 ~0.28s / 后 ~0.56s，随片长浮动）——**SRT 是在留白后的音频上做的，
+  所以字幕时间轴自动带上偏移，不用再挪**
+- 配乐增益随片长后退（>45s −7dB，>90s −8dB）
+
+流程定义全在 `config/pipeline.json`，**改它就是改流程**，改完先 `--dry` 跑一次。
+
+---
+
 ## 四、让我和其他 AI 调用
 
 **方式 A**：我直接用 Bash 调 CLI，加 `--json` 拿结构化结果。零配置，现在就能用。
@@ -182,6 +231,10 @@ $V job-show 洁斌 S05
 | `job-show <ip> <Sxx>` | 一套的详情 |
 | `job-set <ip> <Sxx> <阶段> [ok/fail] [--artifact 路径] [--note 备注]` | 推进 |
 | `guard [ip]` | 开工自检（缺素材非零退出） |
+| `pipeline <ip> <套次> [--tier fast\|std\|pilot\|high] [--mode auto\|step] [--from X] [--to Y] [--dry] [--force] [--segs N] [--grid 9,10,7]` | 一条龙出片（见三之二） |
+| `prompts <ip> <套次> [--gen\|--optimize\|--show] [--set N --text "…"] [--dry]` | 提示词工作台（AI 生成/优化/微调，过红线才落盘） |
+| `algo <ip> <套次> [--sec 秒] [--mp 1.26] [--segs N]` | 自适应参数预览（帧数/段数/留白/配乐） |
+| `scripts-diff [--base IP]` | 各 IP 脚本偏离比对（谁改了什么、哪些能抽回引擎） |
 | `scripts [ip]` | 该 IP 能跑的生产脚本 |
 | `llm "…"` | 走 LLM 路由（6 家自动切换） |
 | `index [--write]` | 重建索引 / 给旧套次补 job.json |

@@ -43,3 +43,6 @@ jobs.index.json
 # 字幕样式等中间产物
 orchestration/subtitles/
 OpenMontage
+
+# LLM 路由的运行时状态（冷却时间戳），不该进版本库
+config/.llm_state.json

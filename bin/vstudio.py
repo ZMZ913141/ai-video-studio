@@ -727,6 +727,147 @@ def cmd_status(a):
         print(f"   {k:<10} {v}")
 
 
+def cmd_pipeline(a):
+    """一条龙出片 —— 转发给 bin/pipeline.py（流程定义在 config/pipeline.json）"""
+    import pipeline
+    argv = [a.ip, a.set]
+    for k in ("mode", "tier", "start", "end", "segs", "grid"):
+        v = getattr(a, k, None)
+        if v is not None:
+            argv += ["--" + k.replace("start", "from").replace("end", "to"), str(v)]
+    for k in ("dry", "force", "json"):
+        if getattr(a, k, False):
+            argv.append("--" + k)
+    sys.exit(pipeline.main(argv) or 0)
+    # pipeline.main 内部 sys.exit，这里只是兜底
+
+
+def cmd_prompts(a):
+    """提示词工作台 —— 转发给 bin/prompts.py"""
+    import prompts
+    argv = [a.ip, a.set]
+    for k in ("show", "gen", "optimize", "dry", "json"):
+        if getattr(a, k, False):
+            argv.append("--" + k)
+    if a.seg is not None:
+        argv += ["--set", str(a.seg)]
+    if a.text:
+        argv += ["--text", a.text]
+    prompts.main(argv)
+
+
+def cmd_algo(a):
+    """自适应参数预览：给定片长/档位，算帧数网格、段数、留白、配音增益"""
+    import studio_algo as A
+    sec = a.sec
+    if sec is None:
+        e = resolve_ip(a.ip)
+        sets = list_sets(e["path"])
+        name = a.set if a.set in sets else \
+            next((s for s in sets if s.startswith(a.set)), None)
+        if not name:
+            die(f"没有这套：{a.set}（现有 {' / '.join(sets) or '无'}）")
+        # 没给时长就按文案字数估（ip.json 记的约 3.85 字/s）
+        base = os.path.join(e["path"], opus_dirs(e["path"]).get("05", "05_文案"), name)
+        txt = None
+        for pat in ("*字幕文本*.txt", "*.txt", "*.md"):
+            import glob as _g
+            fs = [f for f in sorted(_g.glob(os.path.join(base, pat)))
+                  if not os.path.basename(f).startswith("job")]
+            if fs:
+                txt = fs[0]
+                break
+        if not txt:
+            die(f"没给 --sec 也找不到文案：{base}")
+        n = len(re.sub(r"\s", "", open(txt, encoding="utf-8-sig").read()))
+        sec = n / 3.85
+    p = A.plan(sec, a.mp, target_segs=a.segs)
+    if a.json:
+        print(json.dumps(p, ensure_ascii=False, indent=2))
+        return
+    print(f"{a.mp}MP → {p['res'][0]}x{p['res'][1]}（实际 {p['real_mp']}MP）"
+          f"{'  [快速档]' if p['fast'] else ''}")
+    print(f"  片长 {sec:.1f}s  留白 前 {p['pad_head']}s / 后 {p['pad_tail']}s"
+          f"  → 对齐后 {p['padded_sec']}s")
+    print(f"  总帧 {p['total_frames']}（{p['total_sec']}s，≡5 mod 17）"
+          f"  单段上限 {p['maxlen']}")
+    print(f"  {p['segs']} 段  格数 {'/'.join(str(x) for x in p['grid'])}"
+          f"  切点 {p['cuts_sec']}")
+    print(f"  段长 {p['seg_sec']}   配乐 {p['bgm_gain']} dB")
+    print(f"\n  SEG_GRID={','.join(str(x) for x in p['grid'])}"
+          f"  （手动锁定时用；不传则由脚本按停顿自适应）")
+
+
+def cmd_scripts_diff(a):
+    """脚本偏离比对：50 个 IP 时，谁改了什么、哪些该抽回引擎"""
+    import hashlib
+    reg = load_registry()
+    ips = [e for e in reg.get("ips", [])
+           if os.path.isdir(os.path.join(e["path"], "03_生产脚本"))]
+    if not ips:
+        die("没有任何 IP 带 03_生产脚本")
+    names = [e["name"] for e in ips]
+    base_e = None
+    if a.base:
+        base_e = resolve_ip(a.base)
+    else:
+        base_e = ips[0]
+
+    table = {}          # file -> {ip: (hash, path)}
+    for e in ips:
+        d = os.path.join(e["path"], "03_生产脚本")
+        for fn in sorted(os.listdir(d)):
+            if not fn.endswith(".py"):
+                continue
+            p = os.path.join(d, fn)
+            with open(p, "rb") as f:
+                table.setdefault(fn, {})[e["name"]] = (hashlib.md5(f.read()).hexdigest(), p)
+
+    only, same, fork = [], [], []
+    for fn, m in sorted(table.items()):
+        if len(m) == 1:
+            only.append((fn, list(m)[0]))
+            continue
+        hs = {v[0] for v in m.values()}
+        if len(hs) == 1:
+            same.append(fn)
+        else:
+            fork.append(fn)
+
+    if a.json:
+        print(json.dumps({"base": base_e["name"], "ips": names,
+                          "only_one": only, "identical": same, "forked": fork},
+                         ensure_ascii=False, indent=2))
+        return
+
+    print(f"基准 {base_e['name']}   参与比对 {len(ips)} 个 IP：{'/'.join(names)}\n")
+    print(f"① 全一致 {len(same)} 个（内容逐字节相同 → 可以安全抽回引擎，各 IP 只留参数）")
+    for fn in same:
+        print(f"   {fn}")
+    if fork:
+        print(f"\n② 已分叉 {len(fork)} 个（同名不同内容 —— 判断是参数差异还是算法差异）")
+        for fn in fork:
+            bp = os.path.join(base_e["path"], "03_生产脚本", fn)
+            if not os.path.exists(bp):
+                print(f"   {fn:<22} 基准没有这个文件")
+                continue
+            import difflib
+            bl = open(bp, encoding="utf-8", errors="ignore").read().splitlines()
+            for e in ips:
+                p = os.path.join(e["path"], "03_生产脚本", fn)
+                if not os.path.exists(p):
+                    continue
+                ol = open(p, encoding="utf-8", errors="ignore").read().splitlines()
+                nd = len([x for x in difflib.unified_diff(bl, ol, n=0)
+                          if x[:1] in "+-" and x[:3] not in ("+++", "---")])
+                if nd:
+                    print(f"   {fn:<22} {e['name']} 差 {nd} 行")
+    if only:
+        print(f"\n③ 只有个别 IP 有 {len(only)} 个")
+        for fn, ipname in only:
+            print(f"   {fn:<22} 仅 {ipname}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="洁斌资产 · 视频生产总控")
     ap.add_argument("--json", action="store_true", help="输出 JSON（给 agent 用）")
@@ -811,6 +952,42 @@ def main():
 
     p = sub.add_parser("status", help="总览：IP + 套次 + 服务")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("pipeline", help="一条龙出片（流程见 config/pipeline.json）")
+    p.add_argument("ip", nargs="?", default="洁斌")
+    p.add_argument("set")
+    p.add_argument("--mode", default="auto", choices=["auto", "step"])
+    p.add_argument("--tier", default=None, help="fast/pilot/std/high")
+    p.add_argument("--from", dest="start")
+    p.add_argument("--to", dest="end")
+    p.add_argument("--segs", type=int)
+    p.add_argument("--grid")
+    p.add_argument("--dry", action="store_true")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_pipeline)
+
+    p = sub.add_parser("prompts", help="提示词工作台（AI 生成/优化/微调，过红线才落盘）")
+    p.add_argument("ip", nargs="?", default="洁斌")
+    p.add_argument("set")
+    p.add_argument("--show", action="store_true")
+    p.add_argument("--gen", action="store_true")
+    p.add_argument("--optimize", action="store_true")
+    p.add_argument("--set", dest="seg", type=int, help="手动改第 N 段")
+    p.add_argument("--text", help="与 --set 同用的提示词")
+    p.add_argument("--dry", action="store_true")
+    p.set_defaults(func=cmd_prompts)
+
+    p = sub.add_parser("algo", help="自适应参数预览（帧数/段数/留白）")
+    p.add_argument("ip", nargs="?", default="洁斌")
+    p.add_argument("set")
+    p.add_argument("--sec", type=float, help="片长秒（不给则按文案字数估）")
+    p.add_argument("--mp", type=float, default=1.26)
+    p.add_argument("--segs", type=int)
+    p.set_defaults(func=cmd_algo)
+
+    p = sub.add_parser("scripts-diff", help="各 IP 脚本偏离比对")
+    p.add_argument("--base", help="基准 IP（默认第一个）")
+    p.set_defaults(func=cmd_scripts_diff)
 
     a = ap.parse_args()
     a.func(a)

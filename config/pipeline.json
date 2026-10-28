@@ -1,0 +1,282 @@
+{
+  "_schema": "pipeline/1.0",
+  "_说明": "流水线编排的唯一定义。UI/CLI/MCP 都只读这一份，不在代码里另写一份流程。改这个文件就等于改流程，改完务必 DRY 跑一次。",
+  "pythons": {
+    "_note": "两套解释器：numpy 脚本（mix_bgm / make_bgm / audio_check）必须走 default 环境，其余走 3.13.12。",
+    "std": "/home/qmr/.workbuddy/binaries/python/versions/3.13.12/bin/python3",
+    "numpy": "/home/qmr/.workbuddy/binaries/python/envs/default/bin/python"
+  },
+  "ffmpeg": "/home/qmr/.workbuddy/binaries/python/envs/default/lib/python3.13/site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2",
+  "tiers": {
+    "_note": "出片档位。mp 决定分辨率 → 决定 MAXLEN → 决定段数，全是自适应算出来的（bin/studio_algo.py）。",
+    "fast": {
+      "mp": 0.5,
+      "note": "快速试跑：只验提示词/分段/口型，不能验清晰度和曝光。产物带 _FAST 标记。"
+    },
+    "pilot": {
+      "mp": 1.26,
+      "pilot": "1",
+      "note": "正式分辨率只出第 1 段，验画面细节与身份一致性。"
+    },
+    "std": {
+      "mp": 1.26,
+      "note": "★ 正式出片档（864x1536）。"
+    },
+    "high": {
+      "mp": 1.26,
+      "note": "与 std 同分辨率，留作后续接二采/长片的参数位。"
+    }
+  },
+  "defaults": {
+    "target_seg_secs": 8.0,
+    "overlap": 5,
+    "maxline": 12,
+    "crf": 18,
+    "tier": "std"
+  },
+  "steps": [
+    {
+      "id": "tts",
+      "stage": "音频",
+      "desc": "文案 → TTS 定板音频（音色来自本 IP 的 ip.json）",
+      "py": "std",
+      "script": "{scripts}/gen_tts.py",
+      "argv": [
+        "{script_txt}",
+        "{dir06}"
+      ],
+      "flag": [
+        "--tag",
+        "{jid}"
+      ],
+      "env": {
+        "TAG": "{jid}"
+      },
+      "out_glob": "{dir06}/{jid}_音频_定板_*.mp3",
+      "set_var": "audio_tts"
+    },
+    {
+      "id": "pad",
+      "stage": "音频",
+      "desc": "音频前后加留白（自适应时长），避免开头结尾仓促",
+      "builtin": "audio_pad",
+      "out_glob": "{dir06}/{jid}_音频_留白_*.mp3",
+      "set_var": "audio",
+      "depends": [
+        "audio_tts"
+      ]
+    },
+    {
+      "id": "srt",
+      "stage": "字幕",
+      "desc": "ASR 强制对齐出 SRT（留白后的音频 → 时间轴自动带偏移）",
+      "py": "std",
+      "script": "{scripts}/make_srt_asr.py",
+      "argv": [
+        "{audio}",
+        "{script_txt}",
+        "{dir07}/{set}.srt"
+      ],
+      "flag": [
+        "--maxline",
+        "{maxline}"
+      ],
+      "out_glob": "{dir07}/{set}.srt",
+      "set_var": "srt",
+      "depends": [
+        "audio"
+      ]
+    },
+    {
+      "_id_note": "★ 出片前先卸模型：ComfyUI 的内存是累积的（--high-ram + --async-offload 2 会用内存换速度），跑几小时后可用内存一路往下掉，门槛 40G 会被卡住。实测卸一次能从 39.6G 回到 43.3G —— 这一条把「跑一半被拒」变成了「开跑就稳」。",
+      "id": "free",
+      "stage": "视频",
+      "desc": "卸载 ComfyUI 模型缓存，腾出内存再提交",
+      "py": "std",
+      "script": "{scripts}/comfy_free.py",
+      "argv": [],
+      "optional": true
+    },
+    {
+      "id": "video",
+      "stage": "视频",
+      "desc": "H3 出片（分段由脚本按停顿 DP 自适应）",
+      "py": "std",
+      "script": "{scripts}/gen_video.py",
+      "argv": [],
+      "env": {
+        "SRT": "{srt}",
+        "AUDIO": "{audio}",
+        "TAG": "{jid}",
+        "MP": "{mp}",
+        "TARGET_SECS": "{segs}",
+        "OVERLAP": "{overlap}",
+        "PILOT": "{pilot}",
+        "DRY": "{dry}"
+      },
+      "_move_note": "gen_video.py 把产物写在自己的 03_生产脚本 目录里（历史如此）。编排器负责把它归位到 07_成片/<套次>/，否则断点续跑永远看不到它。",
+      "move_from": "{scripts}/{jid}_raw_*.mp4",
+      "move_to": "{dir07}",
+      "out_glob": "{dir07}/{jid}_raw_*.mp4",
+      "set_var": "raw",
+      "depends": [
+        "audio",
+        "srt"
+      ]
+    },
+    {
+      "id": "grade",
+      "stage": "后期",
+      "desc": "曝光校正 v7 曲线（压后段过曝）",
+      "py": "std",
+      "script": "{scripts}/finish_v6.py",
+      "argv": [
+        "{raw}",
+        "{dir07}/{jid}_成片_{audio_dur}s.mp4"
+      ],
+      "out_glob": "{dir07}/{jid}_成片_{audio_dur}s.mp4",
+      "set_var": "graded",
+      "depends": [
+        "raw"
+      ]
+    },
+    {
+      "id": "bgm",
+      "stage": "后期",
+      "desc": "合成垫底配乐（88 BPM 温暖器乐）",
+      "py": "numpy",
+      "script": "{scripts}/make_bgm.py",
+      "argv": [
+        "{dir07}/{jid}_bgm.wav",
+        "{audio_dur}"
+      ],
+      "out_glob": "{dir07}/{jid}_bgm.wav",
+      "set_var": "bgm"
+    },
+    {
+      "id": "mix",
+      "stage": "后期",
+      "desc": "人声对齐 + 混配乐 + 整片响度归一到 -16 LUFS",
+      "py": "numpy",
+      "script": "{scripts}/mix_bgm.py",
+      "argv": [
+        "{graded}",
+        "{bgm}",
+        "{dir07}/{jid}_成片_混音_{audio_dur}s.mp4",
+        "{bgm_gain}"
+      ],
+      "out_glob": "{dir07}/{jid}_成片_混音_{audio_dur}s.mp4",
+      "set_var": "mixed",
+      "depends": [
+        "graded",
+        "bgm"
+      ]
+    },
+    {
+      "id": "ass",
+      "stage": "字幕",
+      "desc": "SRT → 剪映质感 ASS（开场标题/关键词花字/结尾 CTA）",
+      "py": "std",
+      "script": "{scripts}/make_ass.py",
+      "argv": [
+        "{jid}",
+        "{srt}",
+        "{dir07}/{set}.ass",
+        "{res_w}",
+        "{res_h}"
+      ],
+      "out_glob": "{dir07}/{set}.ass",
+      "set_var": "ass",
+      "depends": [
+        "srt"
+      ]
+    },
+    {
+      "id": "burn",
+      "stage": "字幕",
+      "desc": "烧录字幕（先调色后烧字，顺序反了字幕对比度会毁）",
+      "py": "std",
+      "script": "{scripts}/burn_ass.py",
+      "argv": [
+        "{mixed}",
+        "{ass}",
+        "{dir07}/{jid}_成片_字幕版_{audio_dur}s.mp4"
+      ],
+      "flag": [
+        "--crf",
+        "{crf}"
+      ],
+      "out_glob": "{dir07}/{jid}_成片_字幕版_*.mp4",
+      "set_var": "final",
+      "depends": [
+        "mixed",
+        "ass"
+      ]
+    },
+    {
+      "id": "audit",
+      "stage": "验收",
+      "desc": "字幕同步自检（不阻断流水线，只报问题）",
+      "py": "std",
+      "script": "{tools}/srt_sync_audit.py",
+      "_argv_note": "用法是 <音频> <srt> <文案txt> —— 音频在前。写反了会直接退出码 1，看着像字幕有问题，其实只是参数错位。",
+      "argv": [
+        "{audio}",
+        "{srt}",
+        "{script_txt}"
+      ],
+      "optional": true
+    }
+  ],
+  "global_prompt": {
+    "_note": "★ 全局通用片段：所有 IP 共用（表情收敛、皮肤质感等）。它也必须过同一把红线校验 —— 否定式一律不收，只能正向描述。IP 自己的追加写在 05_文案/<套次>/prompts.json。",
+    "prefix": "表情幅度克制自然，眉部放松不上挑，眼神稳定看镜头，皮肤呈哑光质感，光线柔和均匀，画面干净通透",
+    "suffix": "",
+    "enabled": true
+  },
+  "guard": {
+    "_note": "提示词红线。AI 生成的提示词必须先过这一层才准落盘（铁律：护栏 assert 只在真跑过时才有用）。",
+    "negative_words_en": [
+      "no ",
+      "not ",
+      "never",
+      "without",
+      "avoid",
+      "don't",
+      "do not",
+      "free of",
+      "reduce",
+      "lessen",
+      "minus"
+    ],
+    "negative_words_cn": [
+      "不要",
+      "不许",
+      "不能",
+      "禁止",
+      "避免",
+      "去除",
+      "无需",
+      "没有",
+      "别 ",
+      "杜绝",
+      "防止",
+      "不够",
+      "不太",
+      "无瑕",
+      "不夸张"
+    ],
+    "require_if": {
+      "_note": "ip.json 里开了哪条规则，就要求提示词里出现对应正向词",
+      "no_frown": {
+        "words": [
+          "眉"
+        ],
+        "hint": "no_frown 已开启：必须显式写眉部放松，否则模型按「认真讲解」默认值会皱眉"
+      }
+    },
+    "banned_words_from": "ip.rules.banned_words",
+    "max_chars": 700
+  },
+  "_dep_note": "depends：上游变量比本步产物新 → 本步重做。「产物在」不等于「产物还有效」，留白后旧 SRT 就是典型。"
+}

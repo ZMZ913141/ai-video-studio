@@ -63,6 +63,11 @@ python3 bin/vstudio.py guard 洁斌  # 开工自检
 - **生成**：ComfyUI（FLUX2 / WAN2.2 / ACE-Step，换模型只丢 JSON）
 - **后处理**：Kinocut（带护栏 + Video Receipt）+ 剪映级字幕模块
 - **编排**：n8n（可视化、可触发可重试）
+- **IP 编排（本体系主力）**：
+  - `bin/vstudio.py` —— 总控 CLI（档案卡 / 套次 / 护栏 / 提示词 / 流水线）
+  - `bin/pipeline.py` —— 一条龙出片，流程全在 `config/pipeline.json`
+  - `bin/studio_algo.py` —— 自适应算法（帧数网格 / 分段 / 留白），**算法在引擎，IP 只留参数**
+  - `bin/prompt_guard.py` —— 提示词红线，AI 生成的提示词不过线就不落盘
 - **大脑**：OpenMontage skills（可选，自然语言驱动）
 - **已排除**：Kdenlive（手工 NLE，自动化链路不需要）
 
@@ -87,7 +92,17 @@ ai-video-studio/
 ├── bin/
 │   ├── install-docker.sh   # 一条龙装 docker（需你自己跑，要 sudo）
 │   ├── start-native.sh     # ★ 免 docker 启动
-│   └── llm-smoke.py        # LLM 供应商体检
+│   ├── llm-smoke.py        # LLM 供应商体检
+│   ├── vstudio.py          # ★ 总控 CLI（档案卡/套次/护栏/提示词/流水线）
+│   ├── pipeline.py         # ★ 一条龙编排器（流程见 config/pipeline.json）
+│   ├── studio_algo.py      # ★ 自适应算法（帧数 5+17n / 分段 / 留白）
+│   ├── prompts.py          # ★ 提示词工作台（AI 生成+红线校验+历史）
+│   ├── prompt_guard.py     # ★ 提示词红线校验（不过线不落盘）
+│   └── llm_router.py       # 多供应商 LLM 路由（6 家自动切换）
+├── config/
+│   ├── pipeline.json       # ★ 流水线定义：步骤/档位/全局提示词/红线
+│   ├── providers.json      # LLM 供应商与冷却
+│   └── llm.env             # key（600 权限，勿提交）
 ├── config/llm.env          # LLM 配置（已填好，600 权限，勿提交）
 ├── docs/FFMPEG.md          # ffmpeg 全局 vs 各自打包（重要）
 ├── docs/RESOURCE_GUARD.md  # ★ 崩溃判读 + 自动释放
