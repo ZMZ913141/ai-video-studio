@@ -556,6 +556,7 @@ $V algo 洁斌 S05                       # 片长/帧数/段数/留白，按文�
 $V algo 洁斌 S05 --mp 0.5 --segs 4     # 换档位、锁段数再算一遍
 
 # ② 提示词：AI 生成 → 过红线 → 落盘
+#    ⚠ 这份是中文分镜稿，**目前不参与出片**（见本页「提示词工作台产出的稿子目前不进片」）
 $V prompts 洁斌 S05 --gen              # 生成（未过红线则整批不落，被拒内容存 08_过程）
 $V prompts 洁斌 S05 --optimize         # 在现有基础上优化（旧版进 history）
 $V prompts 洁斌 S05 --set 2 --text "…" # 手动微调第 2 段（同样过红线）
@@ -568,10 +569,48 @@ $V pipeline 洁斌 S05 --tier std        # 正式档（864x1536）。实测 28.5
 $V pipeline 洁斌 S05 --mode step       # 每步确认（回车/s 跳过/q 退出）
 $V pipeline 洁斌 S05 --from video      # 从某步接着跑（断点续跑）
 $V pipeline 洁斌 S05 --dry             # 只打印命令，不执行
+$V pipeline 洁斌 S05 --from video --reseed        # 换种子，重赌一次画面
+$V pipeline 洁斌 S05 --from video --seed 881208001 # 用指定种子复现某一次
 ```
 
-**断点续跑**靠"产物在不在"判断，不靠记忆：产物已存在就跳过，加 `--force` 才重跑。
+### 重跑：三种，别再混成一个按钮（2026-10-29 定板）
+
+| 你要干的事 | 命令 | 它到底做什么 |
+|---|---|---|
+| **补跑**（改了什么重做什么） | `pipeline 洁斌 S05 --from tts` | 按「产物在不在 + 输入变没变」逐步判断，没变的跳过 |
+| **整个重做**（怀疑产物坏了） | `… --from video --to grade --force` | 不看输入，指定区间全重跑 |
+| **换种子**（同稿再赌一次画面） | `… --from video --reseed` | 换随机种子重出画面；`--seed N` 可复现某一次 |
+
+**「输入变没变」靠 `inputs` 声明**（`config/pipeline.json` 每步可写）：
+depends 只认「上一步的产物」，**认不出人改过的源文件**。改了 `05_文案/<套次>/*.txt`
+却一路 ⏭ 跳过、交出去还是旧片 —— 就是这个缺口。现在 tts 声明了
+`inputs: ["{script_txt}"]`，改文案会自动从配音重做，后面靠 depends 级联。
+
+**种子**：以前写死在 `gen_video.py`（881208001），pipeline 不传也不显示 —— 于是
+「再跑一遍」= 同稿 + 同音频 + 同种子 = 几乎一样的画面，十几分钟 GPU 白烧。
+现在真值在 `config/pipeline.json` 的 `defaults.seed`，每次真跑记一行到
+`08_过程/<套次>/runs.jsonl`（种子/档位/起止步骤/成败）。都不给参数就沿用上次那颗，
+所以在界面里点「挑一颗旧种子」= 照着那次重跑。
+
+⚠ `--force` 与 `--reseed` 都会让 video 重出。只想看计划就先加 `--dry`。
+
+**重做成功后编排器会清掉本步同一 glob 的旧版本**（TTS 产物名带时长，22.2s → 21.8s
+会多出一份，交付时不知道用哪个）。只清本步 glob 命中的、早于本次开跑的，别的步骤不碰。
+
 每跑一次在 `08_过程/<套次>/pipeline-<时间>.json` 留一份日志（命令/耗时/产物/退出码）。
+
+### ★ 提示词工作台产出的稿子目前不进片（2026-10-29 查清）
+
+`05_文案/<套次>/prompts.json` 是**中文分镜稿**，出片提示词却是
+`gen_video.py` 的**英文骨架模板** + `ip.json` 的 `video.prompt_vars` 拼的 ——
+两条线，没接上。所以：改稿子不会改画面，重跑视频纯烧 GPU。
+
+为什么不能直接接：骨架是 H3 的受理格式（`subject_definitions` / `summary` /
+`clean_plate` 这些节必须原样），而中文混进英文骨架会被模型当成「该上屏的字」——
+S04 就这么烧过一版字幕（见 `templates/scripts/gen_video.py` 里那段实测记录）。
+
+这个事实写在 `config/pipeline.json` 的 `video.reads_prompts: false`，界面据此显示
+警示条。**真接上了再把它改成 true**，别在别处另写一份判断。
 
 **档位**（`config/pipeline.json` 的 `tiers`）：
 

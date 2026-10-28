@@ -378,7 +378,16 @@ def do_set(e, setname, idx, text, as_json=False):
         sys.exit(1)
     hit["prompt"] = text
     hit["manual"] = True
+    # write_prompts 还会对「分字段 + prompt 拼起来的整体」再过一次线。
+    # 以前这一句的返回值被忽略 —— 整体没过线时其实没落盘，却照样打印「✓ 已更新」，
+    # 人改完看到成功、回头发现文件还是旧的。
     ok2, iss2, p2 = write_prompts(ip_root, setname, data, "manual")
+    if not ok2:
+        print("✗ 整段拼起来仍未过红线，没落盘：")
+        for x in iss2:
+            print(f"   [{x['i']}] " + "；".join(x["issues"]))
+        print(f"   被拒内容已存 {p2}")
+        sys.exit(1)
     print(f"✓ 第 {idx} 段已更新 → {p2}")
 
 

@@ -32,7 +32,9 @@
     "overlap": 5,
     "maxline": 12,
     "crf": 18,
-    "tier": "std"
+    "tier": "std",
+    "seed": 881208001,
+    "_seed_note": "种子的真值在这里（以前写死在 gen_video.py 里，改不了也看不见）。--seed 指定可复现某一次；--reseed 掷新的；都不给就沿用 08_过程/<套次>/runs.jsonl 里记的上一次。"
   },
   "steps": [
     {
@@ -52,6 +54,10 @@
       "env": {
         "TAG": "{jid}"
       },
+      "inputs": [
+        "{script_txt}"
+      ],
+      "_inputs_note": "★ 文案 txt 是本步真正的上游。depends 只认「上一步的产物」，认不出「人改过的源文件」—— 不声明它，改完文案再跑会一路 ⏭ 跳过，交出去的还是旧片。",
       "out_glob": "{dir06}/{jid}_音频_定板_*.mp3",
       "set_var": "audio_tts"
     },
@@ -112,9 +118,12 @@
         "TARGET_SECS": "{segs}",
         "OVERLAP": "{overlap}",
         "PILOT": "{pilot}",
-        "DRY": "{dry}"
+        "DRY": "{dry}",
+        "SEED": "{seed}"
       },
       "_move_note": "gen_video.py 把产物写在自己的 03_生产脚本 目录里（历史如此）。编排器负责把它归位到 07_成片/<套次>/，否则断点续跑永远看不到它。",
+      "_prompts_note": "★ reads_prompts=false 是**引擎事实**，不是配置项：出片提示词由 gen_video.py 的英文骨架模板 + ip.json 的 video.prompt_vars 拼成，05_文案/<套次>/prompts.json（提示词工作台产出的中文分镜稿）目前**不参与**出片。界面据此显示警示条，别让人以为改了稿子就该重跑。真接上了再改这里。",
+      "reads_prompts": false,
       "move_from": "{scripts}/{jid}_raw_*.mp4",
       "move_to": "{dir07}",
       "out_glob": "{dir07}/{jid}_raw_*.mp4",

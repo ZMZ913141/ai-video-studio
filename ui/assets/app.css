@@ -485,6 +485,30 @@ svg.ico { width: 13px; height: 13px; flex: 0 0 auto; }
 .pseg .hd b { color: var(--accent-2); font-family: var(--mono); }
 .pseg .tx { font-size: 12px; color: var(--tx-1); line-height: 1.65; word-break: break-word; }
 .pseg.bad { border-color: rgba(255, 92, 122, .45); background: rgba(255, 92, 122, .07); }
+/* 台词是「这段画面配哪句话」的唯一锚点，必须全文、不能截断 */
+.pseg .line {
+  font-size: 12.5px; color: var(--tx-2); line-height: 1.7;
+  padding: 7px 9px; margin: 7px 0 8px; border-radius: 0 7px 7px 0;
+  border-left: 2px solid var(--stroke-hi); background: rgba(255, 255, 255, .025);
+}
+.pseg .tx { white-space: pre-wrap; }
+.pseg .kv { display: flex; gap: 7px; font-size: 11.5px; line-height: 1.65; margin-top: 5px; }
+.pseg .kv .k { flex: 0 0 26px; color: var(--tx-3); }
+.pseg .kv .v { flex: 1; color: var(--tx-2); }
+.pseg .tag {
+  font-family: var(--mono); font-size: 10px; padding: 1px 5px; border-radius: 5px;
+  background: rgba(255, 255, 255, .05); color: var(--tx-3); font-weight: 400;
+}
+.pseg .issues { font-size: 11.5px; color: var(--err); line-height: 1.6; margin-top: 6px; }
+.pseg .pedit { margin-top: 9px; }
+.pseg .pedit textarea {
+  width: 100%; min-height: 96px; resize: vertical; box-sizing: border-box;
+  padding: 9px 10px; border-radius: var(--r-sm); line-height: 1.7;
+  background: rgba(0, 0, 0, .34); border: 1px solid var(--stroke); color: var(--tx-1);
+  font-family: inherit; font-size: 12px;
+}
+.pseg .pedit textarea:focus { outline: none; border-color: var(--accent); }
+.chip.bad { background: rgba(255, 92, 122, .12); border-color: rgba(255, 92, 122, .32); color: var(--err); }
 
 /* ---------- 9. 右栏：设置 / 检查器 ---------- */
 .tabs { display: flex; gap: 5px; padding: 4px; border-radius: 11px; background: rgba(0, 0, 0, .24); margin-bottom: 12px; }

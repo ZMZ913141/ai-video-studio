@@ -735,11 +735,11 @@ def cmd_pipeline(a):
     """一条龙出片 —— 转发给 bin/pipeline.py（流程定义在 config/pipeline.json）"""
     import pipeline
     argv = [a.ip, a.set]
-    for k in ("mode", "tier", "start", "end", "segs", "grid"):
+    for k in ("mode", "tier", "start", "end", "segs", "grid", "seed"):
         v = getattr(a, k, None)
         if v is not None:
             argv += ["--" + k.replace("start", "from").replace("end", "to"), str(v)]
-    for k in ("dry", "force", "json"):
+    for k in ("dry", "force", "reseed", "json"):
         if getattr(a, k, False):
             argv.append("--" + k)
     sys.exit(pipeline.main(argv) or 0)
@@ -1052,7 +1052,11 @@ def main():
     p.add_argument("--segs", type=int)
     p.add_argument("--grid")
     p.add_argument("--dry", action="store_true")
-    p.add_argument("--force", action="store_true")
+    p.add_argument("--force", action="store_true",
+                   help="已有产物也重做（不看输入变没变）")
+    p.add_argument("--seed", type=int, help="指定种子，复现某一次的画面")
+    p.add_argument("--reseed", action="store_true",
+                   help="换一个新种子（同一套提示词再赌一次画面）")
     p.set_defaults(func=cmd_pipeline)
 
     p = sub.add_parser("prompts", help="提示词工作台（AI 生成/优化/微调，过红线才落盘）")

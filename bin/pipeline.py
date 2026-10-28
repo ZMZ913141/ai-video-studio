@@ -27,6 +27,7 @@ import argparse
 import glob
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -101,7 +102,8 @@ def pick_script_txt(d05):
 # ---------------- 编排器 ----------------
 class Pipeline:
     def __init__(self, ip_entry, setname, cfg, tier="std", mode="auto",
-                 dry=False, force=False, segs=None, grid=None, verbose=True):
+                 dry=False, force=False, segs=None, grid=None, verbose=True,
+                 seed=None, reseed=False):
         self.e = ip_entry
         self.set = setname
         self.cfg = cfg
@@ -112,6 +114,8 @@ class Pipeline:
         self.opt_segs = segs
         self.opt_grid = grid
         self.verbose = verbose
+        self.want_seed = seed
+        self.reseed = reseed
         self.log = {"ip": ip_entry["name"], "set": setname, "tier": tier,
                     "mode": mode, "dry": dry,
                     "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -151,12 +155,90 @@ class Pipeline:
         self.script_txt = pick_script_txt(self.dirs["05"])
         if self.script_txt:
             self.ctx["script_txt"] = self.script_txt
+        # ★ 种子：以前写死在 gen_video.py 里（881208001），pipeline 不传也不显示。
+        #   后果是「重跑一遍」= 同一提示词 + 同一音频 + 同一种子 = 几乎一样的画面，
+        #   十几分钟 GPU 白烧，人还以为自己换了一版。现在种子是编排器的一等参数。
+        self.seed, self.seed_prev = self.resolve_seed()
+        self.ctx["seed"] = str(self.seed)
+        self.log["seed"] = self.seed
+        self.log["seed_prev"] = self.seed_prev
         # ★ 先把**已存在**的产物填进 ctx，再算自适应参数，再补填一次
         #   （grade/mix/burn 的 out_glob 带 {audio_dur}，要等音频时长出来才认得）。
         #   不这么做的话，用 --from 从中间步骤起跑就会「找不到前置产物」。
         self.prefill()
         self.refresh()
         self.prefill()
+
+    # -------- 种子：记录 + 解析 --------
+    def runs_path(self):
+        d = self.dirs["08"]
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "runs.jsonl")
+
+    def last_seed(self):
+        """上一轮真跑用的种子。没有记录 → None（第一次跑）。"""
+        p = self.runs_path()
+        if not os.path.exists(p):
+            return None
+        last = None
+        try:
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except Exception:
+                        continue
+                    if d.get("seed"):
+                        last = int(d["seed"])
+        except OSError:
+            return None
+        return last
+
+    def resolve_seed(self):
+        """本次用哪个种子。返回 (本次, 上次)。
+
+        --seed N  指定 → 可复现某一次的画
+        --reseed  掷一个新的 → 想用同一套提示词再赌一次画面
+        都不给    沿用上次的 → 这才是「原样重跑」该有的语义（同一输入同一输出）
+        """
+        dflt = int(self.cfg.get("defaults", {}).get("seed", 881208001))
+        prev = self.last_seed()
+        if self.want_seed:
+            return int(self.want_seed), prev
+        if self.reseed:
+            return random.randint(1, 2147483647), prev
+        return (prev or dflt), prev
+
+    @property
+    def seed_changed(self):
+        """画面要不要重出。
+
+        ★ 人显式给了 --seed / --reseed 就算「变了」，哪怕上次没记录过种子。
+          否则第一次用 --reseed 时 prev 是 None，判断成「没变」→ video 被跳过，
+          人以为换了种子，拿到的还是原来那条片（实测踩到）。
+        """
+        if self.want_seed or self.reseed:
+            return True
+        return self.seed_prev is not None and int(self.seed) != int(self.seed_prev)
+
+    def record_run(self, start, end, ok):
+        """每次真跑记一行。界面上「这套片用过哪几个种子、哪次出的最好」全靠它。"""
+        if self.dry:
+            return
+        rec = {"at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+               "seed": int(self.seed), "tier": self.tier,
+               "from": start, "to": end, "ok": bool(ok),
+               "steps": [{"id": r["id"], "status": r.get("status"),
+                          "out": os.path.basename(r.get("out") or "")}
+                         for r in self.log.get("steps", [])]}
+        try:
+            with open(self.runs_path(), "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except OSError as ex:
+            print(f"  ⚠ 跑批记录写不进去：{ex}")
 
     def prefill(self):
         """扫描各步骤产物，把还活着的填进 ctx 变量（断点续跑的前提）。"""
@@ -260,6 +342,26 @@ class Pipeline:
                             os.path.getmtime(src) > os.path.getmtime(hit) + 1:
                         stale = (dep, os.path.basename(src))
                         break
+            # ★ 源文件也是上游：文案 txt 改了，TTS 必须重配，不然整条链会用着
+            #   旧音频一路「跳过」到底 —— 日志全是 ⏭，人以为跑过了，交出去的还是旧片。
+            #   depends 只认「上一步的产物」，认不出「人改过的源文件」，所以要单独声明。
+            if hit and not stale:
+                for pat in st.get("inputs", []):
+                    m2 = set()
+                    raw = render(pat, self.ctx, m2) if "{" in str(pat) else str(pat)
+                    if m2 or not raw:
+                        continue
+                    for f in glob.glob(raw):
+                        if os.path.isfile(f) and \
+                                os.path.getmtime(f) > os.path.getmtime(hit) + 1:
+                            stale = ("input", os.path.basename(f))
+                            break
+                    if stale:
+                        break
+            # ★ 换了种子，画面必然要重出。不把这条接上的话，人点「换种子跑」
+            #   会看到 video 被跳过（产物在），只有后面几步重做 —— 白跑还骗人。
+            if hit and not stale and sid == "video" and self.seed_changed:
+                stale = ("seed", f"{self.seed_prev} → {self.seed}")
             if hit and not stale:
                 rec["status"] = "skipped"
                 rec["out"] = hit
@@ -350,6 +452,19 @@ class Pipeline:
                 print(f"  ✓ {sid} 完成"
                       + (f" → {os.path.basename(hit)}" if hit else "")
                       + (f"  ({rec['sec']}s)" if rec.get("sec") else ""))
+                # 重做之后旧版本还躺在同一目录（TTS 产物名带时长：22.2s → 21.8s
+                # 就会多出一份，交付时看到两个版本不知道用哪个）。
+                # 只清本步 glob 命中的、早于本次开跑的；别的步骤一概不碰 ——
+                # 07_成片 里同一个 jid 还有 raw/成片/混音/字幕版好几种形态。
+                if out and hit and not self.dry:
+                    for f in glob.glob(out):
+                        try:
+                            if os.path.isfile(f) and os.path.abspath(f) != os.path.abspath(hit) \
+                                    and os.path.getmtime(f) < rec["t0"] - 1:
+                                os.remove(f)
+                                print(f"    清掉本步的旧版本：{os.path.basename(f)}")
+                        except OSError:
+                            pass
         self.log["steps"].append(rec)
         self.refresh()
         return rec
@@ -417,6 +532,19 @@ class Pipeline:
         if self.ctx.get("pad_head"):
             print(f"  音频留白 前 {self.ctx['pad_head']}s / 后 {self.ctx['pad_tail']}s"
                   f"  配乐比人声低 {self.ctx['bgm_offset']} LU")
+        # 种子必须显示出来：不显示的话，人不知道自己这版和上版是不是同一种子，
+        # 「怎么重跑都是同一张脸」就会变成玄学。
+        if self.reseed:
+            sd_tag = "（新掷的）"
+        elif self.want_seed:
+            sd_tag = f"（指定；上次 {self.seed_prev}）" if self.seed_prev else "（指定）"
+        elif self.seed_prev:
+            sd_tag = f"（沿用上次 {self.seed_prev}）"
+        else:
+            sd_tag = "（配置默认，这套片还没跑过）"
+        print(f"  种子 {self.seed}{sd_tag}"
+              + ("  ← 换过了，video 及下游会重出" if self.seed_changed
+                 else "  ← 没换，画面会跟上次几乎一样" if self.seed_prev else ""))
         if not self.script_txt:
             print("  ⚠ 没找到文案 txt —— tts/srt 两步会失败")
 
@@ -431,6 +559,9 @@ class Pipeline:
                 self.sync_job()
             except Exception as ex:      # 同步失败不该让出片结果变成失败
                 print(f"  ⚠ job.json 同步失败：{ex}")
+            self.record_run(start, end,
+                            not [r for r in self.log["steps"]
+                                 if r.get("status") == "failed"])
         return self.summary()
 
     def sync_job(self):
@@ -488,7 +619,12 @@ def main(argv=None):
     ap.add_argument("--from", dest="start")
     ap.add_argument("--to", dest="end")
     ap.add_argument("--dry", action="store_true")
-    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="已有产物也重跑（不看输入有没有变，一律重做）")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="指定种子：同一个种子能复现同一次的画面")
+    ap.add_argument("--reseed", action="store_true",
+                    help="换一个新种子重出画面（同一套提示词再赌一次）")
     ap.add_argument("--segs", type=int, help="强制段数（不给则按时长自适应）")
     ap.add_argument("--grid", help="手动给 17 格数，如 9,10,7,7,11,9")
     ap.add_argument("--json", action="store_true")
@@ -506,7 +642,8 @@ def main(argv=None):
         a.set = hit[0]
 
     p = Pipeline(e, a.set, cfg, tier=tier, mode=a.mode, dry=a.dry,
-                 force=a.force, segs=a.segs, grid=a.grid)
+                 force=a.force, segs=a.segs, grid=a.grid,
+                 seed=a.seed, reseed=a.reseed)
     r = p.run(start=a.start, end=a.end)
     if a.json:
         print(json.dumps(r, ensure_ascii=False, indent=2))

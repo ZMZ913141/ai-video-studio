@@ -703,10 +703,29 @@ def build_exec(b, want_result=False):
             v = (b.get(k) or "").strip()
             if v:
                 argv += ["--" + k, v]
+        # 重跑分三种，界面上必须能分开选 —— 混成「重跑」一个按钮，
+        # 人永远不知道自己点的是「什么都不做」还是「白烧二十分钟 GPU」：
+        #   补跑（默认）：输入没变就跳过，改了文案才从配音重做
+        #   force       ：不看输入，全部重做
+        #   reseed      ：换种子重出画面（video 及下游）
+        if b.get("force"):
+            argv.append("--force")
+        if b.get("reseed"):
+            argv.append("--reseed")
+        sd = b.get("seed")
+        if sd not in (None, ""):
+            try:
+                argv += ["--seed", str(int(sd))]
+            except Exception:
+                raise ValueError(f"种子要整数：{sd}")
         if b.get("dry"):
             argv.append("--dry")
         tag = f" {b.get('from')}" if b.get("from") else ""
         tag += f"→{b.get('to')}" if b.get("to") else ""
+        if b.get("reseed"):
+            tag += " 换种子"
+        elif b.get("force"):
+            tag += " 全部重做"
         # --dry 只算计划、不提交 GPU，所以不算「重活」，不必二次确认。
         # 反过来才糟糕：连看一眼计划都要点两次确认，人就不看了。
         tier = 1 if b.get("dry") else 2
@@ -720,6 +739,25 @@ def build_exec(b, want_result=False):
             argv.append("--dry")
         return (argv, ("生成提示词 " if kind == "prompts-gen" else "优化提示词 ") + setname,
                 1 if b.get("dry") else 2, False)
+
+    if kind == "prompts-set":
+        need_set()
+        try:
+            seg = int(b.get("seg"))
+        except Exception:
+            raise ValueError("缺段号")
+        text = (b.get("text") or "").strip()
+        if not text:
+            raise ValueError("提示词是空的")
+        # 下限也要卡：只改几个字就覆盖整段，是误触（实测把「，语速从容」写进去过），
+        # 而且提示词太短模型无从下手，出来的画面必废。
+        if len(text) < 8:
+            raise ValueError(f"太短（{len(text)} 字）—— 整段提示词至少要有画面主体和表情")
+        if len(text) > 1200:
+            raise ValueError(f"太长（{len(text)} 字），单段提示词一般 100–300 字")
+        argv = ["bin/vstudio.py", "prompts", ip, setname,
+                "--set", str(seg), "--text", text]
+        return argv, f"改第 {seg} 段提示词 · {setname}", 1, False
 
     if kind == "guard":
         return ["bin/vstudio.py", "guard", ip], f"素材自检 {ip}", 1, False
@@ -1220,9 +1258,57 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.exists(pf):
             return {"exists": False, "dir": d, "set": full, "source": src}
         try:
-            return {"exists": True, "dir": d, "set": full, "source": src, "data": load_json(pf)}
+            data = load_json(pf)
         except Exception as ex:
             return {"exists": True, "dir": d, "set": full, "source": src, "error": str(ex)}
+        # ★ 每段过没过红线，必须在界面上看得见。
+        #   人手动改一句「不要皱眉」是很自然的写法，但它会被护栏挡住 ——
+        #   不显示出来，人只会觉得"改了没用"，然后绕过工具直接改 JSON。
+        checked = self._guard_segments(root, data)
+        return {"exists": True, "dir": d, "set": full, "source": src,
+                "data": data, "guard": checked,
+                "wired": self._prompts_wired()}
+
+    @staticmethod
+    def _prompts_wired():
+        """这份稿子到底参不参与出片。
+
+        ★ 界面必须知道这件事：不参与的时候，改了稿子再重跑视频，画面不会变，
+          GPU 时间白烧。这个事实写在 config/pipeline.json 的 video.reads_prompts，
+          不在这里硬编码 —— 以后真接上了只改那一处。
+        """
+        try:
+            cfg = load_json(os.path.join(ROOT, "config", "pipeline.json"))
+            st = next((s for s in cfg.get("steps", []) if s.get("id") == "video"), {})
+            on = bool(st.get("reads_prompts"))
+        except Exception:
+            on = False
+        return {
+            "on": on,
+            "what": "gen_video.py 的英文骨架模板 + ip.json 的 video.prompt_vars",
+            "why": "骨架是 H3 的受理格式（subject_definitions / summary / clean_plate 这些节），"
+                   "名词来自 ip.json；而这份稿子是中文分镜，中文混进英文骨架会被模型当成"
+                   "「该上屏的字」——S04 就这么烧过一版字幕。",
+        }
+
+    @staticmethod
+    def _guard_segments(root, data):
+        """逐段跑一遍红线校验，返回 {段号: {ok, issues}}。只读，不改文件。"""
+        out = {"ok": True, "bad": 0, "segments": {}}
+        try:
+            import prompts as P
+            rules, _ = P.rules_for(root)
+            for s in (data.get("segments") or []):
+                if not isinstance(s, dict):
+                    continue
+                ok, iss = P.check(P.seg_text(s), rules)
+                out["segments"][str(s.get("i"))] = {"ok": ok, "issues": iss}
+                if not ok:
+                    out["bad"] += 1
+            out["ok"] = out["bad"] == 0
+        except Exception as ex:
+            out["error"] = str(ex)
+        return out
 
     @staticmethod
     def _full_set(ip, setname):
@@ -1894,22 +1980,41 @@ class Handler(BaseHTTPRequestHandler):
                                     .strftime("%m-%d %H:%M") if os.path.exists(p) else "")})
 
         plans = []
+        seed_info = self._seed_info(root, setname)
         if span:
             f, t = span
+            # ① 补跑 —— 这才是「改了什么重做什么」。默认推荐的永远是这条：
+            #    输入没变就跳过，一分钱不花；改了文案/换音色，编排器自己算从哪重做。
             plans.append({
-                "label": f"只重做「{stage}」这一段（{f} → {t}）",
-                "why": "上游产物不动，最省时间；适合只改了本阶段的东西",
-                "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from {f} --to {t}",
-                # exec：前端点「跑」时就照这个发，不用自己再拼一遍（拼就会跟上面那行不一致）
-                "exec": {"kind": "pipeline", "ip": ip, "set": setname,
-                         "from": f, "to": t},
-            })
-            plans.append({
-                "label": f"从「{stage}」一路做到最后（{f} → 结束）",
-                "why": "上游不动、下游全部重算；本阶段改动会影响后面每一步时用",
+                "label": f"补跑（{f} → 结束，没变的不动）",
+                "why": "推荐。编排器按「产物在不在 + 输入变没变」自己决定每一步跳过还是重做，"
+                       "已完成的产物不浪费。改了文案/提示词之后点这条",
                 "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from {f}",
                 "exec": {"kind": "pipeline", "ip": ip, "set": setname, "from": f},
+                "primary": True,
             })
+            # ② 原样重做 —— 明确要求「全部推倒重来」，不管输入变没变。
+            plans.append({
+                "label": f"整个重做「{stage}」（{f} → {t}，不看输入）",
+                "why": "产物明明在也要重跑一遍。适合怀疑产物坏了（花屏、音画错位）。"
+                       "⚠ 换种子不在这里，见下一条",
+                "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} "
+                       f"--from {f} --to {t} --force",
+                "exec": {"kind": "pipeline", "ip": ip, "set": setname,
+                         "from": f, "to": t, "force": True},
+            })
+            # ③ 换种子 —— 只对吃画面的阶段有意义（音频/字幕与种子无关）。
+            if stage in ("视频", "后期", "字幕", "验收", "交付"):
+                sd = seed_info.get("seed")
+                plans.append({
+                    "label": "换一个种子重出画面",
+                    "why": f"同一套提示词、同一条音频，只换随机种子再赌一次。"
+                           f"现在用的是 {sd if sd else '配置默认'}，"
+                           f"点之前想清楚：这几分钟 GPU 花的是「可能更好看」的赌注",
+                    "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from video --reseed",
+                    "exec": {"kind": "pipeline", "ip": ip, "set": setname,
+                             "from": "video", "reseed": True},
+                })
         if stage == "交付":
             plans.append({
                 "label": "先出正式档（推荐，若当前是试跑档）",
@@ -1926,6 +2031,13 @@ class Handler(BaseHTTPRequestHandler):
             })
         if stage == "文案":
             plans.append({
+                "label": "文案改完了，从配音开始重做",
+                "why": "文案一改，配音、字幕时间轴、口型对位、成片全部作废。"
+                       "编排器会自己从 tts 重做，后面没受影响的照旧跳过",
+                "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from tts",
+                "exec": {"kind": "pipeline", "ip": ip, "set": setname, "from": "tts"},
+            })
+            plans.append({
                 "label": "让 AI 出提示词草稿",
                 "why": "文案不在流水线里；先出提示词再改文案，是这条片子最省时的入口",
                 "cmd": f"python3 bin/vstudio.py prompts {ip} {setname} --gen",
@@ -1935,11 +2047,60 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({
             "ip": ip, "id": jid, "set": setname, "stage": stage,
             "status": st.get("status"), "at": st.get("at"), "by": st.get("by"),
-            "items": items, "plans": plans,
+            "items": items, "plans": plans, "seed": seed_info,
             "next": self._next_stage(job, stage),
             "precheck": (deliver_precheck(ip, root, job, items)
                          if stage == "交付" else None),
         })
+
+    @staticmethod
+    def _seed_info(root, setname):
+        """这套片用过哪些种子 —— 出片历史就是「哪次赌赢了」的证据。
+
+        读 08_过程/<套次>/runs.jsonl（pipeline 每真跑一次记一行）。
+        """
+        d = os.path.join(root, "08_过程", setname)
+        p = os.path.join(d, "runs.jsonl")
+        runs = []
+        if os.path.exists(p):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            runs.append(json.loads(line))
+                        except Exception:
+                            continue
+            except OSError:
+                runs = []
+        seed = None
+        for r in reversed(runs):
+            if r.get("seed"):
+                seed = r["seed"]
+                break
+        # 还没跑过（或改动前跑的，没记过）→ 回落配置默认值，别让界面上是个 null。
+        # 但要标明来源：配置默认不等于「这套片真的用过它」。
+        src = "runs" if seed else None
+        if not seed:
+            try:
+                cfg = load_json(os.path.join(ROOT, "config", "pipeline.json"))
+                seed = (cfg.get("defaults") or {}).get("seed")
+                src = "config" if seed else None
+            except Exception:
+                pass
+        # 同一颗种子可能跑过好几次（补跑），历史里按种子去重、留最近一次
+        seen, hist = set(), []
+        for r in reversed(runs):
+            s = r.get("seed")
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            hist.append({"seed": s, "at": r.get("at"), "tier": r.get("tier"),
+                         "from": r.get("from") or "全流程", "ok": r.get("ok")})
+        return {"seed": seed, "source": src, "log": p, "n": len(runs),
+                "history": hist[:12]}
 
     @staticmethod
     def _next_stage(job, stage):

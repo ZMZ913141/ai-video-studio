@@ -577,6 +577,16 @@ async function loadPrompts() {
   state.prompts = await api('prompts?ip=' + encodeURIComponent(state.ip) + '&set=' + encodeURIComponent(state.setId || ''));
 }
 
+/* 段内字段的中文名。键名是给程序看的，人只看懂「表情/动作/镜头」。 */
+const SEG_FIELDS = [['expression', '表情'], ['motion', '动作'], ['camera', '镜头']];
+
+function fmtClock(sec) {
+  const s = Math.max(0, Number(sec) || 0);
+  const m = Math.floor(s / 60);
+  const r = s - m * 60;
+  return `${m}:${(r < 10 ? '0' : '') + r.toFixed(1)}`;
+}
+
 function renderPrompts() {
   const box = $('#promptsBox'), p = state.prompts || {};
   if (!p.exists) {
@@ -585,15 +595,88 @@ function renderPrompts() {
   }
   const d = p.data || {};
   const segs = Array.isArray(d) ? d : (d.segments || d.prompts || []);
+  const gmap = (p.guard || {}).segments || {};
+  const bad = (p.guard || {}).bad || 0;
+  $('#promptsSub').textContent = `${segs.length} 段` + (bad ? ` · ${bad} 段没过红线` : '');
+
+  // ★ 先说清楚这份稿子到底进不进片。不说的话，人改完稿子去重跑视频，
+  //   十几分钟 GPU 花完、画面一点没变，还以为是自己写错了。
+  const warn = (p.wired && !p.wired.on) ? `<div class="warnbox" style="margin-bottom:10px">
+      <b>这份分镜稿目前不进片。</b>出片用的是 ${esc(p.wired.what)}。
+      所以改这里的文字<b>不会改变画面</b>；想看新画面要用「换一个种子」重跑，或者改 ip.json 里描述画面的那几项。
+      <div class="hint" style="margin-top:6px">为什么不能直接接：${esc(p.wired.why)}</div>
+    </div>` : '';
+
   const gp = state.cfg?.pipeline?.global_prompt?.enabled
-    ? `<div class="pseg"><div class="hd">${ico('shield')} 全局通用片段</div><div class="tx">${esc(state.cfg.pipeline.global_prompt.prefix)}</div></div>` : '';
-  $('#promptsSub').textContent = `${segs.length} 段`;
-  box.innerHTML = gp + (segs.length ? segs.map((s, i) => {
-    const tx = typeof s === 'string' ? s : (s.prompt || s.text || JSON.stringify(s));
-    return `<div class="pseg"><div class="hd"><b>#${i + 1}</b>${Object.keys(s).filter(k => !['prompt', 'text'].includes(k)).map(k =>
-      `<span class="chip">${esc(k)}:${esc(String(s[k]).slice(0, 26))}</span>`).join('')}</div>
-      <div class="tx">${esc(tx)}</div></div>`;
-  }).join('') : '<div class="empty">文件里没找到分段</div>');
+    ? `<div class="pseg"><div class="hd">${ico('shield')} 全局通用片段
+        <span class="tag">每段都带，不必重复写</span></div>
+        <div class="tx">${esc(state.cfg.pipeline.global_prompt.prefix)}</div></div>` : '';
+
+  if (!segs.length) { box.innerHTML = warn + gp + '<div class="empty">文件里没找到分段</div>'; return; }
+
+  box.innerHTML = warn + gp + segs.map((raw, i) => {
+    const s = typeof raw === 'string' ? { prompt: raw } : raw;
+    const n = s.i ?? (i + 1);
+    const gi = gmap[String(n)] || {};
+    const hasT = s.t0 !== undefined && s.t1 !== undefined;
+    const dur = hasT ? (Number(s.t1) - Number(s.t0)) : null;
+    const kv = SEG_FIELDS.filter(([k]) => s[k]).map(([k, label]) =>
+      `<div class="kv"><span class="k">${label}</span><span class="v">${esc(String(s[k]))}</span></div>`).join('');
+    const mark = gi.ok === false
+      ? `<span class="chip bad">未过红线</span>`
+      : gi.ok ? `<span class="chip ok">过线</span>` : '';
+    const iss = (gi.issues || []).length
+      ? `<div class="issues">${gi.issues.map(x => esc(String(x))).join('；')}</div>` : '';
+    const text = s.prompt || s.text || '';
+    return `<div class="pseg ${gi.ok === false ? 'bad' : ''}" data-seg="${n}">
+      <div class="hd"><b>#${n}</b>
+        ${hasT ? `<span class="mono">${fmtClock(s.t0)} – ${fmtClock(s.t1)}</span>` : ''}
+        ${dur ? `<span class="tag">${dur.toFixed(1)}s</span>` : ''}
+        ${s.manual ? `<span class="tag">手改过</span>` : ''}
+        <div class="spacer"></div>${mark}
+        <button class="btn sm ghost" data-pset="${n}" title="改这一段并保存（过红线才会写进文件）">改</button>
+      </div>
+      ${s.line ? `<div class="line">${esc(String(s.line))}</div>` : ''}
+      <div class="tx">${esc(text) || '<span style="color:var(--tx-3)">（这段还没有提示词）</span>'}</div>
+      ${kv}${iss}
+      <div class="pedit" hidden>
+        <textarea spellcheck="false">${esc(text)}</textarea>
+        <div class="hint" style="margin:6px 0 7px">
+          只改这一段的画面描述。写否定句（「不要皱眉」「避免抖动」）会被红线挡住 —— 要写正向的
+          「眉部放松」「面部肌肉松弛」。</div>
+        <div style="display:flex;gap:6px">
+          <button class="btn sm primary" data-psave="${n}">保存</button>
+          <button class="btn sm ghost" data-pcancel="${n}">取消</button>
+          <div class="spacer"></div>
+          <span class="hint" data-pmsg="${n}"></span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function savePromptSeg(n) {
+  const card = document.querySelector(`.pseg[data-seg="${n}"]`);
+  if (!card) return;
+  const ta = card.querySelector('.pedit textarea');
+  const msg = card.querySelector(`[data-pmsg="${n}"]`);
+  const txt = (ta.value || '').trim();
+  if (!txt) { msg.textContent = '空的不存'; return; }
+  msg.textContent = '校验中…';
+  await startExec({ kind: 'prompts-set', ip: state.ip, set: state.setId, seg: n, text: txt }, {
+    // 必须看退出码：红线没过时命令是「正常退出但 rc=1」，只看有没有拿到任务 id
+    // 会把「没落盘」当成功 —— 人改完看到已保存、回头发现文件还是旧的。
+    then: async d => {
+      if (d && d.state === 'done' && d.rc === 0) {
+        await loadPrompts();
+        renderPrompts();
+        toast('第 ' + n + ' 段已更新', '要重跑视频这一步才会生效', 'ok');
+      } else {
+        const m2 = document.querySelector(`[data-pmsg="${n}"]`);
+        if (m2) m2.textContent = '没存：还没过红线，原因看右下角运行日志';
+      }
+    },
+  });
 }
 
 /* ============================================================
@@ -1098,16 +1181,33 @@ async function showStage(stage) {
 
   const plans = (d.plans || []).map(p => `
     <div class="plan">
-      <div class="plan-h"><b>${esc(p.label)}</b>
+      <div class="plan-h"><b>${esc(p.label)}</b>${p.primary ? '<span class="chip ok">推荐</span>' : ''}
         <div class="spacer"></div>
         ${p.exec ? `<button class="btn sm ghost" data-exe="plan-dry" data-plan='${esc(JSON.stringify(p.exec))}'
             title="只算计划，不提交 GPU">${ico('eye')} 看计划</button>` : ''}
-        ${p.exec ? `<button class="btn sm primary" data-exe="plan" data-plan='${esc(JSON.stringify(p.exec))}'>${ico('play')} 跑</button>` : ''}
+        ${p.exec ? `<button class="btn sm ${p.primary ? 'primary' : ''}" data-exe="plan" data-plan='${esc(JSON.stringify(p.exec))}'>${ico('play')} 跑</button>` : ''}
         ${p.run ? `<button class="btn sm" data-quick='${esc(JSON.stringify(p.run))}'>${ico('check')} 执行</button>` : ''}
         <button class="btn sm ghost" data-copy="${esc(p.cmd)}">${ico('copy')}</button></div>
       <div class="hint" style="margin:4px 0 6px">${esc(p.why)}</div>
       <div class="cmdbar"><span class="p">$</span> ${esc(p.cmd)}</div>
     </div>`).join('') || `<div class="empty">这一步没有流水线命令（人工环节）</div>`;
+
+  // 种子：这套片用过哪几颗、每颗跑出过什么。点一颗就是「照着那次重跑」。
+  const sd = d.seed || {};
+  const hist = sd.history || [];
+  const seedHtml = (sd.seed || hist.length) ? `
+    <div style="margin-bottom:9px">
+      <div class="hint" style="margin-bottom:6px">
+        当前种子 <b class="mono">${esc(String(sd.seed ?? '—'))}</b>${sd.source === 'config'
+          ? '（配置默认 —— 这套片还没记录过跑批）' : ''}。
+        同一颗种子重跑会得到几乎一样的画面；想换画面点上面的「换一个种子」，
+        ${hist.length ? '或者挑一颗旧的重现那一次的结果（见下）' : '跑过一次之后这里会列出用过的种子'}。
+      </div>
+      ${hist.length ? `<div style="display:flex;flex-wrap:wrap;gap:5px">${hist.map(h => `
+        <button class="btn sm ghost" data-exe="plan"
+          data-plan='${esc(JSON.stringify({ kind: 'pipeline', ip: d.ip, set: d.set, from: 'video', seed: h.seed }))}'
+          title="用这颗种子重出画面 —— 复现那一次的结果">${ico('hist')} ${esc(String(h.seed))} · ${esc(h.at || '')}</button>`).join('')}</div>` : ''}
+    </div>` : '';
 
   const next = d.next
     ? `<div class="hint" style="margin-top:10px">下一步是 <b style="color:var(--accent-2)">${esc(d.next.stage)}</b>（${esc(d.next.status)}）。</div>`
@@ -1132,6 +1232,7 @@ async function showStage(stage) {
     ${next}
     ${preHtml}
     <div class="sec-title" style="margin-top:16px">重做</div>
+    ${seedHtml}
     <div class="hint" style="margin-bottom:8px">
       点「跑」就地执行（日志在右下角，随时能停）；只想拿命令就点复制。</div>
     ${plans}`;
@@ -1657,6 +1758,38 @@ function bind() {
     if (tab) return void openTab(tab.dataset.tab);
     if (e.target.closest('#mclose')) return closeModal();
     if (e.target.closest('#mcopy')) return copyText(decodeURIComponent(e.target.closest('#mcopy').dataset.src || ''));
+  });
+
+  /* ---------- 提示词：就地编辑 ---------- */
+  document.addEventListener('click', e => {
+    const ed = e.target.closest('[data-pset]');
+    const sv = e.target.closest('[data-psave]');
+    const cc = e.target.closest('[data-pcancel]');
+    if (!ed && !sv && !cc) return;
+    if (ed) {
+      const n = ed.dataset.pset;
+      const card = document.querySelector(`.pseg[data-seg="${n}"]`);
+      const box = card && card.querySelector('.pedit');
+      if (!box) return;
+      box.hidden = !box.hidden;
+      ed.textContent = box.hidden ? '改' : '收起';
+      if (!box.hidden) {
+        const ta = box.querySelector('textarea');
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+      }
+      return;
+    }
+    if (sv) { e.preventDefault(); return void savePromptSeg(sv.dataset.psave); }
+    if (cc) {
+      const n = cc.dataset.pcancel;
+      const card = document.querySelector(`.pseg[data-seg="${n}"]`);
+      if (card) {
+        card.querySelector('.pedit').hidden = true;
+        const b = card.querySelector('[data-pset]');
+        if (b) b.textContent = '改';
+      }
+    }
   });
 
   /* ---------- 长任务：所有「跑」按钮都从这里进 ---------- */
