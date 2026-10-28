@@ -40,6 +40,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 CFG = ROOT / "config" / "providers.json"
 STATE = ROOT / "config" / ".llm_state.json"
+# 人手动选的首选车道。**只是「优先」，不是「只用」** ——
+# 首选挂了照样自动换下一家，否则选一条不稳的通道就等于把整条流水线焊死。
+PREFS = ROOT / "config" / ".llm_prefs.json"
 
 # 判定为「配额/限流」的关键词（中英文平台混用，命中即冷却后换下一家）
 QUOTA_HINTS = ["quota", "配额", "额度", "余额", "insufficient", "balance",
@@ -205,13 +208,17 @@ class LLMRouter:
     def chat(self, messages: list, tools: list | None = None, tool_choice=None,
              response_format: dict | None = None, max_tokens: int = 1024,
              temperature: float = 0.2, verbose: bool = True,
-             sensitive: bool = True, need: str | None = None) -> dict:
+             sensitive: bool = True, need: str | None = None,
+             prefer: str | None = None) -> dict:
         """依次尝试所有可用供应商；全部失败才抛异常。
 
         sensitive  默认 True =「这段内容属于客户/商业信息」→ 自动跳过第三方免费池
                    （providers.json 里 sensitive=false 的那些）。
                    只有视觉验收、通用草稿这类不含客户信息的场合才显式传 False。
         need       'vision' 等能力名 → 只在支持该能力的通道里挑（见 _pool）。
+        prefer     首选车道名（界面里选的）。该车道在候选池里就排到最前，
+                   不在（被能力/涉密过滤掉、或没启用）就**忽略它继续按 priority 走**。
+                   刻意不实现「只走这一条」—— 首选不稳时那等于让流水线停摆。
         """
         body_base = {"messages": messages, "max_tokens": max_tokens,
                      "temperature": temperature}
@@ -231,6 +238,17 @@ class LLMRouter:
                    if need else "")
                 + f"  当前 enabled 通道：{[p['name'] for p in self.providers]}")
         pool = sorted(pool, key=lambda p: p.get("priority", 999))
+
+        # 首选车道排到最前（只在它本来就在候选池里时生效）
+        want = prefer or self.prefs().get("prefer")
+        if want:
+            hit = [p for p in pool if p["name"] == want]
+            if hit:
+                pool = hit + [p for p in pool if p["name"] != want]
+            elif verbose:
+                print(f"[router] ⚠ 首选车道 {want} 不在本次候选池"
+                      f"（未启用 / 不支持该能力 / 被涉密规则排除），按 priority 走",
+                      file=sys.stderr)
 
         errors = []
         for attempt in range(2):          # 第二轮：强制解除最早到期的冷却再试
@@ -314,6 +332,24 @@ class LLMRouter:
         return d
 
     # ---------------------------------------------------------------- 运维
+    def prefs(self) -> dict:
+        try:
+            return json.loads(PREFS.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def set_prefer(self, name: str | None):
+        """记住人手动选的首选车道。传 None / 空串 = 清掉，回到纯 priority 排序。"""
+        d = self.prefs()
+        if name:
+            d["prefer"] = name
+        else:
+            d.pop("prefer", None)
+        d["at"] = _fmt(_now())
+        PREFS.parent.mkdir(parents=True, exist_ok=True)
+        PREFS.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        return d
+
     def status(self) -> list[dict]:
         rows = []
         for p in self.cfg["providers"]:
@@ -329,6 +365,8 @@ class LLMRouter:
                 "reason": st.get("reason", ""),
                 "vision": "✓" if "image" in caps else "",
                 "pool": "免费池" if p.get("sensitive", True) is False else "付费",
+                "caps": caps,
+                "prefer": p["name"] == self.prefs().get("prefer"),
             })
         return rows
 
@@ -340,10 +378,11 @@ class LLMRouter:
 def main():
     ap = argparse.ArgumentParser(description="多供应商 LLM 路由")
     ap.add_argument("cmd", nargs="?", default="status",
-                    choices=["status", "chat", "reset", "models", "vision"])
+                    choices=["status", "chat", "reset", "models", "vision",
+                             "prefer", "probe"])
     ap.add_argument("text", nargs="?", default="回复四个字：路由正常")
     ap.add_argument("--image", help="看图任务的图片路径（need=vision）")
-    ap.add_argument("--provider", help="models 命令限定某条通道")
+    ap.add_argument("--provider", help="models / probe 命令限定某条通道")
     a = ap.parse_args()
 
     r = LLMRouter()
@@ -355,15 +394,51 @@ def main():
             # 冷却/停用的原因必须显示出来，否则「可用/冷却」两态会误导人；
             # 但已恢复的家不该继续挂着上次的原因
             tail = f"  ← {x['reason']}" if (x['reason'] and x['state'] != "可用") else ""
-            print(f"  {x['priority']:>4}  {x['name']:<12} {x['key']:<7} "
+            star = "★" if x.get("prefer") else " "
+            print(f" {star}{x['priority']:>4}  {x['name']:<12} {x['key']:<7} "
                   f"{x['state']:<18} {x['vision'] or ' '} {x['pool']:<4} "
                   f"{x['model']}{tail}")
+        pre = r.prefs().get("prefer")
+        print(f"\n  ★ = 首选车道（{pre or '未设，按 priority'}）。"
+              f"首选只是优先，挂了会自动换下一家。")
         dis = [x["name"] for x in r.status() if not x["enabled"]]
         print(f"\n  未启用（注册后打开）: {', '.join(dis)}")
         print("  视觉 = 支不支持看图；付费/免费池 = 客户内容只走「付费」那一栏")
     elif a.cmd == "reset":
         r.reset()
         print("✓ 已清空所有冷却状态")
+    elif a.cmd == "prefer":
+        # 传空 = 清掉首选，回到纯 priority
+        d = r.set_prefer(a.provider)
+        print(f"✓ 首选车道 = {d.get('prefer') or '（无，按 priority 排序）'}")
+        print("  注意它只是「优先」不是「只用」：这条挂了照样自动换下一家。")
+    elif a.cmd == "probe":
+        # 只测一条指定通道，**不写冷却** —— 诊断用，不该影响真实路由状态。
+        name = a.provider or (r.prefs().get("prefer") or "")
+        if not name:
+            sys.exit("probe 需要 --provider <车道名>")
+        p = next((x for x in r.cfg["providers"] if x["name"] == name), None)
+        if not p:
+            sys.exit(f"没有叫 {name} 的通道")
+        t0 = _now()
+        try:
+            body = {"messages": [{"role": "user", "content": a.text}],
+                    "max_tokens": 32, "temperature": 0, "model": p["model"]}
+            if p.get("extra_body"):
+                body.update(p["extra_body"])
+            d = r._normalize(r._call(p, body))
+            ans = (d["choices"][0]["message"].get("content") or "").strip()[:60]
+            print(f"✓ {name} 通  {_now()-t0:.1f}s  「{ans}」")
+        except urllib.error.HTTPError as e:
+            try:
+                txt = e.read().decode()[:160]
+            except Exception:
+                txt = ""
+            print(f"✗ {name}  HTTP {e.code} ({r._classify(e.code, txt)}) {txt}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"✗ {name}  {type(e).__name__} {str(e)[:160]}")
+            sys.exit(1)
     elif a.cmd == "models":
         # 核对手写能力与上游实际声明是否一致（网关类通道模型会变，得能查）
         names = [a.provider] if a.provider else [

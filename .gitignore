@@ -46,6 +46,8 @@ OpenMontage
 
 # LLM 路由的运行时状态（冷却时间戳），不该进版本库
 config/.llm_state.json
+# 人手动选的首选车道 —— 是哪台机器的偏好，不是项目真值
+config/.llm_prefs.json
 
 # 视觉能力自检用的临时测试图
 .cache/

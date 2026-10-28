@@ -96,6 +96,51 @@ vc.on('warn', (...a) => errors.push('console.warn: ' + a.join(' ')));
   // 断点重做按钮
   report.redo_buttons = win.document.querySelectorAll('#cmdBox [data-redo]').length;
 
+  const closeAndWait = async () => {
+    win.document.querySelector('#mclose')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+  };
+
+  // 进度节点：点一下必须出「产物 + 重跑命令」，不是死节点
+  const stageNode = win.document.querySelector('#overviewBox .stage[data-stage]');
+  if (stageNode) {
+    stageNode.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 1200));
+    report.stage_modal_artifacts = win.document.querySelectorAll('#modalBox .stage-art').length;
+    report.stage_modal_plans = win.document.querySelectorAll('#modalBox .plan').length;
+    report.stage_modal_cmds = [...win.document.querySelectorAll('#modalBox .plan .cmdbar')]
+      .map(x => x.textContent.trim().slice(0, 80));
+    await closeAndWait();
+  }
+
+  // LLM 车道：点徽章必须出车道列表（以前是纯装饰）
+  const llmBadge = win.document.querySelector('#svcBar [data-svc="zen-gate"]');
+  if (llmBadge) {
+    llmBadge.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 1500));
+    report.llm_channels = win.document.querySelectorAll('#modalBox .chan').length;
+    report.llm_prefer_btns = win.document.querySelectorAll('#modalBox [data-prefer]').length;
+    report.llm_probe_btns = win.document.querySelectorAll('#modalBox [data-probe]').length;
+    await closeAndWait();
+  }
+
+  // MCP 面板：必须列出工具，证明「别的 AI 能调用」
+  const mcpBadge = win.document.querySelector('#svcBar [data-mcp]');
+  if (mcpBadge) {
+    mcpBadge.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 3500));
+    report.mcp_tools = win.document.querySelectorAll('#modalBox .chips .chip').length;
+    report.mcp_register = !!win.document.querySelector('#modalBox [data-copy]');
+    await closeAndWait();
+  }
+
+  // 建档第一步：必须先把「说人话」的框摆出来，而不是让人直接填字段
+  win.document.querySelector('#btnNewCard')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 300));
+  report.card_step1_talk = win.document.querySelectorAll('#modalBox #ncTalk').length;
+  report.card_step1_ai = win.document.querySelectorAll('#modalBox #ncAI').length;
+  await closeAndWait();
+
   console.log(JSON.stringify(report, null, 2));
   console.log('\n=== errors (' + errors.length + ') ===');
   errors.slice(0, 12).forEach(e => console.log('- ' + e.slice(0, 300)));

@@ -15,6 +15,9 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const ico = (n, cls = 'ico') => `<svg class="${cls}"><use href="#i-${n}"/></svg>`;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// 拼 query 一律走它：中文 IP 名（陈洁斌主号）不编码会被 http.server 读成乱码
+const qs = o => Object.entries(o).filter(([, v]) => v !== undefined && v !== null && v !== '')
+  .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
 
 async function api(path, opts) {
   // 带 body 的请求一律按 POST —— fetch 不允许 GET 带 body，写漏 method 会一路炸到首屏
@@ -140,7 +143,9 @@ function renderServices() {
   const names = { pipeline: '合成服务', n8n: '编排', comfyui: 'ComfyUI', 'zen-gate': 'LLM 网关' };
   $('#svcBar').innerHTML = Object.entries(state.services).map(([k, v]) =>
     `<div class="svc ${v === 'up' ? 'up' : 'down'}" data-svc="${esc(k)}"
-       title="${esc(k)} · ${esc(v)}　点开看它是什么、怎么起"><span class="dot"></span><span>${names[k] || k}</span></div>`).join('');
+       title="${esc(k)} · ${esc(v)}　点开看它是什么、怎么起"><span class="dot"></span><span>${names[k] || k}</span></div>`).join('')
+    // MCP 不是常驻服务（stdio 起停），但「能不能被别的 AI 调用」是必须一眼能看到的事
+    + `<div class="svc mcp" data-mcp="1" title="MCP 接口：给别的 AI 调用本项目用"><span class="dot"></span><span>MCP</span></div>`;
 }
 
 /* 点服务徽章 → 说清楚它是什么、地址、怎么起。
@@ -289,7 +294,8 @@ async function renderOverview() {
     <div class="stages">${STAGES.map((s, i) => {
       const st = (j.stages || {})[s]?.status || (j.done.includes(s) ? 'ok' : 'pending');
       const cls = st === 'ok' ? 'ok' : st === 'fail' ? 'fail' : (i === cur ? 'cur' : '');
-      return `<div class="stage ${cls}" data-stage="${s}" title="${s}: ${st} ${(j.stages||{})[s]?.at || ''}">
+      return `<div class="stage ${cls}" data-stage="${s}" role="button" tabindex="0"
+        title="点开看这一步的产物，并拿到「从此处重跑」的命令">
         <div class="knob">${st === 'ok' ? '✓' : st === 'fail' ? '✕' : i + 1}</div>${s}</div>`;
     }).join('')}</div>
     <div class="kv" style="margin-top:14px">
@@ -297,7 +303,8 @@ async function renderOverview() {
         `<dt>${s}</dt><dd class="mono">${(j.artifacts[s].map(a => esc(a.split('/').pop()))).join('、')}</dd>`).join('')}
       ${(j.missing || []).length ? `<dt style="color:var(--warn)">缺</dt><dd>${j.missing.map(esc).join('、')}</dd>` : ''}
       ${(j.notes || []).length ? `<dt>备注</dt><dd>${j.notes.slice(-3).map(n => esc(n.text)).join('；')}</dd>` : ''}
-    </div>`;
+    </div>
+    <div class="hint" style="margin-top:10px">点上面任意一个阶段 → 看这一步的产物、以及「只重做这一段 / 从这里做到最后」的命令。</div>`;
   if (state.algo) {
     box.insertAdjacentHTML('beforeend', `<div style="margin-top:12px" class="cmdbar">
       <span class="p">自适应</span> ${esc(state.algo.res?.[0])}×${esc(state.algo.res?.[1])}
@@ -801,25 +808,286 @@ function openTab(name) {
   if (name === 'log') renderLog();
 }
 
+/* ---------- 阶段详情：产物 + 从此处重跑 ---------- */
+async function showStage(stage) {
+  const j = state.job;
+  if (!j) return;
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('hist')} ${esc(stage)}</b>
+      <span class="sub">载入中…</span>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <div class="sk" style="width:70%"></div><div class="sk" style="width:50%;margin-top:8px"></div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = closeModal;
+
+  const d = await api('stage?' + qs({ ip: state.ip, id: j.id, stage }));
+  if (d.error) { $('#modalBox').querySelector('.sub').textContent = d.error; return; }
+  const sub = $('#modalBox').querySelector('.sub');
+  sub.textContent = `${d.status === 'ok' ? '已完成' : d.status === 'fail' ? '失败' : '未开始'}`
+    + (d.at ? ` · ${d.at}` : '') + (d.by ? ` · ${d.by}` : '');
+
+  const items = (d.items || []).map(it => `
+    <div class="stage-art" data-file="${esc(it.path)}" data-type="${esc(it.kind)}">
+      <span class="k">${it.kind === 'video' ? '▶' : it.kind === 'audio' ? '♪' : '≡'}</span>
+      <span class="n">${esc(it.name)}</span>
+      <span class="sz">${it.size ? (it.size / 1024 > 900 ? (it.size / 1048576).toFixed(1) + ' MB' : (it.size / 1024).toFixed(0) + ' KB') : ''} ${esc(it.mtime)}</span>
+    </div>`).join('') || `<div class="empty">这一步还没有产物文件</div>`;
+
+  const plans = (d.plans || []).map(p => `
+    <div class="plan">
+      <div class="plan-h"><b>${esc(p.label)}</b>
+        <div class="spacer"></div>
+        <button class="btn sm" data-copy="${esc(p.cmd)}">${ico('copy')} 复制</button></div>
+      <div class="hint" style="margin:4px 0 6px">${esc(p.why)}</div>
+      <div class="cmdbar"><span class="p">$</span> ${esc(p.cmd)}</div>
+    </div>`).join('') || `<div class="empty">这一步没有流水线命令（人工环节）</div>`;
+
+  const next = d.next
+    ? `<div class="hint" style="margin-top:10px">下一步是 <b style="color:var(--accent-2)">${esc(d.next.stage)}</b>（${esc(d.next.status)}）。</div>`
+    : `<div class="hint" style="margin-top:10px">后面没有未完成的阶段了。</div>`;
+
+  // 交付前自检：齐不齐 + 这条片子的规格够不够格当交付件
+  const pre = (d.precheck || []);
+  const preHtml = pre.length ? `
+    <div class="sec-title" style="margin-top:16px">交付前自检</div>
+    ${pre.map(c => `<div class="chk ${c.ok ? 'ok' : 'bad'}">
+      <span class="m">${c.ok ? '✓' : '✕'}</span>
+      <span class="k">${esc(c.name)}</span>
+      <span class="v">${esc(c.detail)}</span></div>`).join('')}
+    ${pre.some(c => c.trial) ? `<div class="warnbox">
+      这条片子是<b>快速档试跑</b>，分辨率只有目标档的一半左右 —— 它的本意是给流程定性，不是交付件。
+      要么先按下面的命令出正式档再交付，要么明确接受用试跑档交付。</div>` : ''}` : '';
+
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('hist')} ${esc(stage)}</b>
+      <span class="sub" style="color:var(--tx-3);font-size:11.5px"></span>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <div class="sec-title">产物</div>${items}
+    ${next}
+    ${preHtml}
+    <div class="sec-title" style="margin-top:16px">重做</div>
+    <div class="hint" style="margin-bottom:8px">命令回终端跑 —— 出片要十几分钟、要吃 GPU，塞进浏览器黑跑只会让你看不见它死在哪。</div>
+    ${plans}`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = closeModal;
+  $('#modalBox').querySelector('.sub').textContent = sub.textContent;
+}
+
+/* ---------- LLM 车道选择 ---------- */
+async function showLlmPanel() {
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('spark')} LLM 车道</b>
+      <span class="sub">载入中…</span>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <div class="sk" style="width:60%"></div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = closeModal;
+
+  const d = await api('llm-channels');
+  const rows = (d.channels || []).filter(c => c.enabled);
+  const off = (d.channels || []).filter(c => !c.enabled).map(c => c.name);
+  const cooling = rows.filter(c => c.state !== '可用').length;
+
+  const row = c => {
+    const st = c.state === '可用' ? 'ok' : 'cool';
+    return `<div class="chan ${c.prefer ? 'star' : ''}">
+      <div class="chan-main">
+        <div class="chan-name">${esc(c.name)}
+          ${c.vision ? '<span class="tag2">看图</span>' : ''}
+          ${c.pool === '免费池' ? '<span class="tag2 warn2">免费池</span>' : ''}
+        </div>
+        <div class="chan-meta">${esc(c.model)} · 优先级 ${c.priority}
+          <span class="dot ${st}"></span>${esc(c.state)}
+          ${c.state !== '可用' && c.reason ? ' · ' + esc(c.reason) : ''}
+          ${c.warn ? ' · ' + esc(c.warn) : ''}</div>
+      </div>
+      <button class="btn sm" data-probe="${esc(c.name)}">测一下</button>
+      <button class="btn sm ${c.prefer ? 'primary' : 'ghost'}" data-prefer="${esc(c.name)}">
+        ${c.prefer ? '★ 首选' : '设为首选'}</button>
+    </div>`;
+  };
+
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('spark')} LLM 车道</b>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <div class="hint" style="margin-bottom:10px">
+      首选<b>只是优先，不是只用</b> —— 这条挂了会自动换下一家，不会把流程卡死。
+      现在有 ${rows.length} 条启用、${cooling} 条在冷却${d.prefer ? `，首选 <b>${esc(d.prefer)}</b>` : '，还没设首选'}。
+    </div>
+    <div class="chans">${rows.map(row).join('')}</div>
+    ${off.length ? `<div class="hint" style="margin-top:10px">未启用：${off.map(esc).join('、')}（去 <span class="mono">config/providers.json</span> 打开）</div>` : ''}
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn ghost" id="llmClear">清掉首选（按优先级）</button>
+      <button class="btn" id="mclose2">关闭</button></div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = $('#mclose2').onclick = closeModal;
+  $('#llmClear').onclick = async () => {
+    await api('llm-prefer', { body: { name: '' } });
+    toast('已清掉首选', '之后按 providers.json 的优先级走', 'ok');
+    await showLlmPanel();
+  };
+}
+
+/* ---------- MCP 面板：证明「别的 AI 能调用本项目」 ---------- */
+async function showMcpPanel() {
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('term')} MCP 接口</b>
+      <span class="sub">正在真握手一次…</span>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <div class="sk" style="width:70%"></div><div class="sk" style="width:45%;margin-top:8px"></div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = closeModal;
+  const d = await api('mcp');
+  const tools = d.tools || [];
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('term')} MCP 接口</b>
+      <span class="sub" style="color:${d.ok ? 'var(--ok)' : 'var(--warn)'};font-size:11.5px">
+        ${d.ok ? `握手成功 · ${tools.length} 个工具` : '接不通'}</span>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <div class="hint" style="margin-bottom:10px">
+      MCP 是给<b>别的 AI</b> 用的口子：任何支持 MCP 的客户端（Claude Code / Cursor / Qwen Code）
+      挂上它就能查进度、开新套、跑自检，不用人来敲命令，也不依赖这个网页。
+      它和 CLI 共用同一批函数，所以不会出现「CLI 说行、MCP 说不行」。
+    </div>
+    ${d.ok ? `<div class="sec-title">可用工具（${tools.length}）</div>
+      <div class="chips">${tools.map(t => `<span class="chip mono">${esc(t)}</span>`).join('')}</div>` :
+      `<div class="warnbox">${esc(d.detail || '握手失败')}</div>`}
+    <div class="sec-title" style="margin-top:16px">怎么挂上</div>
+    <div class="cmdbar" style="margin-bottom:8px"><span class="p">$</span> ${esc(d.register || '')}</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      <button class="btn sm" data-copy="${esc(d.register || '')}">${ico('copy')} 复制注册命令</button>
+      <button class="btn" id="mclose2">关闭</button></div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = $('#mclose2').onclick = closeModal;
+}
+
 /* ---------- 建档 / 新套次 ---------- */
+/* 建档改成两段：先把人话说完，AI 出草案，人改到自己满意再落盘。
+   为什么不直接一次建：档案卡一落盘就进总册，名字还等于目录名，改起来很脏。
+   先给草案 = 让判断发生在「不可逆」之前。 */
 function showNewCard() {
   $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('plus')} 新建档案卡</b>
+      <span class="sub">第 1 步 · 说清楚是谁</span>
       <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <label class="field"><span>用你自己的话介绍这个客户（越口语越好）</span>
+      <textarea id="ncTalk" class="brief-area" style="min-height:150px"
+        placeholder="例：客户是开潮汕牛肉火锅的，馆子叫八合里，老板姓林，四十多岁，不愿意上镜，想让我用 AI 给他做个口播号，一周三条，发抖音和小红书，主要讲牛肉怎么挑、火锅怎么涮，别讲加盟别讲价格，他说话有潮汕口音，语速慢点"></textarea>
+      <span class="hint">说清四件事就够：他是谁 / 讲什么 / 发哪里多久一条 / 什么绝对不能碰</span></label>
+    <div class="hint" style="margin:10px 0 12px">
+      AI 会把它整理成档案卡字段，顺手写两篇人设文档（人设圣经 + 内容方向）放进
+      <span class="mono">01_人设与规范/</span>。这两篇东西以后 AI 选题就靠它，
+      没有它选题只能瞎编。</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn ghost" id="ncManual">我手填</button>
+      <button class="btn primary" id="ncAI">${ico('spark')} AI 出草案</button></div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = closeModal;
+  $('#ncManual').onclick = () => showNewCardManual(null);
+  $('#ncAI').onclick = async () => {
+    const text = ($('#ncTalk')?.value || '').trim();
+    if (text.length < 12) return toast('再多说两句', '至少告诉我他是谁、要做什么号', 'err');
+    const btn = $('#ncAI');
+    btn.disabled = true; btn.innerHTML = `${ico('spark')} 正在整理…（约 20 秒）`;
+    const r = await api('card-draft', { body: { text } });
+    btn.disabled = false; btn.innerHTML = `${ico('spark')} AI 出草案`;
+    if (r.error) return toast('AI 没整理出来', r.error, 'err');
+    showNewCardDraft(r, text);
+  };
+}
+
+/* 第 2 步：草案可改，人设文档可预览 */
+function showNewCardDraft(r, rawText) {
+  const d = r.draft || {};
+  const md = r.persona_md || {};
+  const mdNames = Object.keys(md);
+  const qsHtml = (r.questions || []).length
+    ? `<div class="sec-title" style="margin-top:14px">还该问客户的</div>
+       ${r.questions.map(q => `<div class="pseg"><div class="tx">${esc(q)}</div></div>`).join('')}` : '';
+  const dupWarn = r.dup
+    ? `<div class="warnbox">总册里已经有叫「${esc(d.name)}」的 IP 了，建不了。改个目录名。</div>` : '';
+
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('spark')} 草案</b>
+      <span class="sub" style="color:var(--tx-3);font-size:11.5px">由 ${esc(r.provider || '?')} 整理 · 可改</span>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    ${r.summary ? `<div class="hint" style="margin-bottom:10px">一句话理解：<b style="color:var(--tx-1)">${esc(r.summary)}</b></div>` : ''}
+    ${dupWarn}
     <div class="form-grid">
-      <label class="field"><span>名字（= 目录名，只能用中文/字母/数字/下划线）*</span>
+      <label class="field"><span>目录名（= 文件夹名）*</span><input id="ncName" value="${esc(d.name)}"></label>
+      <label class="field"><span>口头叫法，逗号分隔 *</span><input id="ncAlias" value="${esc((d.aliases || []).join(','))}">
+        <span class="hint">没别名会重复建档</span></label>
+      <label class="field"><span>类型</span>
+        <select id="ncType">
+          <option value="客户" ${d.type !== '本人IP' ? 'selected' : ''}>客户</option>
+          <option value="本人IP" ${d.type === '本人IP' ? 'selected' : ''}>本人IP</option>
+        </select></label>
+      <label class="field"><span>标签（套次前缀）</span><input id="ncTag" value="${esc(d.tag)}"></label>
+      <label class="field"><span>定位（一句话）</span><input id="ncRole" value="${esc(d.role)}"></label>
+      <label class="field"><span>存储空间名</span><input id="ncSpace" value="${esc(d.space)}"></label>
+    </div>
+
+    <div class="sec-title" style="margin-top:16px">需求</div>
+    <div class="kv">${Object.entries(d.needs || {}).map(([k, v]) =>
+      `<dt>${esc(k)}</dt><dd>${esc(Array.isArray(v) ? v.join('、') : String(v))}</dd>`).join('') || '<dd class="empty">没提炼出需求</dd>'}</div>
+
+    ${(d.redlines || []).length ? `<div class="sec-title" style="margin-top:14px">红线</div>
+      ${d.redlines.map(x => `<div class="pseg bad"><div class="tx">${esc(x)}</div></div>`).join('')}` : ''}
+    ${(d.habits || []).length ? `<div class="sec-title" style="margin-top:14px">习惯</div>
+      ${d.habits.map(x => `<div class="pseg"><div class="tx">${esc(x)}</div></div>`).join('')}` : ''}
+
+    <div class="sec-title" style="margin-top:16px">会写进 01_人设与规范 的文档（${mdNames.length} 篇）</div>
+    ${mdNames.map(n => `<details class="mddoc"><summary>${esc(n)} <span class="hint">${String(md[n]).length} 字</span></summary>
+      <pre>${esc(md[n])}</pre></details>`).join('') || '<div class="empty">没生成人设文档</div>'}
+    ${qsHtml}
+
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+      <button class="btn ghost" id="ncBack">重说一遍</button>
+      <button class="btn primary" id="ncGo">${ico('plus')} 确认创建档案</button></div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = closeModal;
+  $('#ncBack').onclick = () => showNewCardManual(rawText, true);
+
+  $('#ncGo').onclick = async () => {
+    const v = id => ($('#' + id)?.value || '').trim();
+    if (!v('ncName') || !v('ncAlias') || !v('ncSpace'))
+      return toast('还差东西', '名字、别名、空间名必填（没空间名脚本会卡住等输入）', 'err');
+    if (!(await confirmBox('确认建档？',
+      `<div>会在档案区建整套目录、写 card.json、登记进总册，并写 ${mdNames.length} 篇人设文档。</div>
+       <div class="hint" style="margin-top:8px">名字就是目录名，建完再改名很脏 —— 确认无误再继续。</div>`,
+      '确认建档'))) return;
+    const btn = $('#ncGo');
+    btn.disabled = true; btn.textContent = '创建中…';
+    const rr = await api('card-create', {
+      body: {
+        draft: {
+          name: v('ncName'), aliases: v('ncAlias').split(/[,，]/).map(s => s.trim()).filter(Boolean),
+          type: v('ncType'), tag: v('ncTag'), role: v('ncRole'), space: v('ncSpace'),
+          needs: d.needs || {}, redlines: d.redlines || [], habits: d.habits || [],
+        },
+        persona_md: md,
+      }
+    });
+    btn.disabled = false; btn.textContent = '确认创建档案';
+    if (rr.error) return toast('没建成', rr.error + (rr.detail ? '：' + rr.detail : ''), 'err');
+    closeModal();
+    toast('档案已建', `${rr.name} · 写了 ${(rr.md || []).length} 篇人设文档`, 'ok');
+    await boot();
+  };
+}
+
+/* 手填（保留原表单，AI 不可用时也不堵路） */
+function showNewCardManual(prefill, fromDraft) {
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('plus')} 新建档案卡</b>
+      <span class="sub">手填</span>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    ${fromDraft ? `<label class="field"><span>客户原话（留着，AI 可再整理）</span>
+      <textarea id="ncTalk" class="brief-area" style="min-height:96px">${esc(prefill || '')}</textarea></label>` : ''}
+    <div class="form-grid">
+      <label class="field"><span>名字（= 目录名）*</span>
         <input id="ncName" placeholder="陈洁斌主号"></label>
       <label class="field"><span>口头叫法，逗号分隔 *</span>
-        <input id="ncAlias" placeholder="洁斌,主号,陈洁斌">
-        <span class="hint">口头叫人名、目录是品牌名，没别名会重复建档</span></label>
+        <input id="ncAlias" placeholder="洁斌,主号,陈洁斌"></label>
       <label class="field"><span>类型</span>
-        <select id="ncType"><option>本人</option><option>客户</option><option>角色</option></select>
-        <span class="hint">选「客户」时默认禁止内容上云（走本地模型）</span></label>
+        <select id="ncType"><option>客户</option><option>本人IP</option></select></label>
       <label class="field"><span>标签</span><input id="ncTag" placeholder="S / A / B"></label>
       <label class="field"><span>定位（一句话）</span><input id="ncRole" placeholder="AI 口播 · 讲交付真相"></label>
       <label class="field"><span>存储空间名</span><input id="ncSpace" placeholder="陈洁斌主号资产"></label>
     </div>
     <div class="hint" style="margin:8px 0 12px">
-      会建全套目录 + card.json，并登记进总册。技术真值（音色/静帧/画幅）还得后面填，缺了出不了片。</div>
+      手填只建目录 + 空卡；需求、红线、人设文档都得后面补。想让 AI 顺手写人设，回上一步。</div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button class="btn ghost" id="mclose2">取消</button>
       <button class="btn primary" id="ncGo">建档</button></div>`;
@@ -846,9 +1114,14 @@ function showNewSet() {
       <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
     <div class="form-grid">
       <label class="field"><span>套次编号 *</span><input id="nsId" value="${esc(guess)}"></label>
-      <label class="field"><span>标题 / 主题 *</span><input id="nsTitle" placeholder="一条片子值多少钱"></label>
+      <label class="field"><span>标题 / 主题</span><input id="nsTitle" placeholder="留空就让 AI 按人设出题"></label>
     </div>
-    <div class="hint" style="margin:8px 0 12px">
+    <div style="display:flex;gap:7px;align-items:center;margin:12px 0 4px">
+      <button class="btn sm" id="nsIdea">${ico('spark')} AI 想几个选题</button>
+      <span class="hint" id="nsIdeaSub">读 01_人设与规范，避开做过的角度</span>
+    </div>
+    <div id="nsTopics"></div>
+    <div class="hint" style="margin:12px 0 12px">
       会在 <span class="mono">${esc(state.ip || '')}</span> 下建这一套的目录，并写进索引。
       建完先去「需求台」把要求写清楚，再生成提示词。</div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
@@ -856,10 +1129,64 @@ function showNewSet() {
       <button class="btn primary" id="nsGo">建</button></div>`;
   $('#modal').classList.add('show');
   $('#mclose').onclick = $('#mclose2').onclick = closeModal;
+
+  let picked = null;
+
+  const renderTopics = r => {
+    const list = r.topics || [];
+    if (!list.length) {
+      $('#nsTopics').innerHTML = `<div class="warnbox">没生成出选题${r.dropped?.length ? `（${r.dropped.length} 条被红线拦下）` : ''}</div>`;
+      return;
+    }
+    $('#nsTopics').innerHTML = `<div class="topics">${list.map((t, i) => `
+      <div class="topic" data-topic="${i}">
+        <div class="t">${esc(t.title)}</div>
+        <div class="h">${esc(t.hook)}</div>
+        <div class="a">${esc(t.angle)}</div>
+      </div>`).join('')}</div>
+      ${r.note ? `<div class="hint" style="margin-top:6px">${esc(r.note)}</div>` : ''}
+      <div class="hint">点一条填进标题。${r.provider ? `（${esc(r.provider)} 出的）` : ''}</div>`;
+    $$('#nsTopics .topic').forEach(el => {
+      el.onclick = () => {
+        const t = list[+el.dataset.topic];
+        picked = t;
+        $('#nsTitle').value = t.title;
+        $$('#nsTopics .topic').forEach(x => x.classList.toggle('on', x === el));
+      };
+    });
+  };
+
+  $('#nsIdea').onclick = async () => {
+    const b = $('#nsIdea');
+    b.disabled = true; b.innerHTML = `${ico('spark')} 想题中…`;
+    const r = await api('topics', { body: { ip: state.ip, n: 5, hint: ($('#nsTitle')?.value || '').trim() } });
+    b.disabled = false; b.innerHTML = `${ico('spark')} AI 想几个选题`;
+    if (r.error) {
+      $('#nsTopics').innerHTML = `<div class="warnbox">${esc(r.error).replace(/\n/g, '<br>')}</div>`;
+      $('#nsIdeaSub').textContent = r.need_persona ? '缺人设材料，先去建档或补 01_人设与规范' : '';
+      return;
+    }
+    renderTopics(r);
+  };
+
   $('#nsGo').onclick = async () => {
     const id = ($('#nsId')?.value || '').trim().toUpperCase();
-    const title = ($('#nsTitle')?.value || '').trim();
-    if (!id || !title) return toast('还差东西', '编号和标题都要填', 'err');
+    let title = ($('#nsTitle')?.value || '').trim();
+    if (!id) return toast('还差东西', '套次编号要填', 'err');
+
+    // 没写标题 → 自动按人设出一个。这一步放这里而不是建完再补，
+    // 是因为 job.json 里标题是后面提示词和人设对齐的依据，空着会一路歪。
+    if (!title) {
+      const b = $('#nsGo');
+      b.disabled = true; b.textContent = '没写标题，AI 正在出题…';
+      const r = await api('topics', { body: { ip: state.ip, n: 1 } });
+      b.disabled = false; b.textContent = '建';
+      if (r.error || !(r.topics || []).length) {
+        return toast('标题还是得有', r.error ? 'AI 出题失败：' + r.error : 'AI 没给出选题', 'err');
+      }
+      title = r.topics[0].title;
+      toast('自动取了标题', title, 'ok');
+    }
     const r = await api('run', { body: { cmd: 'job-new', args: [state.ip, id, title] } });
     if (r.error) return toast('没建成', r.error, 'err');
     closeModal();
@@ -896,7 +1223,34 @@ function bind() {
     if (rst) return void await saveReset(rst.dataset.resetScope, rst.dataset.resetKey);
 
     const svc = e.target.closest('[data-svc]');
-    if (svc) return void await showSvc(svc.dataset.svc);
+    if (svc) {
+      // 「LLM 网关」这个徽章不跳服务详情 —— 用户想点开的多半是「换一条车道」
+      if (svc.dataset.svc === 'zen-gate') return void await showLlmPanel();
+      return void await showSvc(svc.dataset.svc);
+    }
+
+    if (e.target.closest('[data-mcp]')) return void await showMcpPanel();
+
+    const stageEl = e.target.closest('.stage[data-stage]');
+    if (stageEl) return void await showStage(stageEl.dataset.stage);
+
+    const probe = e.target.closest('[data-probe]');
+    if (probe) {
+      const b = probe;
+      b.disabled = true; const old = b.textContent; b.textContent = '测…';
+      const r = await api('llm-probe', { body: { name: b.dataset.probe } });
+      b.disabled = false; b.textContent = old;
+      toast(r.ok ? '这条通' : '这条不通', (r.detail || '').replace(/^[✓✗]\s*/, ''), r.ok ? 'ok' : 'err');
+      return;
+    }
+
+    const pref = e.target.closest('[data-prefer]');
+    if (pref) {
+      await api('llm-prefer', { body: { name: pref.dataset.prefer } });
+      toast('已设为首选', `${pref.dataset.prefer} —— 挂了会自动换下一家`, 'ok');
+      await showLlmPanel();
+      return;
+    }
 
     const redo = e.target.closest('[data-redo]');
     if (redo) {

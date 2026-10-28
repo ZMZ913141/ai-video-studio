@@ -636,3 +636,114 @@ input[type="range"]::-moz-range-thumb {
 /* 设置里"默认"按钮比"保存"弱一档，别让人误点 */
 .btn.ghost[data-reset-key] { color: var(--tx-3); }
 .btn.ghost[data-reset-key]:hover { color: var(--tx-1); }
+
+/* ============================================================
+   2026-10-29 补：阶段详情 / 车道选择 / 选题卡 / 建档草案
+   ============================================================ */
+
+/* 进度节点现在能点，得让它看起来能点 —— 但别抢主次，只给一点暗示 */
+.stage { cursor: pointer; transition: transform .15s ease, background .15s ease; }
+.stage:hover { transform: translateY(-2px); background: rgba(255, 255, 255, .05); }
+.stage:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.stage:active { transform: translateY(0); }
+
+/* 阶段里的产物行 */
+.stage-art {
+  display: flex; align-items: center; gap: 9px; cursor: pointer;
+  padding: 8px 11px; margin-bottom: 6px; border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, .035); border: 1px solid var(--stroke);
+  font-size: 12px; transition: background .15s ease, border-color .15s ease;
+}
+.stage-art:hover { background: rgba(124, 108, 255, .11); border-color: rgba(124, 108, 255, .3); }
+.stage-art .k {
+  width: 20px; height: 20px; flex: 0 0 20px; border-radius: 6px;
+  display: grid; place-items: center; font-size: 10px;
+  background: rgba(53, 214, 208, .12); color: var(--accent-2);
+}
+.stage-art .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stage-art .sz { color: var(--tx-3); font-size: 10.5px; white-space: nowrap; }
+
+/* 重跑方案 */
+.plan {
+  padding: 10px 12px; margin-bottom: 9px; border-radius: var(--r-md);
+  background: linear-gradient(160deg, rgba(255, 255, 255, .045), rgba(0, 0, 0, .2));
+  border: 1px solid var(--stroke);
+}
+.plan-h { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+
+/* 车道行 */
+.chans { display: flex; flex-direction: column; gap: 6px; }
+.chan {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 11px; border-radius: var(--r-md);
+  background: rgba(255, 255, 255, .03); border: 1px solid var(--stroke);
+}
+.chan.star { border-color: rgba(124, 108, 255, .45); background: rgba(124, 108, 255, .08); }
+.chan-main { flex: 1; min-width: 0; }
+.chan-name { font-size: 12.5px; display: flex; align-items: center; gap: 6px; }
+.chan-meta {
+  font-size: 10.5px; color: var(--tx-3); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tag2 {
+  font-size: 9.5px; padding: 1px 5px; border-radius: 4px; line-height: 1.5;
+  background: rgba(53, 214, 208, .14); color: var(--accent-2);
+}
+.tag2.warn2 { background: rgba(255, 184, 77, .14); color: var(--warn); }
+.dot.ok { background: var(--ok); }
+.dot.cool { background: var(--warn); }
+
+/* 选题卡 */
+.topics { display: grid; gap: 7px; margin: 8px 0; }
+.topic {
+  padding: 10px 12px; border-radius: var(--r-md); cursor: pointer;
+  background: rgba(255, 255, 255, .03); border: 1px solid var(--stroke);
+  transition: background .15s ease, border-color .15s ease;
+}
+.topic:hover { background: rgba(124, 108, 255, .1); border-color: rgba(124, 108, 255, .3); }
+.topic.on { background: rgba(124, 108, 255, .16); border-color: var(--accent); }
+.topic .t { font-size: 13px; font-weight: 600; color: var(--tx-1); }
+.topic .h { font-size: 11.5px; color: var(--tx-2); margin-top: 3px; line-height: 1.5; }
+.topic .a { font-size: 10.5px; color: var(--tx-3); margin-top: 3px; }
+
+/* 警告盒：比 hint 重，比报错轻 */
+.warnbox {
+  padding: 9px 12px; margin: 8px 0; border-radius: var(--r-sm);
+  font-size: 11.5px; line-height: 1.6;
+  background: rgba(255, 184, 77, .1); border: 1px solid rgba(255, 184, 77, .28);
+  color: #ffd79a;
+}
+
+/* 人设文档折叠预览 */
+.mddoc {
+  margin-bottom: 6px; border-radius: var(--r-sm);
+  background: rgba(0, 0, 0, .22); border: 1px solid var(--stroke);
+}
+.mddoc > summary {
+  padding: 8px 11px; cursor: pointer; font-size: 12px;
+  display: flex; gap: 8px; align-items: center;
+}
+.mddoc > summary:hover { background: rgba(255, 255, 255, .03); }
+.mddoc > pre {
+  margin: 0; padding: 4px 12px 12px; white-space: pre-wrap;
+  font-size: 11.5px; line-height: 1.7; color: var(--tx-2);
+  max-height: 320px; overflow: auto; font-family: inherit;
+}
+
+/* 服务徽章里的 MCP：它不是常驻服务，颜色上要区别开 */
+.svc.mcp .dot { background: var(--accent); }
+.svc.mcp::after { content: '接口'; font-size: 9.5px; color: var(--tx-3); }
+
+/* 交付前自检行：一眼看出哪条不过 */
+.chk {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 7px 10px; margin-bottom: 5px; border-radius: var(--r-sm);
+  font-size: 11.5px; line-height: 1.55;
+  background: rgba(255, 255, 255, .03); border: 1px solid var(--stroke);
+}
+.chk.ok .m { color: var(--ok); }
+.chk.bad { background: rgba(255, 184, 77, .08); border-color: rgba(255, 184, 77, .26); }
+.chk.bad .m { color: var(--warn); }
+.chk .m { flex: 0 0 12px; font-weight: 700; }
+.chk .k { flex: 0 0 74px; color: var(--tx-3); }
+.chk .v { flex: 1; color: var(--tx-1); }

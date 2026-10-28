@@ -36,6 +36,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(BIN_DIR)
+# 让 server 能直接 import 同目录的 studio_ai / prompt_guard（只读调用，不复制逻辑）
+if BIN_DIR not in sys.path:
+    sys.path.insert(0, BIN_DIR)
 UI_DIR = os.path.join(ROOT, "ui")
 ARCHIVE = os.environ.get("STUDIO_ARCHIVE") or "/cfu/ai视频档案库"
 CACHE_DIR = os.path.join(ROOT, ".cache", "ui")
@@ -108,11 +111,47 @@ IP_WRITABLE = {
 TASKS = {}
 TASK_LOCK = threading.Lock()
 
+# 中文业务阶段 → 流水线步骤区间 (from, to)。
+# ★ 这个映射只在这里写一份：前端点进度节点时不该自己再列一遍步骤名，
+#   否则 config/pipeline.json 一改，界面就开始说谎。
+#   文案没有 step（人写的），所以不在表里 —— 缺表 = 给出「手工处理」的指引。
+STAGE_SPAN = {
+    "音频": ("tts", "pad"),
+    "视频": ("video", "grade"),
+    "后期": ("bgm", "mix"),
+    "字幕": ("ass", "burn"),
+    "验收": ("audit", "audit"),
+}
 
 # ---------- 基础 ----------
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+
+def load_llm_env():
+    """把 config/llm.env 灌进本进程环境。
+
+    服务进程不是登录 shell，不会自动 `set -a && . config/llm.env`。
+    不灌的话，凡是要用 key 的子调用（探活、AI 选题、建档草案）
+    都会报 MISSING_KEY —— 看着像「key 没配」，其实只是没人给它。
+
+    setdefault 而非硬覆盖：用户自己在终端 export 的优先。
+    """
+    p = os.path.join(ROOT, "config", "llm.env")
+    if not os.path.exists(p):
+        return 0
+    n = 0
+    with open(p, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            if k and k not in os.environ:
+                os.environ[k] = v.strip().strip('"').strip("'")
+                n += 1
+    return n
 
 def load_json(path):
     with open(path, encoding="utf-8") as f:
@@ -165,6 +204,25 @@ def run_cli(args, timeout=60):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                            cwd=ROOT, errors="replace")
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", f"超时 {timeout}s"
+    except Exception as ex:
+        return 125, "", f"{type(ex).__name__}: {ex}"
+
+
+def run_cli_script(args, timeout=60, python=None):
+    """跑 bin/ 下的独立脚本（不是 vstudio 子命令）。
+
+    为什么不 import 了直接调：这些脚本可能在别的解释器里才跑得动
+    （MCP 那套要 mcp 包的 venv，numpy 那套要 envs/default）。
+    用子进程 = 坏了解释器也只坏那一个功能，不会把整个网页服务拖崩。
+    """
+    cmd = [python or PY] + [os.path.join(BIN_DIR, a) if i == 0 else a
+                            for i, a in enumerate(args)]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           cwd=ROOT, errors="replace", stdin=subprocess.DEVNULL)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return 124, "", f"超时 {timeout}s"
@@ -229,6 +287,87 @@ def _worker(tid, args):
         TASKS[tid].update({"state": "done" if rc == 0 else "failed",
                            "out": (out or "") + (("\n[stderr]\n" + err) if err.strip() else ""),
                            "rc": rc, "ended": now()})
+
+
+# ---------- 视频规格探测（交付前自检要用） ----------
+def probe_video(path):
+    """用 `ffmpeg -i` 的 stderr 读规格。
+
+    ★ 不用 ffprobe：这台机器上早前解出来的 ffprobe 是坏文件（已删），
+      `ffmpeg -i` 什么都不输出到 stdout、全部规格都在 stderr 里，
+      所以必须合并抓 stderr 再正则，别写成 capture stdout。
+    """
+    try:
+        p = subprocess.run([ffmpeg_bin(), "-hide_banner", "-i", path],
+                           capture_output=True, text=True, timeout=30,
+                           errors="replace", stdin=subprocess.DEVNULL)
+    except Exception:
+        return None
+    txt = (p.stderr or "") + (p.stdout or "")
+    m = re.search(r"Video:.*?,\s*(\d{2,5})x(\d{2,5})", txt)
+    if not m:
+        return None
+    w, h = int(m.group(1)), int(m.group(2))
+    d = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", txt)
+    dur = (int(d.group(1)) * 3600 + int(d.group(2)) * 60 + float(d.group(3))) if d else None
+    return {"w": w, "h": h, "mp": round(w * h / 1e6, 3), "dur": dur}
+
+
+def deliver_precheck(ip, root, job, items):
+    """交付前必须能回答的两个问题：齐不齐？这条片子的规格够不够格交付？
+
+    ★ 为什么非查分辨率：S05 是 0.5MP 快速档试跑（本意就是给流程定性，不交付）。
+      光看「文件都在、验收 ok」会得出「可以交付」的结论 —— 那是错的。
+      规格对不上 ip.json 的目标 MP 时，必须当面说清这是试跑档。
+    """
+    checks = []
+    stages = job.get("stages") or {}
+    order = ["文案", "音频", "视频", "后期", "字幕", "验收"]
+    bad = [s for s in order if (stages.get(s) or {}).get("status") != "ok"]
+    checks.append({
+        "name": "各阶段状态", "ok": not bad,
+        "detail": "全部完成" if not bad else "还没完成：" + "、".join(bad),
+    })
+
+    # 交付阶段本身通常没有自己的产物目录，成片要从后期/视频那两栏里找
+    arts = list(items)
+    if not any(a.get("kind") == "video" for a in arts):
+        allarts = job.get("artifacts") or {}
+        for s in ("后期", "视频", "字幕"):
+            for p in (allarts.get(s) or []):
+                if os.path.exists(p):
+                    arts.append({"name": os.path.basename(p), "path": p,
+                                 "kind": "video" if p.lower().endswith((".mp4", ".mov"))
+                                 else "other"})
+    video = next((it for it in arts
+                  if it.get("kind") == "video" and "混音" in it["name"]), None) \
+        or next((it for it in arts if it.get("kind") == "video"), None)
+    if not video:
+        checks.append({"name": "成片", "ok": False, "detail": "没有可交付的视频"})
+        return checks
+
+    spec = probe_video(video["path"])
+    target = 0.0
+    try:
+        target = float(load_json(os.path.join(root, "ip.json"))
+                       .get("video", {}).get("mp") or 0)
+    except Exception:
+        pass
+    if spec:
+        ratio = (spec["mp"] / target) if target else 1.0
+        trial = bool(target) and ratio < 0.75
+        checks.append({
+            "name": "分辨率", "ok": not trial,
+            "detail": (f"{video['name']} 是 {spec['w']}×{spec['h']} = {spec['mp']}MP"
+                       + (f"，目标是 {target}MP" if target else "")
+                       + ("　→ 这是快速档试跑，不是正式交付件" if trial else "")),
+            "trial": trial,
+        })
+        checks.append({"name": "时长", "ok": bool(spec["dur"]),
+                       "detail": f"{spec['dur']:.1f}s" if spec["dur"] else "读不出时长"})
+    else:
+        checks.append({"name": "分辨率", "ok": False, "detail": "读不出规格（ffmpeg 没解析到）"})
+    return checks
 
 
 # ---------- 缩略图 ----------
@@ -466,6 +605,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_brief(get, body)
             if name == "svc":
                 return self._api_svc(get)
+            if name == "llm-channels":
+                return self._api_llm_channels()
+            if name == "llm-prefer":
+                return self._api_llm_prefer(body or {})
+            if name == "llm-probe":
+                return self._api_llm_probe(body or {})
+            if name == "topics":
+                return self._api_topics(body or {})
+            if name == "stage":
+                return self._api_stage(get)
+            if name == "card-draft":
+                return self._api_card_draft(body or {})
+            if name == "card-create":
+                return self._api_card_create(body or {})
+            if name == "mcp":
+                return self._api_mcp()
             return self._404("未知接口 " + name)
         except Exception as ex:
             import traceback
@@ -868,7 +1023,10 @@ class Handler(BaseHTTPRequestHandler):
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 txt = f.read()[:20000]
-        return self._json({"path": path, "text": txt, "exists": os.path.exists(path),
+        # 空文件不算「写过」：界面上写「已写」但点开是空白，比没有更让人火
+        return self._json({"path": path, "text": txt,
+                           "exists": bool(txt.strip()),
+                           "empty_file": os.path.exists(path) and not txt.strip(),
                            "folder": folder})
 
     # ---------- 服务详情 ----------
@@ -915,6 +1073,248 @@ class Handler(BaseHTTPRequestHandler):
                 info["err"] = str(ex)[:120]
         info["up"] = self._services().get(which) == "up"
         return self._json(info)
+
+    # ---------------- LLM 车道（人能选，且首选不排他） ----------------
+    def _api_llm_channels(self):
+        from llm_router import LLMRouter
+        r = LLMRouter()
+        rows = r.status()
+        pre = r.prefs().get("prefer")
+        for x in rows:
+            # 免费池那条要在界面上说清代价，别让人以为只是「更快的一条」
+            x["warn"] = ("提示词可能被上游记录" if x["pool"] == "免费池" else "")
+        return self._json({
+            "prefer": pre or None,
+            "channels": rows,
+            "usable": [x["name"] for x in rows if x["enabled"] and x["state"] == "可用"],
+        })
+
+    def _api_llm_prefer(self, body):
+        from llm_router import LLMRouter
+        name = (body.get("name") or "").strip() or None
+        r = LLMRouter()
+        if name and not any(p["name"] == name for p in r.cfg["providers"]):
+            return self._bad(f"没有叫 {name} 的通道")
+        d = r.set_prefer(name)
+        append_changelog("global", None, os.path.join(ROOT, "config", ".llm_prefs.json"),
+                         "llm.prefer", None, d.get("prefer"), actor="ui-llm")
+        return self._json({"ok": True, "prefer": d.get("prefer"),
+                           "note": "首选只是「优先」：这条挂了会自动换下一家，不会卡住。"})
+
+    def _api_llm_probe(self, body):
+        """只测一条通道，且**不写冷却** —— 诊断不该污染真实路由状态。"""
+        name = (body.get("name") or "").strip()
+        if not name:
+            return self._bad("缺通道名")
+        rc, out, err = run_cli_script(["llm_router.py", "probe", "--provider", name],
+                                      timeout=45)
+        txt = (out or "") + (err or "")
+        ok = rc == 0 and "✓" in txt
+        return self._json({"ok": ok, "channel": name,
+                           "detail": txt.strip()[:300]}, 200 if ok else 200)
+
+    # ---------------- AI：选题 ----------------
+    def _api_topics(self, body):
+        import studio_ai
+        ip = body.get("ip") or "洁斌"
+        n = max(1, min(int(body.get("n") or 5), 8))
+        hint = body.get("hint") or ""
+        prefer = body.get("prefer") or None
+        try:
+            r = studio_ai.suggest_topics(ip, n, hint, prefer)
+        except RuntimeError as ex:
+            # 没人设材料 → 这是**可解释的拒绝**，不是 bug，要给用户看得懂的话
+            return self._json({"error": str(ex), "need_persona": True}, 409)
+        return self._json(r)
+
+    # ---------------- 阶段详情（点进度节点 → 内容 + 重跑命令） ----------------
+    def _api_stage(self, get):
+        ip, jid, stage = get("ip"), get("id"), get("stage")
+        root = ip_root(ip)
+        if not root or not jid or not stage:
+            return self._bad("缺 ip / id / stage")
+        rc, out, err = run_cli(["--json", "job-show", ip, jid])
+        try:
+            job = json.loads(out)
+        except Exception:
+            return self._json({"error": err.strip() or "job-show 失败"}, 404)
+        setname = job.get("set") or jid
+        arts = (job.get("artifacts") or {}).get(stage) or []
+        st = (job.get("stages") or {}).get(stage) or {}
+        span = STAGE_SPAN.get(stage)
+
+        # 每条产物带上「能不能预览」，前端不必自己猜后缀
+        items = []
+        for p in arts:
+            ext = os.path.splitext(p)[1].lower()
+            kind = ("video" if ext in (".mp4", ".mov", ".webm") else
+                    "audio" if ext in (".mp3", ".wav", ".m4a", ".aac", ".flac") else
+                    "text" if ext in (".md", ".txt", ".json", ".srt", ".ass") else
+                    "image" if ext in (".jpg", ".jpeg", ".png", ".webp") else "other")
+            items.append({"path": p, "name": os.path.basename(p), "kind": kind,
+                          "exists": os.path.exists(p),
+                          "size": os.path.getsize(p) if os.path.exists(p) else 0,
+                          "mtime": (datetime.fromtimestamp(os.path.getmtime(p))
+                                    .strftime("%m-%d %H:%M") if os.path.exists(p) else "")})
+
+        plans = []
+        if span:
+            f, t = span
+            plans.append({
+                "label": f"只重做「{stage}」这一段（{f} → {t}）",
+                "why": "上游产物不动，最省时间；适合只改了本阶段的东西",
+                "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from {f} --to {t}",
+            })
+            plans.append({
+                "label": f"从「{stage}」一路做到最后（{f} → 结束）",
+                "why": "上游不动、下游全部重算；本阶段改动会影响后面每一步时用",
+                "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from {f}",
+            })
+        if stage == "交付":
+            plans.append({
+                "label": "先出正式档（推荐，若当前是试跑档）",
+                "why": "视频段按 ip.json 的目标分辨率重生成，约 19-25 分钟。交付件要用这一版",
+                "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from video",
+            })
+            plans.append({
+                "label": "标记为已交付",
+                "why": "产物齐了、验收也过了才点。这条改的是 job.json，不动视频",
+                "cmd": f"python3 bin/vstudio.py job-set {ip} {jid} 交付 ok",
+            })
+        if stage == "文案":
+            plans.append({
+                "label": "重写文案（手工）",
+                "why": "文案不在流水线里，得人写或让 AI 出草稿",
+                "cmd": f"python3 bin/vstudio.py prompts {ip} {setname} --gen",
+            })
+
+        return self._json({
+            "ip": ip, "id": jid, "set": setname, "stage": stage,
+            "status": st.get("status"), "at": st.get("at"), "by": st.get("by"),
+            "items": items, "plans": plans,
+            "next": self._next_stage(job, stage),
+            "precheck": (deliver_precheck(ip, root, job, items)
+                         if stage == "交付" else None),
+        })
+
+    @staticmethod
+    def _next_stage(job, stage):
+        order = ["文案", "音频", "视频", "后期", "字幕", "验收", "交付"]
+        try:
+            i = order.index(stage)
+        except ValueError:
+            return None
+        stages = job.get("stages") or {}
+        for s in order[i + 1:]:
+            if (stages.get(s) or {}).get("status") != "ok":
+                return {"stage": s, "status": (stages.get(s) or {}).get("status")
+                        or "pending"}
+        return None
+
+    # ---------------- AI：对话式建档 ----------------
+    def _api_card_draft(self, body):
+        import studio_ai
+        text = (body.get("text") or "").strip()
+        if not text:
+            return self._bad("先说说这个客户是谁、要做什么")
+        try:
+            r = studio_ai.draft_card(text, body.get("prefer") or None)
+        except Exception as ex:
+            return self._json({"error": f"{type(ex).__name__}: {ex}"}, 502)
+        # 顺带告一下会不会撞名，省得填完才被拒
+        r["dup"] = bool(ip_root(r["draft"]["name"]))
+        return self._json(r)
+
+    def _api_card_create(self, body):
+        """确认后的落盘：走 CLI 建档 + 记需求/红线 + 写人设 md。
+
+        顺序有意为之：先 card-new（它会建目录树并登记总册），
+        再 card-note 补业务内容，最后写 md。
+        中途任一步失败就停在原地 —— 半截档案比没有更糟，宁可留个空壳让人看见。
+        """
+        d = body.get("draft") or {}
+        md = body.get("persona_md") or {}
+        name = (d.get("name") or "").strip()
+        if not name:
+            return self._bad("缺目录名")
+        if ip_root(name):
+            return self._json({"error": f"「{name}」已存在，换个名字或去改那张卡"}, 409)
+
+        args = ["card-new", "--name", name, "--type", d.get("type") or "客户"]
+        for flag, key in (("--tag", "tag"), ("--role", "role"),
+                          ("--space", "space"), ("--aliases", "aliases")):
+            v = d.get(key)
+            if isinstance(v, list):
+                v = ",".join(v)
+            if v:
+                args += [flag, str(v)]
+        rc, out, err = run_cli(args, timeout=180)
+        if rc != 0:
+            return self._json({"error": "card-new 失败", "detail": (out + err).strip()[:600]},
+                              500)
+
+        notes = []
+        for k, v in (d.get("needs") or {}).items():
+            txt = v if isinstance(v, str) else "、".join(map(str, v))
+            if txt.strip():
+                r2, o2, e2 = run_cli(["card-note", name, txt, "--kind", "need",
+                                      "--key", str(k)], timeout=60)
+                notes.append({"kind": "need", "key": k, "ok": r2 == 0})
+        for kind, bucket in (("redline", "redlines"), ("habit", "habits")):
+            for t in (d.get(bucket) or []):
+                if str(t).strip():
+                    r2, o2, e2 = run_cli(["card-note", name, str(t), "--kind", kind],
+                                         timeout=60)
+                    notes.append({"kind": kind, "text": str(t), "ok": r2 == 0})
+
+        root = ip_root(name)
+        written = []
+        if root and md:
+            pdir = os.path.join(root, "01_人设与规范")
+            os.makedirs(pdir, exist_ok=True)
+            for fn, text in md.items():
+                if not str(text).strip():
+                    continue
+                fp = os.path.join(pdir, os.path.basename(fn))
+                with open(fp, "w", encoding="utf-8") as f:
+                    f.write(str(text).rstrip() + "\n")
+                written.append(fp)
+
+        append_changelog("ip", name, os.path.join(root or "", "card.json"),
+                         "card.new", None, name, actor="ui-card")
+        return self._json({"ok": True, "name": name, "root": root,
+                           "notes": notes, "md": written,
+                           "next": [f"把音色参考 / 起始静帧 / 形象底图 填进 {root}/ip.json",
+                                    f"python3 bin/vstudio.py guard {name}"]})
+
+    # ---------------- MCP 自检 ----------------
+    def _api_mcp(self):
+        """真跑一次 MCP 握手 —— 不靠「文件存在」判断能不能对接。"""
+        venv = os.path.join(ROOT, "mcp-servers", "ip-studio", ".venv", "bin", "python")
+        srv = os.path.join(BIN_DIR, "mcp_server.py")
+        if not os.path.exists(srv):
+            return self._json({"ok": False, "error": "没有 bin/mcp_server.py"})
+        rc, out, err = run_cli_script(["mcp_probe.py"], timeout=90,
+                                      python=venv if os.path.exists(venv) else None)
+        info = {}
+        for line in reversed((out or "").strip().splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    info = json.loads(line)
+                    break
+                except Exception:
+                    continue
+        py = venv if os.path.exists(venv) else PY
+        return self._json({
+            "ok": bool(info.get("tools")) and bool(info.get("probe_ok")),
+            "tools": info.get("tools") or [],
+            "server": info.get("server") or {},
+            "probe": info.get("probe_call"),
+            "cmd": f"{py} {srv}",
+            "register": f"claude mcp add ip-studio -- {py} {srv}",
+            "detail": (info.get("error") or (out or err or "").strip()[:400]),
+        })
 
     def _api_set(self, body):
         """改一处必须有讲究：只允许白名单键、类型校验、第二层要 confirm、改动前后都记 changelog"""
@@ -1101,6 +1501,9 @@ def main():
             pass
 
     os.makedirs(CACHE_DIR, exist_ok=True)
+    nk = load_llm_env()          # 子进程（探活/AI）要靠它拿到 key
+    if nk:
+        print(f"  已载入 {nk} 个 LLM 环境变量（config/llm.env）")
     os.makedirs(THUMB_DIR, exist_ok=True)
     mimetypes.init()
 

@@ -153,6 +153,12 @@ python3 bin/ui_server.py --status          # 应答「没在跑」
 | 参数被改乱了想回退 | 设置里每项右边的「默认」 | 取 `git HEAD` 的值，改前自动备份 |
 | 换字幕字体并看效果 | 设置 → 个人 → 「字幕外观」 | 选字体 + 拉字号，实时预览 |
 | 看某个服务是死是活 | 顶栏四个圆点，点一下 | 弹层给地址、作用、怎么起 |
+| **换 LLM 车道** | 顶栏点「LLM 网关」圆点 | 车道列表：设首选 / 单条实测（不写冷却） |
+| **没想好拍什么** | 新套次弹层「AI 想几个选题」，或标题留空直接建 | 读 `01_人设与规范/` 出 5 条，过红线后给候选 |
+| **接新客户说得清就行** | 「＋ 新建档案卡」→ 用大白话介绍 → AI 出草案 | 出字段 + 两篇人设 md，改到满意再点创建 |
+| **看某一步的产物 / 从这步重跑** | 「进度与自检」点任意阶段节点 | 产物可点开预览 + 两条重跑命令（只重做这段 / 从这做到最后） |
+| **交付前确认能不能交** | 点「交付」节点 | 自动查各阶段状态 + **实测成片分辨率** 对不对得上目标 MP |
+| **让别的 AI 调用本项目** | 顶栏「MCP 接口」圆点 | 真握手一次，列工具 + 给注册命令 |
 | 找设置 | 顶栏齿轮，或右栏「设置」tab | 同一个地方 |
 
 几条口径：
@@ -173,6 +179,40 @@ NODE_PATH=/home/qmr/.workbuddy/binaries/node/workspace/node_modules \
 # 打印各区块渲染计数 + 抓运行时异常；有新 error 就是 regression
 ```
 
+### 三条「会动脑子」的活，提示词都在 `bin/studio_ai.py`
+
+界面只是入口，逻辑在 `bin/studio_ai.py`（也能直接跑，不必开网页）：
+
+```bash
+python3 bin/studio_ai.py persona 洁斌          # 看多少字进了 context
+python3 bin/studio_ai.py topics 洁斌 -n 5      # 按人设出选题
+python3 bin/studio_ai.py card-draft "客户是开潮汕牛肉火锅的…"
+```
+
+**为什么 AI 选题必须先读 `01_人设与规范/`**：没有人设就只能编，编出来的身份
+和真人对不上，一开口就废。所以材料为空时它**直接拒绝**（不是给一堆烂选题），
+并且把「去补哪份文件」写清楚。
+
+**这几条一律 `sensitive=True`（只走付费池）**：人设圣经和客户档案是商业信息，
+送进「提示词可能被上游记录」的免费池，是拿客户机密换几厘钱。这一行不许改。
+
+**建档是两段式**：先出草案给人改，再落盘。因为档案卡一落盘就进总册、
+名字等于目录名，事后改名很脏 —— 判断要发生在不可逆之前。
+
+### LLM 车道：能选，但选了不排他
+
+```bash
+python3 bin/llm_router.py status                    # ★ 标出首选
+python3 bin/llm_router.py prefer --provider qianfan # 设首选（传空 = 清掉）
+python3 bin/llm_router.py probe --provider zengate  # 只测一条，且不写冷却
+```
+
+- 首选存在 `config/.llm_prefs.json`（本机偏好，不进版本库）。
+- **首选只是「优先」不是「只用」**：这条 429/超时了照样自动换下一家。
+  刻意不做「只走这一条」—— 那等于把整条流水线焊死在一家身上，正是
+  「zen-gate 不能用就卡住」的成因。
+- `probe` **不写冷却**：诊断动作污染真实路由状态，会让你以为某条坏了。
+
 ### 已知实现讲究
 
 - **不走 CDN、不引框架**：`ui_server.py` 是 `http.server` 零第三方依赖，前端无构建。断网照样能开。
@@ -180,6 +220,12 @@ NODE_PATH=/home/qmr/.workbuddy/binaries/node/workspace/node_modules \
 - **端口被占自动往后顺延**（撞车是这台机器的常态，不该让人去查 PID），真实端口写 `/tmp/vstudio-ui.json`。
 - **文件浏览关在笼子里**：请求的路径 `realpath` 必须落在档案区或项目根之内，越界一律拒绝。
 - **视频要能拖动**：`/api/raw` 实现了 HTTP Range（206），只返回整段的播放器拖不动进度条。
+- **交付前自检要实测分辨率**：`/api/stage?stage=交付` 会用 `ffmpeg -i`（**不是 ffprobe，
+  这台机器上那个是坏文件**）读成片尺寸，和目标 `video.mp` 比。
+  低于 75% 就判定为「快速档试跑，不是交付件」—— 光看「文件齐、验收 ok」会得出错误结论，
+  S05 就是 0.522MP vs 目标 1.26MP 的试跑档。
+- **服务进程要自己灌 `config/llm.env`**：它不是登录 shell，不会自动 `set -a && . ...`。
+  不灌的话凡是要 key 的活都报 `MISSING_KEY`，看着像「key 没配」，其实只是没人给它（`load_llm_env()`）。
 
 ---
 
@@ -456,6 +502,22 @@ LoRA 改权重所以紧跟 UNET；Sage 改 attention 实现；低显存分块必
 `job_set` `guard` `scripts` `status`
 
 **方式 C**：HTTP `:8000`（n8n 用）
+
+**先自检再接**（别靠「文件在就算能用」判断）：
+
+```bash
+./mcp-servers/ip-studio/.venv/bin/python bin/mcp_probe.py
+# ✓ 握手成功  服务 ip-studio 1.30.0
+# ✓ 工具 11 个：ips, jobs, …
+# ✓ 实调 status() 返回了内容
+```
+
+`mcp_probe.py` 真走一遍 `initialize → tools/list → tools/call`。
+只看文件存不存在没用：mcp 包升级会改 `FastMCP` 的导入路径（2.x 改名
+`MCPServer`），工具签名写错会在握手阶段就抛 —— 这些只有真握手才暴露。
+界面顶栏那个「MCP 接口」圆点跑的就是它。
+
+**方式 D**：工作台 HTTP（`bin/ui_server.py`，给网页用，不建议外部系统直连）
 
 ---
 
