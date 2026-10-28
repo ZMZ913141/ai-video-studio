@@ -174,7 +174,7 @@ def suggest_topics(ip, n=5, hint="", prefer=None):
     cloud_why = ip_policy.require_cloud(ctx["root"], ctx["name"])
 
     card = ctx["card"]
-    redlines = card.get("redlines") or []
+    redlines = _texts(card.get("redlines"))
     needs = card.get("needs") or {}
     user = f"""# 这个 IP
 名字：{ctx['name']}
@@ -234,6 +234,300 @@ def suggest_topics(ip, n=5, hint="", prefer=None):
         # 把「凭什么允许上云」一起带出去：临时放行也留痕
         "cloud_policy": cloud_why,
     }
+
+
+def _texts(items):
+    """把档案卡里那种 [{'at':..., 'text':...}] 的条目抽成纯文本。
+
+    ★ 别直接 str()：会喂给模型一堆 `{'at': '2026-10-28 21:35', 'text': ...}`，
+      既浪费 token 又让"禁止"这类关键约束淹没在噪音里。
+    """
+    out = []
+    for x in (items or []):
+        if isinstance(x, dict):
+            t = x.get("text") or x.get("note") or ""
+            if str(t).strip():
+                out.append(str(t).strip())
+        elif str(x).strip():
+            out.append(str(x).strip())
+    return out
+
+
+# ---------------------------------------------------------------- 爆款文案
+SCRIPT_STANDARD = os.path.join(ROOT, "templates", "script_standard.md")
+
+
+def load_standard():
+    """爆款标准是**判据**，必须存在。
+
+    读不到就停 —— 凭模型自己的口味写出来的稿子不算数，
+    而且下次换个人来跑，结果会完全不一样。
+    """
+    if not os.path.exists(SCRIPT_STANDARD):
+        raise RuntimeError(
+            "缺少爆款标准：" + SCRIPT_STANDARD + "\n"
+            "这是全库共用的判据（从主号 S01–S05 已跑量的稿子提纯出来的）。\n"
+            "没有它，模型只能凭自己的网感自由发挥 —— 出稿质量会飘，而且不可复现。")
+    with open(SCRIPT_STANDARD, encoding="utf-8") as f:
+        return f.read()
+
+
+def _brief_text(root, setname):
+    """这套片子的需求稿（人手写的那份）。没有就空着 —— 不编。"""
+    base = os.path.join(root, "05_文案")
+    if not os.path.isdir(base) or not setname:
+        return "", None
+    cand = [x for x in sorted(os.listdir(base)) if x.startswith(setname)]
+    if not cand:
+        return "", None
+    p = os.path.join(base, cand[0], "brief.md")
+    if not os.path.exists(p):
+        return "", None
+    try:
+        with open(p, encoding="utf-8") as f:
+            return f.read()[:4000], p
+    except Exception:
+        return "", None
+
+
+def _past_scripts(root, limit=3):
+    """这个号最近写好的几条文案。
+
+    给模型看两件事：① 这个号真实的口吻和长度是多少；
+    ② 别连着几条用同一个开头套路 —— 同一个号连发，观众一眼看出是模板。
+    """
+    base = os.path.join(root, "05_文案")
+    out = []
+    if not os.path.isdir(base):
+        return out
+    for d in sorted(os.listdir(base), reverse=True):
+        p = os.path.join(base, d)
+        if not os.path.isdir(p):
+            continue
+        for fn in sorted(os.listdir(p)):
+            if "字幕文本" in fn and fn.endswith(".txt"):
+                try:
+                    with open(os.path.join(p, fn), encoding="utf-8") as f:
+                        t = f.read().strip()
+                    if t:
+                        out.append({"set": d, "text": t[:500]})
+                except Exception:
+                    pass
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
+SCRIPT_SYSTEM = """你是「AI 数字人口播」账号的文案，写的是**要念出来的口播稿**，不是文章。
+
+你会拿到：这个 IP 的人设、客户的具体需求、这个账号的硬性红线、
+一份《爆款口播文案标准》（同一个工作室主号跑量的稿子提纯出来的判据）、
+以及这个号最近发过的几条稿（用来对齐口吻、避开重复套路）。
+
+写作要求，按重要性排序：
+1. **严格照标准文件里的五段骨架写**：钩子 / 共情 / 反转或算账 / 降门槛 / 落点。
+   落点必须用标准里给的那句固定话术，一个字都别改 —— 它是资产，不是文案。
+2. 只写这个人设能自然开口的话。人设里没写过的身份、经历、专业领域，绝不编。
+3. 字数按标准（默认 130–170 字）。宁短不长。
+4. 全程「你」，短句，能一口气念下来。写完自己念一遍，卡舌头就重写。
+5. 红线里的表达一个都不许出现。
+6. 学标准里那几条示例的**结构**，不要抄它们的**句子**。
+7. 不要另起"关注我""点赞收藏"这类尾巴 —— 落点就是结尾。
+
+返回 JSON，不要任何解释文字：
+{"hook_type":"反常识/证言/威胁/过程/算账（选一个）",
+ "landing":"结尾那句固定话术（若已给定就原样用；没给定就按这个客户的业务拟一条）",
+ "landing_new":true或false（"是不是这次新拟的"）,
+ "lines":["屏幕上逐行出现的字幕，每行 2-12 字，按口语换气切"],
+ "script":"把 lines 连起来的完整口播稿，一句一行，最后一行必须是 landing",
+ "claims":["这条里承诺了什么，逐条列出（必须能被兑现）"],
+ "self_check":{"hook_alone":true,"numbers_used":3,"no_self_praise":true,"landing_fixed":true},
+ "note":"你拿不准的地方，40 字以内"}
+
+★ 关于落点：如果输入里给了「本号固定落点」，**必须原样放在最后一行，一个字都不许改**；
+  只有明确写着「还没定落点」时，才可以自己拟 —— 并在 landing_new 里标 true，
+  让人知道这句是新的、需要他确认。落点缺失是最常见的翻车点：稿子讲得好好的，最后没有让人动手。"""
+
+
+def write_script(ip, setname="", topic="", tone="", prefer=None, length="standard"):
+    """按角色需求 + 主号爆款标准，写一条完整口播稿。
+
+    ★ 只出稿，不落盘。落盘由调用方决定（`--write`），
+      因为覆盖别人写好的文案是不可逆的，得让动手的人自己确认。
+    """
+    ctx = ip_context(ip)
+    standard = load_standard()
+
+    card = ctx["card"]
+    needs = card.get("needs") or {}
+    habits = _texts(card.get("habits"))
+    redlines = _texts(card.get("redlines"))
+
+    import ip_policy
+    cloud_why = ip_policy.require_cloud(ctx["root"], ctx["name"])
+
+    # 本号的固定落点。没有就让模型拟一条并标出来 —— 不能每次临时编，
+    # 每次不一样等于没有落点，观众也记不住要他干什么。
+    landing = str(card.get("landing") or "").strip()
+
+    brief, brief_path = _brief_text(ctx["root"], setname) if setname else ("", None)
+    past = _past_scripts(ctx["root"])
+
+    words = "标准版 130–170 字" if length == "standard" else "短版 80–100 字"
+
+    user = f"""# 这是谁
+名字：{ctx['name']}
+类型：{card.get('type', '?')}    一句话定位：{card.get('role', '')}
+
+# 客户的需求（他本人怎么说）
+{json.dumps(needs, ensure_ascii=False, indent=1) if needs else '（档案卡里没记需求 —— 只能靠人设推，写保守些）'}
+
+# 这套片子的需求稿（最贴身的约束，优先于上面）
+{brief.strip() if brief.strip() else '（这套还没写 brief.md。请只依据人设和客户需求，不要自己发明具体承诺）'}
+
+# 硬性红线（一条都不能碰）
+{chr(10).join('- ' + r for r in redlines) if redlines else '（档案卡里没记红线）'}
+
+# 他的说话习惯
+{chr(10).join('- ' + h for h in habits) if habits else '（没记）'}
+
+# 本号固定落点
+{landing if landing else '（还没定落点 —— 这次请你按这个客户的业务拟一条，并在 landing_new 标 true）'}
+
+# 人设材料
+{ctx['persona']}
+
+# 这个号最近发过的稿（对齐口吻，但不要重复这些开头和句式）
+{chr(10).join(f'【{p["set"]}】{p["text"]}' + chr(10) for p in past) if past else '（还没有发过的）'}
+
+# 《爆款口播文案标准》
+{standard}
+
+# 这次要写的
+{('题目：' + topic) if topic.strip() else '题目：自己从这个号能讲的范围里挑一个最该现在发的（不要跟上面发过的重复角度）'}
+{(chr(10) + '额外要求：' + tone) if tone.strip() else ''}
+字数：{words}"""
+
+    def one_pass(extra=""):
+        d, pv = chat_json(SCRIPT_SYSTEM, user + extra, max_tokens=2400,
+                          prefer=prefer, temperature=0.8)
+        ln = [str(x).strip() for x in (d.get("lines") or []) if str(x).strip()]
+        sc = str(d.get("script") or "").strip()
+        if not sc and ln:
+            sc = "\n".join(ln)
+        if not sc:
+            raise RuntimeError("模型没给出文案正文（返回里 script 和 lines 都是空的）")
+        return d, pv, ln, sc
+
+    data, provider, lines, script = one_pass()
+
+    # ★ 字数不够就自动重来一次。
+    #   实测模型很容易只写「钩子 + 落点」两段（93 字 / 18 秒），五段骨架塌成两段 ——
+    #   这种稿子交给人，人要么自己补、要么直接发出去变短命片。
+    #   提示词里写了字数它也不一定听，所以要拿结果去卡、卡不住就带着具体差距再问一遍。
+    lo, hi = (120, 190) if length == "standard" else (70, 110)
+    c0 = len(re.sub(r"\s", "", script))
+    if c0 < lo * 0.85:
+        try:
+            data, provider, lines, script = one_pass(
+                f"\n\n【上一版只有 {c0} 字，太短了】"
+                f"要求 {lo}–{hi} 字。五段骨架（钩子/共情/反转或算账/降门槛/落点）"
+                f"每段都要落地，不要压缩成两句。重写一版。")
+        except Exception:
+            pass        # 重写失败就用第一版，下面自检会如实报出来
+
+    # 红线替模型查一遍：它不知道「禁」字怎么写
+    banned = []
+    try:
+        from prompt_guard import GuardRules
+        rules = GuardRules.from_files(
+            os.path.join(ROOT, "config", "pipeline.json"),
+            os.path.join(ctx["root"], "ip.json"))
+        banned = list(rules.banned)
+    except Exception:
+        pass
+    hit = sorted({w for w in banned if w and w in script})
+    redline_hit = [r for r in redlines if r and r in script]
+
+    # 落点：已经有固定话术的，必须原样出现在最后；新拟的要标出来等人确认
+    new_landing = str(data.get("landing") or "").strip()
+    final_landing = landing or new_landing
+    landing_ok = bool(final_landing) and final_landing.replace(" ", "") in script.replace(" ", "")
+
+    # ★ 模型十次有八次只在 landing 字段里给一句，正文里就是不写（实测两次都是）。
+    #   落点是确定的一句话，不该指望模型自觉 —— 自己拼上去。
+    #   漏了落点等于整条片子白讲：观众听完了，不知道要他干什么。
+    if final_landing and not landing_ok:
+        script = script.rstrip() + "\n" + final_landing
+        if not lines or final_landing not in lines[-1]:
+            lines.append(final_landing)
+        landing_ok = True
+
+    chars = len(re.sub(r"\s", "", script))
+    checks = {
+        "chars": chars,
+        "est_secs": round(chars / 5.0, 1),      # 实测语速 5 字/秒
+        "hook_alone": bool(lines and len(lines[0]) <= 20),
+        "numbers_used": len(re.findall(r"\d+|一张|两条|十秒|二十分钟|三天|一碗|一份", script)),
+        "no_banned_word": not hit,
+        "no_redline": not redline_hit,
+        "landing_ok": landing_ok,
+        "landing_is_new": not landing and bool(new_landing),
+    }
+    problems = []
+    if hit:
+        problems.append("命中禁用词：" + "/".join(hit))
+    if redline_hit:
+        problems.append("踩到红线：" + "/".join(redline_hit[:3]))
+    if not landing_ok:
+        problems.append("结尾没有落点 —— 观众不知道要他干什么（这是最常见的一种白写）")
+    if chars > hi:
+        problems.append(f"太长（{chars} 字，标准 {lo}–{hi}）—— 超了就得删，删哪儿都疼")
+    if chars < lo:
+        problems.append(f"太短（{chars} 字，标准 {lo}–{hi} ≈ {round(lo / 5)}–{round(hi / 5)} 秒）"
+                        f" —— 五段骨架撑不起来，快发给人的片子会显得没内容")
+    checks["problems"] = problems
+    checks["pass"] = not problems
+    checks["target_chars"] = [lo, hi]
+
+    return {
+        "ip": ctx["name"], "set": setname, "provider": provider,
+        "topic": topic or "(模型自选)", "hook_type": str(data.get("hook_type") or ""),
+        "script": script, "lines": lines,
+        "landing": final_landing, "landing_is_new": checks["landing_is_new"],
+        "claims": [str(x) for x in (data.get("claims") or [])][:6],
+        "note": _short(data.get("note"), 80),
+        "checks": checks,
+        "brief_path": brief_path,
+        "past_count": len(past),
+        "standard": SCRIPT_STANDARD,
+        "cloud_policy": cloud_why,
+    }
+
+
+def save_script(result, ip, setname):
+    """把出的稿子写进这套片子的文案文件。
+
+    ★ 目标非空就先进废品站式的备份（.bak.<时间>），绝不静默覆盖 ——
+      这是别人可能已经改过的稿子。
+    """
+    from vstudio import resolve_ip
+    import datetime as _dt
+    e = resolve_ip(ip)
+    base = os.path.join(e["path"], "05_文案")
+    cand = [x for x in sorted(os.listdir(base)) if x.startswith(setname)] if os.path.isdir(base) else []
+    folder = os.path.join(base, cand[0]) if cand else os.path.join(base, setname)
+    os.makedirs(folder, exist_ok=True)
+    name = (cand[0] if cand else setname) + "_字幕文本.txt"
+    path = os.path.join(folder, name)
+    bak = None
+    if os.path.exists(path) and open(path, encoding="utf-8").read().strip():
+        bak = path + ".bak." + _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        import shutil as _sh
+        _sh.copy2(path, bak)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(result["script"].rstrip() + "\n")
+    return {"path": path, "backup": bak}
 
 
 # ---------------------------------------------------------------- 建档草案
@@ -354,6 +648,18 @@ def main():
     c.add_argument("--json", action="store_true")
     c.add_argument("--out", default="")
 
+    s = sub.add_parser("script", help="按角色需求 + 主号爆款标准，写一条口播稿")
+    s.add_argument("ip")
+    s.add_argument("--set", default="", help="这套片子的编号（会去读它的 brief.md）")
+    s.add_argument("--topic", default="", help="题目；不给就让 AI 自选")
+    s.add_argument("--tone", default="", help="额外要求")
+    s.add_argument("--length", default="standard", choices=["standard", "short"])
+    s.add_argument("--prefer", default=None, help="首选车道")
+    s.add_argument("--write", action="store_true",
+                   help="写进 05_文案/<套次>/（原稿非空会先备份）")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--out", default="")
+
     p = sub.add_parser("persona", help="看某 IP 的人设材料有多少字进了 context")
     p.add_argument("ip")
 
@@ -389,6 +695,41 @@ def main():
                 print(json.dumps(r, ensure_ascii=False))
                 return
             print(json.dumps(r, ensure_ascii=False, indent=2))
+        elif a.cmd == "script":
+            r = write_script(a.ip, a.set, a.topic, a.tone, a.prefer, a.length)
+            if a.write:
+                if not a.set:
+                    raise RuntimeError("--write 要配 --set：稿子得知道放进哪一套")
+                saved = save_script(r, a.ip, a.set)
+                r["saved"] = saved
+                if not a.json:
+                    print(f"已写入 {saved['path']}")
+                    if saved["backup"]:
+                        print(f"原稿备份 → {saved['backup']}")
+            emit(r)
+            if a.json:
+                print(json.dumps(r, ensure_ascii=False))
+                return
+            c = r["checks"]
+            print(f"通道 {r['provider']}   钩子类型 {r['hook_type'] or '?'}   "
+                  f"{c['chars']} 字 ≈ {c['est_secs']} 秒")
+            print("-" * 56)
+            for ln in (r["lines"] or r["script"].splitlines()):
+                print(ln)
+            print("-" * 56)
+            if r["landing_is_new"]:
+                print(f"落点（这次新拟的，确认后存进 card.json 的 landing）：「{r['landing']}」")
+            elif r["landing"]:
+                print(f"落点（本号固定话术）：「{r['landing']}」")
+            if r["claims"]:
+                print("这条承诺了：" + "；".join(r["claims"]))
+            if c["problems"]:
+                print("⚠ 自检没过：" + "；".join(c["problems"]))
+                print("  （稿子照样给你，改完再落盘。别把超长的稿子直接拿去配音）")
+            else:
+                print("✓ 自检过了（字数/红线/钩子都在标准内）")
+            if r["note"]:
+                print(f"模型备注：{r['note']}")
         elif a.cmd == "persona":
             ctx = ip_context(a.ip)
             print(f"{ctx['name']}：{len(ctx['persona'])} 字，"

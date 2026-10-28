@@ -678,7 +678,11 @@ def build_exec(b, want_result=False):
     setname = (b.get("set") or "").strip()
     if not kind:
         raise ValueError("缺 kind")
-    if not ip or not ip_root(ip):
+    # ★ 建新卡时**还没有 IP**。以前这里一刀切要求 ip 存在，
+    #   「AI 出草案」一按就 400（不认识的 IP：（空）），前端又把错误吞了 ——
+    #   看起来就是"点了没反应"。凡是"产出一张新卡"的动作都不该要求 ip 先存在。
+    NO_IP_KINDS = {"ai-card-draft"}
+    if kind not in NO_IP_KINDS and (not ip or not ip_root(ip)):
         raise ValueError(f"不认识的 IP：{ip or '（空）'}")
 
     def need_set():
@@ -745,6 +749,29 @@ def build_exec(b, want_result=False):
             raise ValueError("再多说两句：至少说清他是谁、要做什么号")
         return (["bin/studio_ai.py", "card-draft", text],
                 "AI 整理档案草案", 1, True)
+
+    if kind == "ai-script":
+        # 按角色需求 + 主号爆款标准写一条口播稿。
+        # tier 1：只调一次 LLM 出文本，不动显卡，也不覆盖任何已有文件
+        # （落盘是单独的另一个动作，要人再点一次）。
+        #
+        # ★ 套次可以不指定：新卡刚建完还没有套次，这时写的是「样稿」——
+        #   用来让人看看这个角色开口是什么味道。也正因为如此才不该强制 need_set。
+        argv = ["bin/studio_ai.py", "script", ip]
+        if setname:
+            if not _valid_set(ip, setname):
+                raise ValueError(f"{ip} 下没有套次 {setname}")
+            argv += ["--set", setname]
+        topic = (b.get("topic") or "").strip()
+        if topic:
+            argv += ["--topic", topic]
+        tone = (b.get("tone") or "").strip()
+        if tone:
+            argv += ["--tone", tone]
+        if (b.get("length") or "") == "short":
+            argv += ["--length", "short"]
+        where = setname or "样稿"
+        return argv, f"AI 写文案 · {ip} / {where}", 1, True
 
     raise ValueError(f"界面不支持执行：{kind}")
 
@@ -1083,6 +1110,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_reset(body or {})
             if name == "brief":
                 return self._api_brief(get, body)
+            if name == "script-write":
+                return self._api_script_write(body)
+            if name == "landing":
+                return self._api_landing(body)
             if name == "svc":
                 return self._api_svc(get)
             if name == "llm-channels":
@@ -1670,6 +1701,68 @@ class Handler(BaseHTTPRequestHandler):
                            "empty_file": os.path.exists(path) and not txt.strip(),
                            "folder": folder})
 
+    # ---------- 爆款文案：落盘 / 存落点 ----------
+    def _api_script_write(self, body):
+        """把 AI 写的稿子写进 05_文案/<套次>/<套次>_字幕文本.txt。
+
+        ★ 目标非空先备份。这是别人可能已经改过的稿子，静默覆盖不可逆。
+        """
+        ip = (body or {}).get("ip") or ""
+        setname = (body or {}).get("set") or ""
+        text = ((body or {}).get("script") or "").strip()
+        if not text:
+            return self._bad("稿子是空的")
+        root = ip_root(ip)
+        if not root or not setname:
+            return self._bad("缺少 IP 或套次")
+        base = os.path.join(root, "05_文案")
+        cand = [x for x in (os.listdir(base) if os.path.isdir(base) else [])
+                if x.startswith(setname)]
+        folder = os.path.join(base, cand[0]) if cand else os.path.join(base, setname)
+        os.makedirs(folder, exist_ok=True)
+        name = (cand[0] if cand else setname) + "_字幕文本.txt"
+        path = os.path.join(folder, name)
+        bak = None
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    if f.read().strip():
+                        bak = path + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                        shutil.copy2(path, bak)
+            except Exception:
+                pass
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text.rstrip() + "\n")
+        return self._json({"ok": True, "path": path, "backup": bak,
+                           "chars": len(re.sub(r"\s", "", text))})
+
+    def _api_landing(self, body):
+        """把「本号固定落点」写进 card.json。
+
+        落点是一句要用很多次的话，不是一次性的文案 —— 存进卡里，
+        以后每一条都原样用它，观众才记得住要他干什么。
+        """
+        ip = (body or {}).get("ip") or ""
+        landing = ((body or {}).get("landing") or "").strip()
+        root = ip_root(ip)
+        if not root:
+            return self._bad("不认识的 IP")
+        if not landing:
+            return self._bad("落点不能是空")
+        cp = os.path.join(root, "card.json")
+        if not os.path.exists(cp):
+            return self._bad("这张卡没有 card.json")
+        card = load_json(cp) or {}
+        bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            shutil.copy2(cp, bak)
+        except Exception:
+            pass
+        card["landing"] = landing
+        with open(cp, "w", encoding="utf-8") as f:
+            json.dump(card, f, ensure_ascii=False, indent=2)
+        return self._json({"ok": True, "landing": landing, "backup": bak})
+
     # ---------- 服务详情 ----------
     def _api_svc(self, get):
         """点徽章要能看到"它是什么、在哪、怎么起"——否则那个点就是个死的装饰。"""
@@ -1931,9 +2024,32 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(str(text).rstrip() + "\n")
                 written.append(fp)
 
+        # ★ 上云许可是安全决策，必须在建档时当场记下来。
+        #   以前谁都不写这个字段 → 新卡一律「默认禁止上云」→ 连 AI 选题、写文案都跑不了；
+        #   而本机模型又常常没起（llama.cpp 要单独开），于是新卡看起来"功能全是坏的"。
+        #   默认值按类型给：本人 IP 允许，客户不许（要人明确点一下才改）。
+        if root:
+            cp = os.path.join(root, "card.json")
+            card = load_json(cp) or {}
+            want = d.get("allow_cloud_llm")
+            if want is None:
+                want = (d.get("type") == "本人IP")
+            card["policy"] = {
+                "allow_cloud_llm": bool(want),
+                "_policy_note": ("建档时设定。客户内容默认不出本机 —— 云端模型的提示词可能被上游记录。"
+                                 "本人 IP 或明确同意的客户可以改成 true。"),
+            }
+            try:
+                with open(cp, "w", encoding="utf-8") as f:
+                    json.dump(card, f, ensure_ascii=False, indent=2)
+            except Exception as ex:
+                print(f"  ⚠ 写 policy 失败：{ex}")
+
         append_changelog("ip", name, os.path.join(root or "", "card.json"),
                          "card.new", None, name, actor="ui-card")
         return self._json({"ok": True, "name": name, "root": root,
+                           "cloud_llm": bool((load_json(os.path.join(root or "", "card.json")) or {})
+                                             .get("policy", {}).get("allow_cloud_llm")),
                            "notes": notes, "md": written,
                            "next": [f"把音色参考 / 起始静帧 / 形象底图 填进 {root}/ip.json",
                                     f"python3 bin/vstudio.py guard {name}"]})

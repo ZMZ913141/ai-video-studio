@@ -914,6 +914,7 @@ async function renderBrief() {
   const d = await api('brief?ip=' + encodeURIComponent(state.ip) + '&set=' + encodeURIComponent(state.setId));
   state.brief = d;
   $('#briefSub').textContent = d.exists ? '已写' : '还没写';
+  const landing = String((state.card || {}).landing || '').trim();
   box.innerHTML = `
     <div class="hint" style="margin-bottom:8px">
       开工前先把自己的要求写清楚：讲什么、给谁看、多长、什么语气、绝对不能出现什么。
@@ -924,12 +925,15 @@ async function renderBrief() {
       placeholder="例：这条讲「一条片子为什么值这个价」，35 秒左右，给犹豫中的准客户看。
 语气：平实、有底气，不吹。画面：白衬衫、暖墙、固定机位近景。
 必须说到：二十分钟、一条龙、不用客户出镜。不要提：具体报价数字。">${esc(d.text || '')}</textarea>
-    <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
+    <div style="display:flex;gap:6px;margin-top:8px;align-items:center;flex-wrap:wrap">
       <button class="btn sm" id="btnBriefSave2">${ico('save')} 存需求</button>
-      <button class="btn sm primary" id="btnBriefGen">${ico('spark')} 生成提示词</button>
+      <button class="btn sm primary" id="btnScriptGen" title="按这张卡的角色需求 + 主号爆款标准写一条口播稿">${ico('spark')} 按角色写爆款文案</button>
+      <button class="btn sm" id="btnBriefGen">${ico('plus')} 生成提示词</button>
       <span class="hint" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
         title="${esc(d.path || '')}">${esc((d.path || '').replace(state.ipRoot || '', ''))}</span>
-    </div>`;
+    </div>
+    ${landing ? `<div class="hint" style="margin-top:6px">本号固定落点：<b style="color:var(--tx-1)">${esc(landing)}</b></div>`
+      : `<div class="hint" style="margin-top:6px;color:var(--warn)">这张卡还没定落点 —— 第一次写文案时会让 AI 拟一条，确认后存进卡里，之后每条都用它。</div>`}`;
 }
 
 async function saveBrief(thenGen) {
@@ -941,6 +945,70 @@ async function saveBrief(thenGen) {
   toast('需求已存', r.path || '', 'ok');
   await renderBrief();
   if (thenGen) await genFromBrief();
+}
+
+/* 按角色需求写爆款文案。
+   判据是 templates/script_standard.md —— 从主号 S01–S05 跑量的稿子里提纯的，
+   不是模型自己的网感。这里只负责把「这套片子讲什么」和角色需求一起交出去。 */
+async function genScript() {
+  if (!state.setId) return toast('先选套次', '文案是跟着某一套片子走的', 'err');
+  const job = (state.jobs || []).find(j => j.id === state.setId);
+  const topic = (job && job.title) || '';
+  await startExec({ kind: 'ai-script', ip: state.ip, set: state.setId, topic }, {
+    onDone: r => showScriptResult(r),
+  });
+}
+
+/* 稿子出来了：先给判据下的结论，再给正文，最后才是动作按钮。
+   顺序别反 —— 人第一眼要知道「这条能不能用」，不想先读一百多字。 */
+function showScriptResult(r) {
+  const c = r.checks || {};
+  const prob = c.problems || [];
+  const lines = (r.lines || []).length
+    ? r.lines.map(l => `<div class="pseg"><div class="tx">${esc(l)}</div></div>`).join('')
+    : `<pre>${esc(r.script || '')}</pre>`;
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('spark')} 文案草稿</b>
+      <span class="sub">${esc(r.provider || '?')} · ${esc(r.hook_type || '?')} · ${c.chars || 0} 字 ≈ ${c.est_secs || 0} 秒</span>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    ${prob.length
+      ? `<div class="warnbox">没过自检：${prob.map(esc).join('；')}<br>
+          稿子照样给你，但要改完再拿去配音 —— 超长或没落点的片子，观众会走。</div>`
+      : `<div class="hint" style="color:var(--ok)">✓ 过自检：字数、红线、落点都在标准内</div>`}
+    <div class="sec-title" style="margin-top:12px">逐行（念出来就是这个节奏）</div>
+    ${lines}
+    <div class="sec-title" style="margin-top:14px">落点</div>
+    <div class="pseg ${r.landing_is_new ? 'bad' : ''}"><div class="tx">${esc(r.landing || '（没有落点 —— 这条等于白讲）')}</div></div>
+    ${r.landing_is_new
+      ? `<div class="hint" style="margin-top:4px">这句是这次<b>新拟</b>的。定下来存进卡里，以后每条都用它 ——
+          每次换一句，观众记不住要他干什么。</div>`
+      : `<div class="hint" style="margin-top:4px">本号固定话术，每条都一样。</div>`}
+    ${(r.claims || []).length ? `<div class="sec-title" style="margin-top:14px">这条承诺了什么（要能兑现）</div>
+      ${r.claims.map(x => `<div class="pseg"><div class="tx">${esc(x)}</div></div>`).join('')}` : ''}
+    ${r.note ? `<div class="hint" style="margin-top:12px">模型备注：${esc(r.note)}</div>` : ''}
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;flex-wrap:wrap">
+      <button class="btn ghost" id="scAgain">换一条</button>
+      ${r.landing_is_new ? `<button class="btn ghost" id="scLanding">存为本号固定落点</button>` : ''}
+      <button class="btn primary" id="scWrite">${ico('save')} 写进这套片子</button></div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = closeModal;
+  $('#scAgain').onclick = () => { closeModal(); void genScript(); };
+  if ($('#scLanding')) {
+    $('#scLanding').onclick = async () => {
+      const rr = await api('landing', { body: { ip: state.ip, landing: r.landing } });
+      if (rr.error) return toast('没存成', rr.error, 'err');
+      toast('落点已定', '以后每一条都用这句', 'ok');
+      state.card = await api('card?ip=' + encodeURIComponent(state.ip));
+      closeModal();
+      await renderBrief();
+    };
+  }
+  $('#scWrite').onclick = async () => {
+    const rr = await api('script-write', { body: { ip: state.ip, set: state.setId, script: r.script } });
+    if (rr.error) return toast('没写进去', rr.error, 'err');
+    toast('已写进文案', (rr.backup ? '原稿备份了 · ' : '') + (rr.path || ''), 'ok');
+    closeModal();
+    await boot();
+  };
 }
 
 /* 生成/优化提示词：调 LLM、几十秒起，落盘前必须过红线校验。
@@ -1219,6 +1287,12 @@ function showNewCardDraft(r, rawText) {
       <label class="field"><span>标签（套次前缀）</span><input id="ncTag" value="${esc(d.tag)}"></label>
       <label class="field"><span>定位（一句话）</span><input id="ncRole" value="${esc(d.role)}"></label>
       <label class="field"><span>存储空间名</span><input id="ncSpace" value="${esc(d.space)}"></label>
+      <label class="field"><span>内容能不能走云端模型</span>
+        <select id="ncCloud">
+          <option value="0" ${d.type === '本人IP' ? '' : 'selected'}>不许 —— 客户商业信息，只走本机模型</option>
+          <option value="1" ${d.type === '本人IP' ? 'selected' : ''}>可以 —— 本人 IP，或客户已书面同意</option>
+        </select>
+        <span class="hint">云端模型的提示词可能被上游记录。选「不许」时，写文案/选题要本机模型能跑。</span></label>
     </div>
 
     <div class="sec-title" style="margin-top:16px">需求</div>
@@ -1244,40 +1318,77 @@ function showNewCardDraft(r, rawText) {
 
   $('#ncGo').onclick = async () => {
     const v = id => ($('#' + id)?.value || '').trim();
-    if (!v('ncName') || !v('ncAlias') || !v('ncSpace'))
+    // ★ 值必须在「问确认」之前全部取出来。
+    //   confirmBox 会把整个 #modalBox 换掉，之后 $('#ncName') 一律是 null ——
+    //   那不只是按钮变灰失败：name 会变成空串，card-create 直接回「缺目录名」，
+    //   而弹层已经关了，人看到的就是「点了一下，什么也没发生」。
+    const vals = {
+      name: v('ncName'),
+      aliases: v('ncAlias').split(/[,，]/).map(s => s.trim()).filter(Boolean),
+      type: v('ncType'), tag: v('ncTag'), role: v('ncRole'), space: v('ncSpace'),
+      allow_cloud_llm: v('ncCloud') === '1',
+    };
+    if (!vals.name || !vals.aliases.length || !vals.space)
       return toast('还差东西', '名字、别名、空间名必填（没空间名脚本会卡住等输入）', 'err');
     if (!(await confirmBox('确认建档？',
       `<div>会在档案区建整套目录、写 card.json、登记进总册，并写 ${mdNames.length} 篇人设文档。</div>
-       <div class="hint" style="margin-top:8px">名字就是目录名，建完再改名很脏 —— 确认无误再继续。</div>`,
+       <div class="hint" style="margin-top:8px">名字就是目录名，建完再改名很脏 —— 确认无误再继续。</div>
+       <div class="hint" style="margin-top:8px">内容${vals.allow_cloud_llm ? '<b>可以</b>走云端模型' : '<b>不许</b>走云端模型（走本机）'}。</div>`,
       '确认建档'))) return;
-    const btn = $('#ncGo');
-    btn.disabled = true; btn.textContent = '创建中…';
+    $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('refresh')} 正在建档…</b>
+        <div class="spacer"></div></div>
+      <div class="hint">建目录树 → 写 card.json → 登记总册 → 写 ${mdNames.length} 篇人设文档。
+        这一步不调模型，几秒就好。</div>`;
     const rr = await api('card-create', {
       body: {
-        draft: {
-          name: v('ncName'), aliases: v('ncAlias').split(/[,，]/).map(s => s.trim()).filter(Boolean),
-          type: v('ncType'), tag: v('ncTag'), role: v('ncRole'), space: v('ncSpace'),
-          needs: d.needs || {}, redlines: d.redlines || [], habits: d.habits || [],
-        },
+        draft: { ...vals, needs: d.needs || {}, redlines: d.redlines || [], habits: d.habits || [] },
         persona_md: md,
       }
     });
-    btn.disabled = false; btn.textContent = '确认创建档案';
-    if (rr.error) return toast('没建成', rr.error + (rr.detail ? '：' + rr.detail : ''), 'err');
+    if (rr.error) {
+      closeModal();
+      return toast('没建成', rr.error + (rr.detail ? '：' + rr.detail : ''), 'err');
+    }
     closeModal();
     toast('档案已建', `${rr.name} · 写了 ${(rr.md || []).length} 篇人设文档`, 'ok');
     await boot();
     // 建完直接停在新建的这张卡上 —— 不然人还得自己去左边找，第一反应是「没建成吧」
     await selectIP(rr.name);
-    showNextStepHint(rr.name);
+    showNextStepHint(rr);
   };
 }
 
 /* 建完卡之后最该干的一件事是开第一套片。这里不替他点，只把路指到那一格。 */
-function showNextStepHint(name) {
-  if (!($('#modal')?.classList.contains('show'))) {
-    toast('下一步：开第一套片', `${name} → 右上「＋ 新套次」`, '');
-  }
+/* 建完卡别就这么散了。
+   人刚填完一堆需求，最想知道的不是"文件夹建在哪"，而是**这个角色开口是什么味道**。
+   所以第一件事给「按这个角色写一条爆款文案」，第二件才是开第一套片。 */
+function showNextStepHint(rr) {
+  const name = (rr && rr.name) || state.ip || '';
+  const mdCount = ((rr && rr.md) || []).length;
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('check')} 档案建好了</b>
+      <span class="sub">${esc(name)}</span>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <div class="hint">目录、card.json、总册登记都办完了${mdCount ? `，还写了 ${mdCount} 篇人设文档` : ''}。
+      界面已经停在这张卡上。</div>
+    <div class="sec-title" style="margin-top:16px">下一步做哪个</div>
+    <div class="pseg" id="nstepScript" style="cursor:pointer">
+      <div class="tx">① 按这个角色写一条爆款文案</div>
+      <div class="hint" style="margin-top:2px">用他刚说的需求 + 主号跑量稿的标准，先看一条样稿 ——
+        能立刻判断这个号立不立得住。花一次模型调用。</div>
+    </div>
+    <div class="pseg" id="nstepSet" style="cursor:pointer">
+      <div class="tx">② 开第一套片子</div>
+      <div class="hint" style="margin-top:2px">建完就有编号，然后按流程走：文案 → 音频 → 画面 → 字幕。</div>
+    </div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = closeModal;
+  $('#nstepScript').onclick = async () => {
+    closeModal();
+    await startExec({ kind: 'ai-script', ip: state.ip }, {
+      onDone: r => showScriptResult(r),
+    });
+  };
+  $('#nstepSet').onclick = () => { closeModal(); void showNewSet(); };
 }
 
 /* 手填（保留原表单，AI 不可用时也不堵路） */
@@ -1299,7 +1410,8 @@ function showNewCardManual(prefill, fromDraft) {
       <label class="field"><span>存储空间名</span><input id="ncSpace" placeholder="陈洁斌主号资产"></label>
     </div>
     <div class="hint" style="margin:8px 0 12px">
-      手填只建目录 + 空卡；需求、红线、人设文档都得后面补。想让 AI 顺手写人设，回上一步。</div>
+      手填只建目录 + 空卡；需求、红线、人设文档都得后面补。想让 AI 顺手写人设，回上一步。<br>
+      上云许可按类型自动给：本人 IP 允许，客户默认不许（走本机模型）。要改去卡里的 policy。</div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button class="btn ghost" id="mclose2">取消</button>
       <button class="btn primary" id="ncGo">建档</button></div>`;
@@ -1307,17 +1419,29 @@ function showNewCardManual(prefill, fromDraft) {
   $('#mclose').onclick = $('#mclose2').onclick = closeModal;
   $('#ncGo').onclick = async () => {
     const v = id => ($('#' + id)?.value || '').trim();
-    if (!v('ncName') || !v('ncAlias') || !v('ncSpace'))
+    // 先取值再动弹层：后面 closeModal 之后还能读，但别依赖这个巧合
+    const name = v('ncName'), aliases = v('ncAlias'), space = v('ncSpace');
+    if (!name || !aliases || !space)
       return toast('还差东西', '名字、别名、空间名是必填（不给空间名脚本会卡住等输入）', 'err');
-    const args = ['--name', v('ncName'), '--type', v('ncType'), '--tag', v('ncTag') || 'C',
-      '--role', v('ncRole') || '', '--aliases', v('ncAlias'), '--space', v('ncSpace')];
-    const r = await api('run', { body: { cmd: 'card-new', args } });
-    if (r.error) return toast('没建成', r.error, 'err');
+    // ★ 手填也走 card-create，别自己拼 card-new 的参：
+    //   走 CLI 那条路不会写 policy，于是新卡「默认禁止上云」，
+    //   连 AI 选题/写文案都跑不了，而人根本不知道是为什么。
+    const r = await api('card-create', {
+      body: {
+        draft: {
+          name,
+          aliases: aliases.split(/[,，]/).map(s => s.trim()).filter(Boolean),
+          type: v('ncType'), tag: v('ncTag') || 'C', role: v('ncRole'), space,
+        },
+        persona_md: {},
+      }
+    });
+    if (r.error) return toast('没建成', r.error + (r.detail ? '：' + r.detail : ''), 'err');
     closeModal();
-    toast('已提交建档', r.cmdline || '', 'ok');
-    await sleep(2500);
+    toast('档案已建', name + ' · 手填的空卡，需求和红线后面补', 'ok');
     await boot();
-    await selectIP(v('ncName'));
+    await selectIP(name);
+    showNextStepHint(r);
   };
 }
 
@@ -1420,9 +1544,23 @@ function showNewSet() {
 
     // 没写标题 → 按人设自动出一条。放这里而不是建完再补：
     // job.json 里标题是后面提示词和人设对齐的依据，空着会一路歪。
+    //
+    // ★ 但要先说清楚：这一步会花掉一次模型调用。以前是点了就直接跑，
+    //   界面只变成「正在按人设出题…」，人既不知道在花钱、也不知道要等多久，
+    //   第一反应就是「按钮坏了」。
     if (!title) {
+      const go = await confirmBox('标题还空着',
+        `<div>标题是后面提示词和人设对齐的依据，空着会一路歪。</div>
+         <div class="hint" style="margin-top:8px">
+           可以让 AI 按这个号的人设出一条（<b>花一次模型调用</b>，几秒到几十秒，
+           走哪家车道会在右下角日志里看到）；也可以自己写一句再建。</div>`,
+        '让 AI 出题');
+      if (!go) {
+        if ($('#nsTitle')) $('#nsTitle').focus();
+        return toast('先写个标题', '一句话就够，比如「汤熬不白别怪火大」', '');
+      }
       const b = $('#nsGo');
-      b.disabled = true; b.textContent = '没写标题，正在按人设出题…';
+      b.disabled = true; b.textContent = 'AI 出题中…';
       await startExec({ kind: 'ai-topics', ip: state.ip, n: 1 }, {
         quiet: false,
         onDone: r => {
@@ -1633,6 +1771,8 @@ function bind() {
     if (e.target.closest('#hNewSet')) return void showNewSet();
     if (e.target.closest('#btnFontApply')) return void saveFont();
     if (e.target.closest('#btnBriefSave') || e.target.closest('#btnBriefSave2')) return void saveBrief(false);
+    // 写文案前先把需求存一次：人刚改完需求就点写文案，不先存等于白改
+    if (e.target.closest('#btnScriptGen')) { await saveBrief(false); return void genScript(); }
     if (e.target.closest('#btnBriefGen')) return void saveBrief(true);
     if (e.target.closest('#hGuard') || e.target.closest('#btnGuard')) return void runGuard();
     if (e.target.closest('#hAlgo')) return void showAlgo();
@@ -1648,12 +1788,7 @@ function bind() {
       return void genPrompts('prompts-opt');
     }
     if (e.target.closest('#actNote')) {
-      const t = prompt('记一条习惯/需求/红线（会被写进 card.json）：');
-      if (!t) return;
-      const kind = confirm('是红线吗？（取消 = 记为习惯）') ? 'redline' : 'habit';
-      const r = await api('run', { body: { cmd: 'card-note', args: [state.ip, t, '--kind', kind] } });
-      toast(r.cmdline ? '已提交' : '失败', r.cmdline || r.error || '', r.error ? 'err' : 'ok');
-      setTimeout(async () => { await loadCard(); renderInspect(); }, 1200);
+      return void showNoteDialog();
     }
     if (e.target.closest('#actIndex')) {
       const r = await api('run', { body: { cmd: 'index', args: ['--write'] } });
@@ -1661,6 +1796,45 @@ function bind() {
       setTimeout(async () => { await loadJobs(); await renderTree(); }, 1500);
     }
   });
+}
+
+/* 记一条习惯 / 红线 / 需求。
+   以前是 prompt() + confirm()：浏览器原生弹框，在这种玻璃界面上像从别人家借来的；
+   更糟的是两段问 —— 先打字、再确认「是不是红线」，填错了只能从头再来。
+   现在一张表单，一次填完，且能选三种类型（需求以前根本记不了）。 */
+function showNoteDialog() {
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('plus')} 记一条</b>
+      <span class="sub">写进 ${esc(state.ip || '')} 的 card.json</span>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <label class="field"><span>内容</span>
+      <textarea id="noteText" class="brief-area" style="min-height:88px"
+        placeholder="例：片子里不许出现同行品牌名 ／ 字幕一律用品牌蓝 #1A5FA8 ／ 每周三交付两条"></textarea></label>
+    <label class="field"><span>记成什么</span>
+      <select id="noteKind">
+        <option value="habit">习惯 —— 他做事的方式（烧字幕、交付节奏这类）</option>
+        <option value="redline">红线 —— 绝对不能碰，会进护栏拦提示词</option>
+        <option value="need">需求 —— 他要什么（内容方向、平台、频率）</option>
+      </select></label>
+    <div class="hint">记成红线的，生成提示词时命中就直接被拦下来，不会先跑一遍再报错。</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn ghost" id="noteCancel">取消</button>
+      <button class="btn primary" id="noteSave">${ico('save')} 记下来</button></div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = closeModal;
+  $('#noteCancel').onclick = closeModal;
+  $('#noteSave').onclick = async () => {
+    const t = ($('#noteText').value || '').trim();
+    const kind = $('#noteKind').value;
+    if (t.length < 2) return toast('写点什么', '一句话就够', 'err');
+    const args = [state.ip, t, '--kind', kind];
+    const r = await api('run', { body: { cmd: 'card-note', args } });
+    if (r.error) return toast('没记上', r.error, 'err');
+    toast('已记下', kind === 'redline' ? '这条会进护栏' : '', 'ok');
+    closeModal();
+    await waitTask(r.task || r.id, 8000);
+    await loadCard();
+    if (state.tab === 'inspect') await renderInspect();
+  };
 }
 
 async function showAlgo() {
