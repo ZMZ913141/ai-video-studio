@@ -299,6 +299,11 @@ def do_gen(e, setname, optimize=False, dry=False, as_json=False):
 
     sys_txt = SYSTEM + "\n本 IP 的硬性要求（漏一条即作废）：\n" \
         + (ip_must_rules(ip_root) or "- 无额外要求")
+    # ★ 送上去的是整段客户台词。sensitive=True 只保证「不进免费池」，
+    #   不代表「不出这台机器」。卡里 policy.allow_cloud_llm=false 的客户，这里必须停下。
+    import ip_policy
+    cloud_why = ip_policy.require_cloud(ip_root, e.get("name") or "这个 IP")
+    print(f"内容上云：{cloud_why}", flush=True)
     print(f"向 LLM 请求 {len(segs)} 段提示词 …", flush=True)
     try:
         data, provider = llm_json(user, sys_txt)

@@ -55,3 +55,6 @@ config/.llm_prefs.json
 # 网页工作台的运行痕迹：备份和变更记录都是本机的事，不进版本库
 config/.ui_changelog.jsonl
 config/*.bak.*
+
+# 本地测试脚本（jsdom 点按钮用），不进版本库
+.uitest/

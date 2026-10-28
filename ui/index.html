@@ -79,7 +79,7 @@
     <aside class="col col-left" id="colLeft">
       <section class="panel glass" data-panel="tree">
         <div class="panel-head">
-          <h3><svg class="ico" style="width:14px;height:14px;color:#7c6cff"><use href="#i-folder"/></svg> IP 与套次</h3>
+          <h3><svg class="ico" style="width:13px;height:13px;color:#7c6cff"><use href="#i-folder"/></svg> IP 与套次</h3>
           <span class="sub" id="treeCount"></span>
           <svg class="caret"><use href="#i-chev"/></svg>
         </div>
@@ -94,7 +94,7 @@
 
       <section class="panel glass" data-panel="scripts">
         <div class="panel-head">
-          <h3><svg class="ico" style="width:14px;height:14px;color:#35d6d0"><use href="#i-term"/></svg> 生产脚本</h3>
+          <h3><svg class="ico" style="width:13px;height:13px;color:#35d6d0"><use href="#i-term"/></svg> 生产脚本</h3>
           <span class="sub" id="scriptCount"></span>
           <svg class="caret"><use href="#i-chev"/></svg>
         </div>
@@ -103,7 +103,7 @@
 
       <section class="panel glass" data-panel="deviation">
         <div class="panel-head">
-          <h3><svg class="ico" style="width:14px;height:14px;color:#ffb457"><use href="#i-alert"/></svg> 脚本偏离</h3>
+          <h3><svg class="ico" style="width:13px;height:13px;color:#ffb457"><use href="#i-alert"/></svg> 脚本偏离</h3>
           <svg class="caret"><use href="#i-chev"/></svg>
         </div>
         <div class="panel-body"><div class="inner" id="deviationBox">
@@ -120,7 +120,7 @@
 
       <section class="panel glass" data-panel="overview">
         <div class="panel-head">
-          <h3><svg class="ico" style="width:14px;height:14px;color:#3ddc97"><use href="#i-check"/></svg> 进度与自检</h3>
+          <h3><svg class="ico" style="width:13px;height:13px;color:#3ddc97"><use href="#i-check"/></svg> 进度与自检</h3>
           <span class="sub" id="guardSub"></span>
           <div class="panel-actions">
             <button class="btn sm" id="btnGuard"><svg><use href="#i-shield"/></svg> 跑自检</button>
@@ -132,7 +132,7 @@
 
       <section class="panel glass" data-panel="files">
         <div class="panel-head">
-          <h3><svg class="ico" style="width:14px;height:14px;color:#7c6cff"><use href="#i-image"/></svg> 素材与成片</h3>
+          <h3><svg class="ico" style="width:13px;height:13px;color:#7c6cff"><use href="#i-image"/></svg> 素材与成片</h3>
           <span class="sub" id="filesPath"></span>
           <div class="panel-actions">
             <button class="btn sm" id="btnUp"><svg><use href="#i-up"/></svg> 上级</button>
@@ -144,7 +144,7 @@
 
       <section class="panel glass" data-panel="brief">
         <div class="panel-head">
-          <h3><svg class="ico" style="width:14px;height:14px;color:#ffd166"><use href="#i-mic"/></svg> 需求台（开工前先说清）</h3>
+          <h3><svg class="ico" style="width:13px;height:13px;color:#ffd166"><use href="#i-mic"/></svg> 需求台（开工前先说清）</h3>
           <span class="sub" id="briefSub"></span>
           <div class="panel-actions">
             <button class="btn sm" id="btnBriefSave"><svg><use href="#i-save"/></svg> 存需求</button>
@@ -156,7 +156,7 @@
 
       <section class="panel glass" data-panel="prompts">
         <div class="panel-head">
-          <h3><svg class="ico" style="width:14px;height:14px;color:#ff6cf0"><use href="#i-spark"/></svg> 提示词</h3>
+          <h3><svg class="ico" style="width:13px;height:13px;color:#ff6cf0"><use href="#i-spark"/></svg> 提示词</h3>
           <span class="sub" id="promptsSub"></span>
           <div class="panel-actions">
             <button class="btn sm" id="btnCmdOpt"><svg><use href="#i-spark"/></svg> AI 优化</button>
@@ -169,7 +169,7 @@
 
       <section class="panel glass" data-panel="cmd">
         <div class="panel-head">
-          <h3><svg class="ico" style="width:14px;height:14px;color:#58a6ff"><use href="#i-term"/></svg> 命令（出片类回终端跑）</h3>
+          <h3><svg class="ico" style="width:13px;height:13px;color:#58a6ff"><use href="#i-term"/></svg> 命令（出片类回终端跑）</h3>
           <svg class="caret"><use href="#i-chev"/></svg>
         </div>
         <div class="panel-body"><div class="inner" id="cmdBox"></div></div>
@@ -194,6 +194,29 @@
 </div>
 
 <div id="toasts"></div>
+
+<!-- ===== 运行面板：真跑 + 日志实时看 + 能停 =====
+     界面以前只给命令让人回终端跑，理由是「怕你看不见它死在哪」。
+     现在反过来：正因为要看见，才把它放到界面上 —— 日志就在这儿，一行不落。 -->
+<div class="runpanel glass" id="runPanel">
+  <div class="run-head">
+    <span class="dot run-dot" id="runDot"></span>
+    <b id="runLabel">运行</b>
+    <span class="run-sub" id="runSub"></span>
+    <div class="spacer"></div>
+    <button class="btn icon sm" id="runCopy" title="复制这条命令（想回终端跑也行）"><svg><use href="#i-copy"/></svg></button>
+    <button class="btn icon sm" id="runMin" title="收起 / 展开日志"><svg><use href="#i-chev"/></svg></button>
+    <button class="btn icon sm" id="runClose" title="关闭面板（后台任务不会被关掉）"><svg><use href="#i-close"/></svg></button>
+  </div>
+  <div class="run-cmd mono" id="runCmd"></div>
+  <pre class="run-log" id="runLog"></pre>
+  <div class="run-foot">
+    <span class="hint" id="runHint"></span>
+    <div class="spacer"></div>
+    <button class="btn sm danger ghost" id="runStop">停止</button>
+    <button class="btn sm" id="runAgain">再跑一次</button>
+  </div>
+</div>
 
 <div class="modal-mask" id="modal">
   <div class="modal glass" id="modalBox"></div>

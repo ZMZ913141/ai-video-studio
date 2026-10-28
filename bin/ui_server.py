@@ -6,11 +6,15 @@ ui_server —— 本地网页工作台的后端（零第三方依赖）
 ★ 铁律延续（前三条 UI 护栏）：
   ① 界面不发明逻辑 —— 每个数字、每个按钮背后就是 vstudio CLI 或某份真值文件
   ② 同一参数只存一处 —— UI 从不缓存一份自己的副本，改哪读哪
-  ③ 重活不出界面 —— pipeline 出片只给命令串让用户回终端跑；界面只做「安全动作」
+  ③ 重活要能看见 —— 出片/调模型这类长任务，界面**可以**按下去跑，
+     但必须：显式确认 → 后台跑 → 日志实时可见 → 能停 → 跑完说清结果。
+     「能点」和「看不见它死在哪」是两件事，这里要的是前者。
 
 所以本文件里没有半个业务判断：数据一律 subprocess 调 bin/vstudio.py --json，
 或只读 specs 的真值文件（ip.json / card.json / config/pipeline.json）。
 写操作走白名单 + 二次确认 + 自动 changelog。
+执行类动作走 EXEC_KINDS 白名单：前端只能报「要做什么」，argv 一律后端拼，
+前端传不了任意命令，也没有 shell —— 注入面为零。
 
 跑起来：
     python3 bin/ui_server.py            # http://127.0.0.1:8790
@@ -45,7 +49,11 @@ CACHE_DIR = os.path.join(ROOT, ".cache", "ui")
 THUMB_DIR = os.path.join(CACHE_DIR, "thumbs")
 CHANGELOG_GLOBAL = os.path.join(ROOT, "config", ".ui_changelog.jsonl")
 # 端口会被自动顺延，光看命令猜不准。写个小纸条，谁来查地址都一致。
-PORTFILE = os.path.join(tempfile.gettempdir(), "vstudio-ui.json")
+# ★ 纸条放项目里，不放 /tmp：/tmp 会被系统清理，容器里还常常是每次调用独立的。
+#   放在这儿的另一个好处是排查时能直接看见「刚才那个实例是谁、什么端口」。
+PORTFILE = os.path.join(ROOT, ".cache", "ui.port.json")
+PORTFILE_LEGACY = os.path.join(tempfile.gettempdir(), "vstudio-ui.json")
+BOOT_AT = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 PY = sys.executable if sys.version_info >= (3, 9) else "python3"
 VSTUDIO = os.path.join(BIN_DIR, "vstudio.py")
@@ -111,6 +119,11 @@ IP_WRITABLE = {
 TASKS = {}
 TASK_LOCK = threading.Lock()
 
+# ---------- 可执行动作白名单 ----------
+#   tier 2 的必须带 confirm（吃 GPU / 花钱 / 会覆盖产物），前端据此弹确认框。
+#   前端只传 kind + ip/set + 少数受限字段，argv 在这里拼 —— 传不进任意命令。
+GPU_KINDS = {"pipeline", "prompts-gen", "prompts-opt"}
+
 # 中文业务阶段 → 流水线步骤区间 (from, to)。
 # ★ 这个映射只在这里写一份：前端点进度节点时不该自己再列一遍步骤名，
 #   否则 config/pipeline.json 一改，界面就开始说谎。
@@ -122,6 +135,30 @@ STAGE_SPAN = {
     "字幕": ("ass", "burn"),
     "验收": ("audit", "audit"),
 }
+
+STAGE_ORDER = ["文案", "音频", "视频", "后期", "字幕", "验收", "交付"]
+
+
+def normalize_stages(j):
+    """阶段状态以「磁盘上真有产物」为准，job.json 里的 status 只是记账。
+
+    ★ 只认 status 会出现这种别扭情况：成片都烧好字幕了，概览里「文案」还是灰的，
+      因为文案是人手写进 05_文案 的，流水线没走过就没有 ok 记录。
+      于是交付自检报「还没完成：文案」，人只能去手改 job.json —— 这是我踩过的坑。
+      产物才是证据；status 说明的是「哪条命令跑过」。
+    """
+    st = j.setdefault("stages", {})
+    arts = j.get("artifacts") or {}
+    for s in STAGE_ORDER:
+        rec = st.get(s) or {}
+        if rec.get("status") == "ok":
+            continue
+        if any(os.path.exists(p) for p in (arts.get(s) or [])):
+            rec = dict(rec)
+            rec["status"] = "ok"
+            rec["status_from"] = "artifacts"      # 标明是推断的，不是命令跑出来的
+            st[s] = rec
+    return j
 
 # ---------- 基础 ----------
 def now():
@@ -289,6 +326,383 @@ def _worker(tid, args):
                            "rc": rc, "ended": now()})
 
 
+# ============================================================
+# 长任务执行引擎（出片 / 调模型 / 自检）
+# ------------------------------------------------------------
+# 为什么不是「把命令贴给你，你自己去终端跑」
+#   操作的人想看的是：现在跑到哪一步、报了什么、要不要停。来回切终端这件事本身就劝退。
+# 为什么仍然不是「浏览器里随便执行」
+#   前端只报 kind + 几个受限字段，argv 由下面这张表拼 —— 命令内容不可篡改，
+#   不经过 shell，参数值也只接受登记过的 IP / 套次。
+# ============================================================
+RUN_DIR = os.path.join(ROOT, ".cache", "runs")
+EXECS = {}
+EXEC_LOCK = threading.Lock()
+EXEC_KEEP = 40          # 内存里只留最近这些，日志文件另存
+
+
+def _exec_paths(tid):
+    return (os.path.join(RUN_DIR, tid + ".log"),
+            os.path.join(RUN_DIR, tid + ".json"))
+
+
+def exec_start(argv, label, kind, meta=None, needs_result=False):
+    """起一个后台子进程，stdout/stderr 全进日志文件。返回任务 id。
+
+    needs_result=True 时给命令加 `--json --out <结果文件>`：人要看的走日志，
+    机器要读的走文件 —— 两者混在一个流里，解析迟早被某句额外提示打断。
+    """
+    os.makedirs(RUN_DIR, exist_ok=True)
+    tid = hashlib.md5((kind + str(argv) + str(time.time())).encode()).hexdigest()[:12]
+    logp, resp = _exec_paths(tid)
+    if needs_result:
+        argv = list(argv) + ["--json", "--out", resp]
+    with EXEC_LOCK:
+        EXECS[tid] = {"id": tid, "kind": kind, "label": label, "argv": argv,
+                      "state": "running", "rc": None, "started": now(),
+                      "t0": time.time(), "cmdline": "python3 " + " ".join(argv),
+                      "log": logp, "result": None, "pid": None}
+        # 只留最近的，别让一个长跑页面攒出几千条
+        for k in list(EXECS.keys())[:-EXEC_KEEP]:
+            EXECS.pop(k, None)
+
+    env = dict(os.environ)
+    # 子进程也要拿得到 key，否则所有 AI 动作都会报 MISSING_KEY
+    load_llm_env()
+    env.update({k: os.environ[k] for k in list(os.environ) if k.startswith(("ZHIPU", "MODELSCOPE",
+                "QIANFAN", "TOKENHUB", "SILICONFLOW", "ZENGATE", "DASHSCOPE", "MOONSHOT",
+                "OPENROUTER", "GROQ", "CEREBRAS", "GITHUB", "NVIDIA", "GOOGLE", "VOLC",
+                "ARK", "BAILIAN", "XFYUN"))})
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    with open(logp, "wb") as lf:
+        p = subprocess.Popen([PY, "-u"] + argv, cwd=ROOT, stdout=lf,
+                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                             env=env, start_new_session=True)
+    with EXEC_LOCK:
+        EXECS[tid]["pid"] = p.pid
+    if meta:
+        with EXEC_LOCK:
+            EXECS[tid].update(meta)
+    _persist(tid)
+
+    def reap():
+        rc = p.wait()
+        st = "done" if rc == 0 else "stopped" if rc in (-15, 143) else "failed"
+        res = None
+        try:
+            if os.path.exists(resp):
+                res = load_json(resp)
+        except Exception:
+            res = None
+        with EXEC_LOCK:
+            if tid in EXECS:
+                EXECS[tid].update({"state": st, "rc": rc, "ended": now(),
+                                   "secs": round(time.time() - EXECS[tid]["t0"], 1),
+                                   "result": res})
+        # 跑完把明细落盘，重启界面后「最近跑过什么」还在
+        _persist(tid)
+        try:
+            summary = {k: v for k, v in EXECS.get(tid, {}).items() if k != "result"}
+            summary["has_result"] = bool(res)
+            with open(os.path.join(RUN_DIR, tid + ".summary.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+
+    threading.Thread(target=reap, daemon=True).start()
+    return tid
+
+
+def _state_path(tid):
+    return os.path.join(RUN_DIR, tid + ".state.json")
+
+
+def _persist(tid):
+    """把任务状态写一份到磁盘。
+
+    以前只在跑完时落 summary.json，于是「改完代码重启看板」= 正在跑的出片
+    从界面上消失（进程其实还在烧 GPU），人去点重新出片就会撞同一批产物。
+    现在起跑就先落一份，重启后 adopt_runs() 能把活着的任务接回来。
+    """
+    try:
+        with EXEC_LOCK:
+            d = {k: v for k, v in (EXECS.get(tid) or {}).items() if k != "result"}
+        if not d:
+            return
+        with open(_state_path(tid), "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+
+
+def adopt_runs():
+    """启动时把上次没跑完的任务接回来。
+
+    进程还活着 → 继续显示 running（日志文件还在，offset 从 0 读即可）；
+    进程已经不在了 → 有 summary 用 summary，没有就标 failed 并说明原因，
+    不要留一个永远「运行中」的幽灵卡片。
+    """
+    if not os.path.isdir(RUN_DIR):
+        return 0
+    n = 0
+    for fn in os.listdir(RUN_DIR):
+        if not fn.endswith(".state.json"):
+            continue
+        tid = fn[:-len(".state.json")]
+        try:
+            with open(os.path.join(RUN_DIR, fn), encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            continue
+        if d.get("state") != "running":
+            continue
+        pid = d.get("pid")
+        alive = bool(pid) and _pid_alive(pid)
+        if not alive:
+            sm = os.path.join(RUN_DIR, tid + ".summary.json")
+            if os.path.exists(sm):
+                try:
+                    with open(sm, encoding="utf-8") as f:
+                        d = json.load(f)
+                    d["adopted"] = "从 summary 恢复（进程已结束）"
+                except Exception:
+                    pass
+            else:
+                st, note = _judge_from_log(tid)
+                d.update({"state": st, "rc": None, "ended": now(), "adopted": note})
+        else:
+            d["adopted"] = "看板重启，任务仍在跑（进程 %s）" % pid
+            resp = os.path.join(RUN_DIR, tid + ".json")
+            try:
+                if os.path.exists(resp):
+                    d["result"] = load_json(resp)
+            except Exception:
+                pass
+        with EXEC_LOCK:
+            EXECS[tid] = d
+        _persist(tid)
+        if alive:
+            threading.Thread(target=_watch_adopted, args=(tid, pid), daemon=True).start()
+        n += 1
+    return n
+
+
+def _judge_from_log(tid):
+    """进程已经不在了又没有 summary 时，只能看日志尾巴推断成败。
+
+    返回 (state, note)。note 必须写明「这是推断」，别让人把推断当退出码看。
+    """
+    logp = os.path.join(RUN_DIR, tid + ".log")
+    tail = ""
+    try:
+        with open(logp, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 4000))
+            tail = f.read().decode("utf-8", "replace")
+    except Exception:
+        pass
+    if not tail.strip():
+        return "failed", "看板重启时进程已不在，日志也是空的 —— 无法判断，按失败记"
+    looks_ok = ("日志 pipeline-" in tail) or tail.rstrip().endswith("✓")
+    return ("done" if looks_ok else "failed",
+            "看板重启过，退出码拿不到；状态是按日志末尾推断的")
+
+
+def _watch_adopted(tid, pid):
+    """盯着接管回来的进程。
+
+    它已经不是我们的子进程了，拿不到退出码 —— 这点必须诚实：
+    跑完只写「退出码未知，看日志末尾」，不要瞎猜成成功。
+    """
+    while _pid_alive(pid):
+        time.sleep(2)
+    sm = os.path.join(RUN_DIR, tid + ".summary.json")
+    if os.path.exists(sm):
+        try:
+            with open(sm, encoding="utf-8") as f:
+                d = json.load(f)
+            with EXEC_LOCK:
+                EXECS[tid] = d
+            return
+        except Exception:
+            pass
+    st, note = _judge_from_log(tid)
+    with EXEC_LOCK:
+        t = EXECS.get(tid)
+        if t:
+            t.update({"state": st, "rc": None, "ended": now(),
+                      "secs": round(time.time() - t.get("t0", time.time()), 1),
+                      "note": note})
+    _persist(tid)
+
+
+def exec_stop(tid):
+    """停任务：先 SIGTERM 整个进程组（pipeline 会派生子进程），3 秒不退就 SIGKILL。"""
+    with EXEC_LOCK:
+        t = EXECS.get(tid)
+        pid = t.get("pid") if t else None
+    if not pid:
+        return False
+    for sig, wait in ((signal.SIGTERM, 3), (signal.SIGKILL, 1)):
+        try:
+            os.killpg(os.getpgid(pid), sig)
+        except ProcessLookupError:
+            mark_stopped(tid)
+            return True
+        except Exception:
+            try:
+                os.kill(pid, sig)
+            except Exception:
+                return False
+        for _ in range(int(wait * 10)):
+            if not _pid_alive(pid):
+                mark_stopped(tid)
+                return True
+            time.sleep(0.1)
+    ok = not _pid_alive(pid)
+    if ok:
+        mark_stopped(tid)
+    return ok
+
+
+def mark_stopped(tid, why="手动停止"):
+    """把任务记成 stopped 并落盘 —— 重启后别又冒出一张「运行中」的幽灵卡片。
+
+    ★ 已经是终态（done/failed）就别改：任务刚好在那 0.5 秒内跑完时，
+      「停止」不该把一个成功的结果改写成 stopped。
+    """
+    with EXEC_LOCK:
+        t = EXECS.get(tid)
+        if not t:
+            return False
+        if t.get("state") in ("done", "failed", "stopped"):
+            return False
+        t.update({"state": "stopped",
+                  "rc": t.get("rc") if t.get("rc") is not None else -15,
+                  "ended": now(), "note": why,
+                  "secs": round(time.time() - t.get("t0", time.time()), 1)})
+    _persist(tid)
+    return True
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _valid_set(ip, setname):
+    """套次名有两种写法都合法：短号 M02，和完整目录名 M02_招牌菜是怎么来的。
+
+    ★ 这两种混用是真实存在的一处坑：阶段接口返回的是完整目录名（job.json 里的 set），
+      而左边树里点出来的是短号。只认一种的话，「看计划」按钮会报「下没有套次」，
+      而那条命令在终端里明明能跑 —— 界面上看着像坏了。
+    """
+    try:
+        d = cli_json(["jobs", ip])
+    except Exception:
+        return False
+    ids = [j.get("id") for j in (d.get("jobs") or []) if j.get("id")]
+    if setname in ids:
+        return True
+    return any(setname.startswith(i + "_") for i in ids)
+
+
+# 二次确认的文案必须说实话：出片吃 GPU，生成提示词只花一次调用费、不碰显卡。
+# 一律写「占 GPU」会让人以为点错了按钮，久了就养成闭眼确认的习惯 —— 那确认就白设了。
+EXEC_WHY = {
+    "pipeline": "吃 GPU，一次几分钟到二十几分钟；同名产物会被重算覆盖。",
+    "prompts-gen": "调大模型写分镜提示词，花一次调用费、不动显卡；已经有的稿子会被覆盖。",
+    "prompts-opt": "调大模型改现有提示词，花一次调用费、不动显卡；旧稿会被覆盖。",
+}
+
+
+def build_exec(b, want_result=False):
+    """把前端的「要做什么」翻成 argv。
+
+    返回 (argv, label, tier, needs_result)。任何不认识的东西直接抛 ValueError，
+    由调用方转成 400 —— 宁可拒绝，也不要「猜一个差不多的命令」跑出去。
+    """
+    kind = (b.get("kind") or "").strip()
+    ip = (b.get("ip") or "").strip()
+    setname = (b.get("set") or "").strip()
+    if not kind:
+        raise ValueError("缺 kind")
+    if not ip or not ip_root(ip):
+        raise ValueError(f"不认识的 IP：{ip or '（空）'}")
+
+    def need_set():
+        if not setname:
+            raise ValueError("这套动作需要指定套次")
+        if not _valid_set(ip, setname):
+            raise ValueError(f"{ip} 下没有套次 {setname}")
+
+    if kind == "pipeline":
+        need_set()
+        argv = ["bin/vstudio.py", "pipeline", ip, setname]
+        tier = (b.get("tier") or "").strip()
+        if tier:
+            if tier not in ("fast", "pilot", "std", "high"):
+                raise ValueError(f"不认识的档位：{tier}")
+            argv += ["--tier", tier]
+        for k in ("from", "to"):
+            v = (b.get(k) or "").strip()
+            if v:
+                argv += ["--" + k, v]
+        if b.get("dry"):
+            argv.append("--dry")
+        tag = f" {b.get('from')}" if b.get("from") else ""
+        tag += f"→{b.get('to')}" if b.get("to") else ""
+        # --dry 只算计划、不提交 GPU，所以不算「重活」，不必二次确认。
+        # 反过来才糟糕：连看一眼计划都要点两次确认，人就不看了。
+        tier = 1 if b.get("dry") else 2
+        return argv, f"出片 {ip} / {setname}{tag}", tier, False
+
+    if kind in ("prompts-gen", "prompts-opt"):
+        need_set()
+        argv = ["bin/vstudio.py", "prompts", ip, setname,
+                "--gen" if kind == "prompts-gen" else "--optimize"]
+        if b.get("dry"):
+            argv.append("--dry")
+        return (argv, ("生成提示词 " if kind == "prompts-gen" else "优化提示词 ") + setname,
+                1 if b.get("dry") else 2, False)
+
+    if kind == "guard":
+        return ["bin/vstudio.py", "guard", ip], f"素材自检 {ip}", 1, False
+
+    if kind == "algo":
+        need_set()
+        return ["bin/vstudio.py", "algo", ip, setname], f"参数预览 {setname}", 1, False
+
+    if kind == "index":
+        return ["bin/vstudio.py", "index", "--write"], "重建索引", 1, False
+
+    if kind == "ai-topics":
+        n = b.get("n") or 5
+        try:
+            n = max(1, min(int(n), 8))
+        except Exception:
+            n = 5
+        argv = ["bin/studio_ai.py", "topics", ip, "-n", str(n)]
+        hint = (b.get("hint") or "").strip()
+        if hint:
+            argv += ["--hint", hint]
+        return argv, f"AI 选题 · {ip}", 1, True
+
+    if kind == "ai-card-draft":
+        text = (b.get("text") or "").strip()
+        if len(text) < 12:
+            raise ValueError("再多说两句：至少说清他是谁、要做什么号")
+        return (["bin/studio_ai.py", "card-draft", text],
+                "AI 整理档案草案", 1, True)
+
+    raise ValueError(f"界面不支持执行：{kind}")
+
+
 # ---------- 视频规格探测（交付前自检要用） ----------
 def probe_video(path):
     """用 `ffmpeg -i` 的 stderr 读规格。
@@ -322,8 +736,14 @@ def deliver_precheck(ip, root, job, items):
     """
     checks = []
     stages = job.get("stages") or {}
-    order = ["文案", "音频", "视频", "后期", "字幕", "验收"]
-    bad = [s for s in order if (stages.get(s) or {}).get("status") != "ok"]
+    allarts = job.get("artifacts") or {}
+    order = [s for s in STAGE_ORDER if s != "交付"]     # 交付本身就是这里要判的事
+
+    def _done(s):
+        """阶段状态已经在 normalize_stages() 里按产物校正过一次，这里只读结果。"""
+        return (stages.get(s) or {}).get("status") == "ok"
+
+    bad = [s for s in order if not _done(s)]
     checks.append({
         "name": "各阶段状态", "ok": not bad,
         "detail": "全部完成" if not bad else "还没完成：" + "、".join(bad),
@@ -332,7 +752,6 @@ def deliver_precheck(ip, root, job, items):
     # 交付阶段本身通常没有自己的产物目录，成片要从后期/视频那两栏里找
     arts = list(items)
     if not any(a.get("kind") == "video" for a in arts):
-        allarts = job.get("artifacts") or {}
         for s in ("后期", "视频", "字幕"):
             for p in (allarts.get(s) or []):
                 if os.path.exists(p):
@@ -510,6 +929,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if name == "health":
                 return self._json({"ok": True, "py": PY, "archive": ARCHIVE, "time": now()})
+            if name == "ping":
+                # 只报身份：用来回答「这台机器上是不是已经有一个看板在跑」
+                return self._json({"app": "ai-video-studio", "pid": os.getpid(),
+                                   "port": self.server.server_address[1],
+                                   "root": ROOT, "started": BOOT_AT})
             if name == "services":
                 return self._json({"services": self._services()})
             if name == "bootstrap":
@@ -521,7 +945,7 @@ class Handler(BaseHTTPRequestHandler):
             if name == "job":
                 rc, out, err = run_cli(["--json", "job-show", get("ip", "洁斌"), get("id", "")])
                 try:
-                    return self._json(json.loads(out))
+                    return self._json(normalize_stages(json.loads(out)))
                 except Exception:
                     return self._json({"_error": err.strip() or out.strip() or f"exit {rc}"}, 404)
             if name == "cards":
@@ -591,6 +1015,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_changelog(get)
             if name == "run":
                 return self._api_run(body or {})
+            if name == "exec":
+                return self._api_exec(body or {})
+            if name == "exec-stop":
+                return self._api_exec_stop(body or {})
+            if name == "execs":
+                return self._api_execs()
+            if name == "log":
+                return self._api_log(get)
             if name == "set":
                 return self._api_set(body or {})
             if name == "cmdline":
@@ -687,14 +1119,61 @@ class Handler(BaseHTTPRequestHandler):
         root = ip_root(ip)
         if not root or not setname:
             return {"error": "缺 IP 或套次"}
-        d = os.path.join(root, "05_文案", setname)
+        # ★ 套次名有两种写法（M03 / M03_汤熬不白别怪火大），磁盘上的目录永远是完整那个。
+        #   不解析就直接拼路径，会指向一个不存在的目录 —— 于是「有文案」被误判成「没文案」。
+        full = self._full_set(ip, setname) or setname
+        d = os.path.join(root, "05_文案", full)
         pf = os.path.join(d, "prompts.json")
+        src = self._prompt_source(root, full)
         if not os.path.exists(pf):
-            return {"exists": False, "dir": d}
+            return {"exists": False, "dir": d, "set": full, "source": src}
         try:
-            return {"exists": True, "dir": d, "data": load_json(pf)}
+            return {"exists": True, "dir": d, "set": full, "source": src, "data": load_json(pf)}
         except Exception as ex:
-            return {"exists": True, "dir": d, "error": str(ex)}
+            return {"exists": True, "dir": d, "set": full, "source": src, "error": str(ex)}
+
+    @staticmethod
+    def _full_set(ip, setname):
+        """短号 → 磁盘目录名。查不到就返回 None（调用方自己兜底）。"""
+        if not setname:
+            return None
+        if "_" in setname:
+            return setname                      # 已经是完整目录名
+        try:
+            d = cli_json(["jobs", ip])
+        except Exception:
+            return None
+        for j in (d.get("jobs") or []):
+            if j.get("id") == setname and j.get("set"):
+                return j["set"]
+        # job.json 丢了也要能用：退一步按目录前缀找
+        base = os.path.join(ip_root(ip) or "", "05_文案")
+        if os.path.isdir(base):
+            for x in sorted(os.listdir(base)):
+                if x.startswith(setname):
+                    return x
+        return None
+
+    @staticmethod
+    def _prompt_source(root, setname):
+        """提示词靠什么切段：先找 05_文案 里的 txt，再找 07_成片 里的 srt。
+
+        这个检查必须在点按钮之前给出来。CLI 里同样会拦（"切不出段"），
+        但等人点了确认、等了十几秒才看到一句失败，体验上跟"没反应"是一回事。
+        """
+        d = os.path.join(root, "05_文案", setname)
+        txts = []
+        if os.path.isdir(d):
+            txts = [f for f in os.listdir(d)
+                    if f.lower().endswith((".txt", ".md")) and os.path.isfile(os.path.join(d, f))]
+        srt = None
+        sd = os.path.join(root, "07_成片", setname)
+        if os.path.isdir(sd):
+            for f in sorted(os.listdir(sd)):
+                if f.lower().endswith(".srt"):
+                    srt = f
+                    break
+        return {"txt": txts[:3], "srt": srt, "ok": bool(txts or srt)}
 
     def _api_fs(self, get):
         """列目录 —— 只在允许根内，且隐藏垃圾件"""
@@ -802,7 +1281,8 @@ class Handler(BaseHTTPRequestHandler):
         args = [str(x) for x in (body.get("args") or [])]
         confirm = bool(body.get("confirm"))
         if cmd not in WRITE_ACTIONS:
-            return self._json({"error": f"界面不允许执行该动作：{cmd}（出片类请回终端跑）"}, 403)
+            return self._json({"error": f"界面不允许执行该动作：{cmd}"
+                                        f"（出片/调模型这类走 /api/exec）"}, 403)
         meta = WRITE_ACTIONS[cmd]
         if meta["tier"] == 2 and not confirm:
             return self._json({"error": "这是第二层动作，需要二次确认", "need_confirm": True,
@@ -817,6 +1297,77 @@ class Handler(BaseHTTPRequestHandler):
         full = [cmd] + args
         tid = task_run(full, meta["desc"])
         return self._json({"task": tid, "cmdline": "python3 bin/vstudio.py " + " ".join(full)})
+
+    # ---------------- 执行长任务：真跑，日志实时可见 ----------------
+    def _api_exec(self, body):
+        try:
+            argv, label, tier, needs = build_exec(body)
+        except ValueError as ex:
+            return self._json({"error": str(ex)}, 400)
+        if tier == 2 and not body.get("confirm"):
+            kind = (body.get("kind") or "").strip()
+            return self._json({
+                "error": "这一步会花时间或花钱，也可能覆盖已有产物，需要确认",
+                "why": EXEC_WHY.get(kind, "会花时间，也可能覆盖已有产物。"),
+                "need_confirm": True, "label": label,
+                "note": "确认后会后台跑，日志实时给你看，随时能停。"}, 428)
+        tid = exec_start(argv, label, body.get("kind") or "", needs_result=needs)
+        with EXEC_LOCK:
+            cmdline = EXECS[tid]["cmdline"]
+        return self._json({"id": tid, "label": label, "cmdline": cmdline})
+
+    def _api_log(self, get):
+        tid = get("id") or ""
+        try:
+            off = max(0, int(get("offset") or 0))
+        except Exception:
+            off = 0
+        with EXEC_LOCK:
+            t = dict(EXECS.get(tid) or {})
+        if not t:
+            return self._json({"error": "没有这个任务（界面重启过后台就没了，日志在 "
+                                        ".cache/runs/ 里）", "gone": True}, 404)
+        logp = t.get("log") or ""
+        total = os.path.getsize(logp) if logp and os.path.exists(logp) else 0
+        if off > total:                 # 日志被轮转过，从头读
+            off = 0
+        text = ""
+        if total:
+            with open(logp, "rb") as f:
+                f.seek(off)
+                chunk = f.read(262144)   # 一次最多回 256K，页面不会被大日志卡死
+            text = chunk.decode("utf-8", "replace")
+            off += len(chunk)
+        return self._json({
+            "id": tid, "kind": t.get("kind"), "label": t.get("label"),
+            "state": t.get("state"), "rc": t.get("rc"),
+            "started": t.get("started"), "ended": t.get("ended"),
+            "secs": t.get("secs"), "cmdline": t.get("cmdline"),
+            "offset": off, "total": total, "text": text,
+            "result": t.get("result"),
+        })
+
+    def _api_exec_stop(self, body):
+        tid = body.get("id") or ""
+        with EXEC_LOCK:
+            before = (EXECS.get(tid) or {}).get("state")
+        ok = exec_stop(tid)
+        with EXEC_LOCK:
+            st = (EXECS.get(tid) or {}).get("state")
+        # 说清楚到底停了什么：任务可能在你按下之前就跑完了，别再报「已停止」
+        note = None
+        if before in ("done", "failed", "stopped") and st == before:
+            note = "任务已经结束了，没有可停的"
+        return self._json({"ok": ok, "state": st, "note": note})
+
+    def _api_execs(self):
+        with EXEC_LOCK:
+            rows = [dict(v) for v in EXECS.values()]
+        rows.sort(key=lambda r: r.get("started") or "", reverse=True)
+        for r in rows:
+            r.pop("result", None)
+            r.pop("log", None)
+        return self._json({"runs": rows[:20]})
 
     def _api_cmdline(self, body):
         """出片类：不执行，只把命令串拼好给用户复制回终端"""
@@ -853,22 +1404,20 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- 字体 ----------
     def _api_fonts(self):
         """两种字体要分清，混了就出废片：
-        ① 系统里装了 270+ 个中文字体，**浏览器能预览**（前端直接用 CSS 渲染）；
-        ② 真正能烧进字幕的只有 `02_素材真值/字体_字幕标题/` 里那几个 ——
+        ① 系统里装了 3000+ 个中文字体，**浏览器能预览**（前端直接用 CSS 渲染）；
+        ② 真正能烧进字幕的只有共用目录 `<档案库>/_共用/字体_字幕标题/` 里那几个 ——
            libass 的 fontsdir 给大目录会吃爆内存（沙箱 4G 上限），
-           给空目录又会静默回退 Noto，字形全错还不报错。"""
+           给空目录又会静默回退 Noto，字形全错还不报错。
+
+        ★ 字体是全库共用的，不按 IP 分。以前每个 IP 各存一份 39MB，
+          50 个客户就是 2GB，改一次字体要改 50 处 —— 这跟「一个参数只存一处」是同一个道理。
+        """
         fams, burn_files = [], {}
-        # 烧录白名单：按 IP 找精简字体目录
-        try:
-            ip_entries = cli_json(["ips"]).get("ips") or []
-        except Exception:
-            ip_entries = []
-        for e in ip_entries:
-            d = os.path.join(e["path"], "02_素材真值", "字体_字幕标题")
-            if os.path.isdir(d):
-                for fn in sorted(os.listdir(d)):
-                    if fn.lower().endswith((".ttf", ".otf", ".ttc")):
-                        burn_files[fn] = os.path.join(d, fn)
+        burn_dir = os.path.join(ARCHIVE, "_共用", "字体_字幕标题")
+        if os.path.isdir(burn_dir):
+            for fn in sorted(os.listdir(burn_dir)):
+                if fn.lower().endswith((".ttf", ".otf", ".ttc")):
+                    burn_files[fn] = os.path.join(burn_dir, fn)
         try:
             r = subprocess.run(["fc-list", ":lang=zh", "family"],
                                capture_output=True, text=True, timeout=10)
@@ -1135,7 +1684,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._bad("缺 ip / id / stage")
         rc, out, err = run_cli(["--json", "job-show", ip, jid])
         try:
-            job = json.loads(out)
+            job = normalize_stages(json.loads(out))
         except Exception:
             return self._json({"error": err.strip() or "job-show 失败"}, 404)
         setname = job.get("set") or jid
@@ -1164,28 +1713,36 @@ class Handler(BaseHTTPRequestHandler):
                 "label": f"只重做「{stage}」这一段（{f} → {t}）",
                 "why": "上游产物不动，最省时间；适合只改了本阶段的东西",
                 "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from {f} --to {t}",
+                # exec：前端点「跑」时就照这个发，不用自己再拼一遍（拼就会跟上面那行不一致）
+                "exec": {"kind": "pipeline", "ip": ip, "set": setname,
+                         "from": f, "to": t},
             })
             plans.append({
                 "label": f"从「{stage}」一路做到最后（{f} → 结束）",
                 "why": "上游不动、下游全部重算；本阶段改动会影响后面每一步时用",
                 "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from {f}",
+                "exec": {"kind": "pipeline", "ip": ip, "set": setname, "from": f},
             })
         if stage == "交付":
             plans.append({
                 "label": "先出正式档（推荐，若当前是试跑档）",
-                "why": "视频段按 ip.json 的目标分辨率重生成，约 19-25 分钟。交付件要用这一版",
+                "why": "视频段按 ip.json 的目标分辨率重生成。实测 std 档 28.5s 片约 14 分钟（video 段 841s）"
+                       "，六七十秒的长片按段数往上加。交付件要用这一版",
                 "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from video",
+                "exec": {"kind": "pipeline", "ip": ip, "set": setname, "from": "video"},
             })
             plans.append({
                 "label": "标记为已交付",
                 "why": "产物齐了、验收也过了才点。这条改的是 job.json，不动视频",
                 "cmd": f"python3 bin/vstudio.py job-set {ip} {jid} 交付 ok",
+                "run": {"cmd": "job-set", "args": [ip, jid, "交付", "ok"]},
             })
         if stage == "文案":
             plans.append({
-                "label": "重写文案（手工）",
-                "why": "文案不在流水线里，得人写或让 AI 出草稿",
+                "label": "让 AI 出提示词草稿",
+                "why": "文案不在流水线里；先出提示词再改文案，是这条片子最省时的入口",
                 "cmd": f"python3 bin/vstudio.py prompts {ip} {setname} --gen",
+                "exec": {"kind": "prompts-gen", "ip": ip, "set": setname},
             })
 
         return self._json({
@@ -1395,19 +1952,53 @@ def write_portfile(url, port):
                 "started": now(), "root": ROOT}
         with open(PORTFILE, "w", encoding="utf-8") as f:
             json.dump(info, f, ensure_ascii=False, indent=2)
-        atexit.register(lambda: os.path.exists(PORTFILE) and os.remove(PORTFILE))
+        # ★ 只能删自己那张。以前无条件删，于是「旧实例后退出 → 把新实例刚写的纸条删了」，
+        #   下一次 --status 就说「没在跑」，而服务明明还在 —— 这一条曾让我对着旧代码验证了半天。
+        mypid = os.getpid()
+
+        def _cleanup():
+            try:
+                cur = read_portfile()
+                if cur and cur.get("pid") == mypid and os.path.exists(PORTFILE):
+                    os.remove(PORTFILE)
+            except Exception:
+                pass
+
+        atexit.register(_cleanup)
     except Exception:
         pass
 
 
-def read_portfile():
-    if not os.path.exists(PORTFILE):
-        return None
+def ping_port(port, timeout=0.6):
+    """问一句「你是不是看板」。认 app 字段，避免把别的常驻服务当成自己。"""
+    import urllib.request as U
     try:
-        with open(PORTFILE, encoding="utf-8") as f:
-            return json.load(f)
+        with U.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=timeout) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        return d if d.get("app") == "ai-video-studio" else None
     except Exception:
         return None
+
+
+def find_live(base=8790, span=30):
+    """扫一遍端口找已经在跑的那个。返回 (port, info) 或 (None, None)。"""
+    for p in range(base, base + span):
+        d = ping_port(p)
+        if d:
+            return p, d
+    return None, None
+
+
+def read_portfile():
+    for p in (PORTFILE, PORTFILE_LEGACY):
+        if not os.path.exists(p):
+            continue
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            continue
+    return None
 
 
 def pid_is_ours(pid):
@@ -1423,18 +2014,26 @@ def pid_is_ours(pid):
 
 def stop_running():
     info = read_portfile()
-    if not info:
-        print("没有发现正在运行的实例（小纸条不在：" + PORTFILE + "）")
-        return 1
-    pid = info.get("pid")
-    who = pid_is_ours(pid)
-    if who is None:
+    port = (info or {}).get("port")
+    pid = (info or {}).get("pid")
+    # 纸条可能过期/缺失（被 SIGKILL、或多实例互相删过）—— 以「去问服务」为准
+    if not (port and ping_port(port)):
+        p2, i2 = find_live()
+        if p2:
+            port, pid = p2, (i2 or {}).get("pid")
+            info = i2 or info
+    if not port or not ping_port(port):
+        print("没有正在响应的实例。")
         if os.path.exists(PORTFILE):
             try:
                 os.remove(PORTFILE)
             except OSError:
                 pass
-        print(f"进程 {pid} 已经不在了，小纸条清掉")
+            print(f"  （清掉了一张过期的小纸条：{PORTFILE}）")
+        return 1
+    who = pid_is_ours(pid)
+    if who is None:
+        print(f"进程 {pid} 已经不在了，但端口 {port} 还有东西在听 —— 清掉小纸条，服务可能是个老实例")
         return 0
     if not who:
         print(f"✗ pid={pid} 已经不是 UI 服务了（系统把号复用给了别的进程），不敢动手。")
@@ -1471,34 +2070,41 @@ def main():
     ap.add_argument("--open", action="store_true", help="起来后自动开浏览器")
     ap.add_argument("--stop", action="store_true", help="停掉上一次起的那一个")
     ap.add_argument("--status", action="store_true", help="看当前有没有在跑、地址是多少")
+    ap.add_argument("--force", action="store_true", help="已经有实例在跑时，仍然再起一个")
     a = ap.parse_args()
 
     if a.status:
-        info = read_portfile()
-        if not info:
-            print("没在跑。启动：python3 bin/ui_server.py")
+        info = read_portfile() or {}
+        port = info.get("port")
+        live = ping_port(port) if port else None
+        if not live:
+            p2, i2 = find_live()
+            if p2:
+                print(f"运行中：http://127.0.0.1:{p2}  pid={(i2 or {}).get('pid')}  "
+                      f"起于 {(i2 or {}).get('started')}")
+                if port != p2:
+                    print(f"  （小纸条记的是 {port or '无'}，已经不准了，以实际探测到的为准）")
+                return 0
+        if live:
+            print(f"运行中：{info.get('url')}  pid={info.get('pid')}  起于 {info.get('started')}")
             return 0
-        alive = pid_is_ours(info["pid"])          # 顺便确认那个号确实是我们的
-        if alive is None:
-            print(f"没在跑（小纸条是上次没收尾的残留：{info['url']}）。"
-                  f"启动：python3 bin/ui_server.py")
-        elif alive:
-            print(f"运行中：{info['url']}  pid={info['pid']}  起于 {info['started']}")
-        else:
-            print(f"⚠ pid={info['pid']} 已经被系统复用给别的进程了，工作台其实没在跑"
-                  f"（小纸条记的是 {info['url']}）。启动：python3 bin/ui_server.py")
+        print("没在跑。启动：python3 bin/ui_server.py")
         return 0
     if a.stop:
         sys.exit(stop_running())
 
-    old = read_portfile()
-    if old:
-        try:
-            os.kill(old["pid"], 0)
-            print(f"⚠ 已经有一个在跑了：{old['url']} (pid={old['pid']}，起于 {old['started']})")
-            print(f"  要到 {old['port'] + 1} 之后的端口？加 --port；要换掉它？先 --stop")
-        except OSError:
-            pass
+    # 已经有一个在跑就别再起第二个 —— 端口顺延会让「改的代码没生效」变成一场猜谜
+    p_live, i_live = None, None
+    old = read_portfile() or {}
+    if old.get("port") and ping_port(old["port"]):
+        p_live, i_live = old["port"], old          # 先信纸条（它记的是真实端口）
+    if not p_live:
+        p_live, i_live = find_live(a.port)
+    if p_live and not a.force:
+        print(f"⚠ 已经在跑了：http://127.0.0.1:{p_live}"
+              f"（pid={(i_live or {}).get('pid')}，起于 {(i_live or {}).get('started')}）")
+        print("  要重启：先 python3 bin/ui_server.py --stop；确实要再起一个：加 --force")
+        return 0
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     nk = load_llm_env()          # 子进程（探活/AI）要靠它拿到 key
@@ -1522,6 +2128,13 @@ def main():
 
     url = f"http://{a.host}:{port}"
     write_portfile(url, port)
+    # 把上次没跑完的任务接回来：出片动辄二十分钟，改完代码重启看板不能把它弄丢
+    try:
+        n_adopt = adopt_runs()
+        if n_adopt:
+            print(f"  ↺ 接管了 {n_adopt} 个上次没跑完的任务（日志还在，能继续看/继续停）")
+    except Exception as ex:
+        print(f"  ⚠ 接管旧任务失败：{ex}")
     # SIGTERM 默认直接终止进程、不走 atexit → 小纸条会残留成"假在跑"。
     # 转成 SystemExit，让它在退栈时把纸条收掉。
     try:

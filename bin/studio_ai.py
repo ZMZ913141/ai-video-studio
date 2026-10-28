@@ -168,6 +168,10 @@ def suggest_topics(ip, n=5, hint="", prefer=None):
             f"{ctx['name']} 的 01_人设与规范/ 里没有 md 材料。\n"
             "AI 选题必须先读人设 —— 没有材料就只能瞎编，那是害人。\n"
             "先往那个目录放一份人设/背景说明，或用「对话式建档」让它顺手写出来。")
+    # 人设 + 需求 + 红线一起送出去，等于把客户的商业底牌交出去；
+    # 先问一句这张卡允不允许（默认不许）。
+    import ip_policy
+    cloud_why = ip_policy.require_cloud(ctx["root"], ctx["name"])
 
     card = ctx["card"]
     redlines = card.get("redlines") or []
@@ -227,6 +231,8 @@ def suggest_topics(ip, n=5, hint="", prefer=None):
         "persona_files": ctx["persona_files"],
         "persona_chars": len(ctx["persona"]),
         "existing": ctx["titles"],
+        # 把「凭什么允许上云」一起带出去：临时放行也留痕
+        "cloud_policy": cloud_why,
     }
 
 
@@ -269,6 +275,20 @@ def draft_card(text, prefer=None, ip_hint=""):
 {text.strip()}
 
 {f'补充：{ip_hint}' if ip_hint.strip() else ''}"""
+    # 已有的 IP 就先问卡允不允许；新客户还没有卡，用户是主动把这段描述交给 AI 整理的，
+    # 默认放行，但结果里会带一句「这段描述走过云端」，让人知道发生了什么。
+    cloud_why = "新建档案，还没有 card.json，按用户主动提交处理"
+    if ip_hint.strip():
+        try:
+            from vstudio import resolve_ip
+            e = resolve_ip(ip_hint)
+        except SystemExit:
+            e = None      # ip_hint 只是「客户姓林」这类补充，不是已有 IP，不算绕规矩
+        except Exception:
+            e = None
+        if e:
+            import ip_policy
+            cloud_why = ip_policy.require_cloud(e["path"], e["name"])
     data, provider = chat_json(CARD_SYSTEM, user, max_tokens=3200,
                                prefer=prefer, temperature=0.5)
 
@@ -311,6 +331,7 @@ def draft_card(text, prefer=None, ip_hint=""):
         "persona_md": md,
         "questions": [str(q) for q in (data.get("questions") or [])][:3],
         "summary": _short(data.get("summary"), 60),
+        "cloud_policy": cloud_why,
     }
 
 
@@ -324,18 +345,34 @@ def main():
     t.add_argument("-n", type=int, default=5)
     t.add_argument("--hint", default="")
     t.add_argument("--prefer", default=None, help="首选车道名")
+    t.add_argument("--json", action="store_true", help="结果写成 JSON（给界面读）")
+    t.add_argument("--out", default="", help="JSON 落到这个文件")
 
     c = sub.add_parser("card-draft", help="自然语言 → 档案卡草案")
     c.add_argument("text")
     c.add_argument("--prefer", default=None)
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--out", default="")
 
     p = sub.add_parser("persona", help="看某 IP 的人设材料有多少字进了 context")
     p.add_argument("ip")
 
     a = ap.parse_args()
+
+    def emit(payload):
+        """--out 给机器，stdout 给人。两者分开，界面的日志才不会被 JSON 糊住。"""
+        if a.out:
+            os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+            with open(a.out, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=1)
+
     try:
         if a.cmd == "topics":
             r = suggest_topics(a.ip, a.n, a.hint, a.prefer)
+            emit(r)
+            if a.json:
+                print(json.dumps(r, ensure_ascii=False))
+                return
             print(f"通道 {r['provider']}   人设 {r['persona_chars']} 字 "
                   f"（{', '.join(r['persona_files']) or '无'}）")
             for i, x in enumerate(r["topics"], 1):
@@ -347,6 +384,10 @@ def main():
                 print(f"\n模型备注：{r['note']}")
         elif a.cmd == "card-draft":
             r = draft_card(a.text, a.prefer)
+            emit(r)
+            if a.json:
+                print(json.dumps(r, ensure_ascii=False))
+                return
             print(json.dumps(r, ensure_ascii=False, indent=2))
         elif a.cmd == "persona":
             ctx = ip_context(a.ip)

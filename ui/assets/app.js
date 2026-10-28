@@ -53,6 +53,118 @@ function copyText(t) {
   });
 }
 
+/* ============================================================
+   长任务：真的按下去跑，日志就在眼前
+   ------------------------------------------------------------
+   为什么现在给执行按钮了：
+     以前只给命令让人回终端，理由是不想让他「看不见死在哪」。
+     可实际用下来，操作的人不想为了看一条片子来回复制粘贴 ——
+     更好的答案不是「不给按钮」，而是「给了按钮就必须配一个能看能停的日志窗」。
+   安全怎么守住：
+     界面依然不发明命令。前端只报「要做什么」(kind) + IP/套次，
+     argv 由后端 build_exec 拼，不经过 shell。吃 GPU 的动作后端会回 428，
+     前端必须先弹确认才带 confirm 重发。
+   ============================================================ */
+const run = {
+  panel: null, id: null, timer: null, offset: 0, label: '', cmdline: '',
+  payload: null, onDone: null, state: 'idle', t0: 0,
+};
+
+function runUI() {
+  if (!run.panel) run.panel = $('#runPanel');
+  return run.panel;
+}
+
+function openRunPanel(label, cmdline) {
+  const p = runUI();
+  p.classList.add('show');
+  p.classList.remove('min');
+  $('#runLabel').textContent = label || '运行';
+  $('#runSub').textContent = '';
+  $('#runCmd').textContent = cmdline || '';
+  $('#runLog').textContent = '';
+  $('#runDot').className = 'dot run-dot busy';
+  $('#runStop').disabled = false;
+  $('#runAgain').disabled = true;
+  run.t0 = Date.now();
+}
+
+function closeRunPanel() {
+  // 只关窗，不停任务 —— 关窗就杀进程，那是「手滑就毁掉二十分钟」的设计
+  runUI().classList.remove('show');
+}
+
+function setRunState(st, extra) {
+  run.state = st;
+  const dot = $('#runDot');
+  dot.className = 'dot run-dot ' + (st === 'running' ? 'busy' : st === 'done' ? 'ok' : st === 'stopped' ? 'warn' : 'bad');
+  const map = { running: '运行中', done: '完成', failed: '失败', stopped: '已停止' };
+  const secs = Math.round((Date.now() - run.t0) / 1000);
+  $('#runSub').textContent = `${map[st] || st}${st === 'running' ? ' · ' + secs + 's' : ' · 用时 ' + secs + 's'}`
+    + (extra ? ' · ' + extra : '');
+  $('#runStop').disabled = st !== 'running';
+  $('#runAgain').disabled = st === 'running';
+}
+
+/**
+ * 起一个长任务。payload 交给后端白名单翻译成命令。
+ * opts.onDone(result)  跑成功后拿 JSON 结果（AI 类动作才有）
+ * opts.then(result)    不分状态，跑完就调（用来刷新界面）
+ * opts.quiet           不打开运行面板（极短的动作）
+ */
+async function startExec(payload, opts = {}) {
+  let r = await api('exec', { body: payload });
+  if (r._needConfirm) {
+    const ok = await confirmBox('这一步要花点东西，确认跑？', `
+      <div><b>${esc(r.label || '')}</b></div>
+      ${r.why ? `<div class="hint" style="margin-top:8px">${esc(r.why)}</div>` : ''}
+      <div class="hint" style="margin-top:8px">${esc(r.note || '')}</div>
+      <div class="hint" style="margin-top:8px">跑起来之后日志就在右下角，随时能停。</div>`,
+      '开始跑');
+    if (!ok) return null;
+    r = await api('exec', { body: { ...payload, confirm: true } });
+  }
+  if (r.error) { toast('没起来', r.error, 'err'); return null; }
+
+  run.id = r.id; run.offset = 0;
+  run.label = r.label; run.cmdline = r.cmdline;
+  run.payload = payload; run.onDone = opts.onDone || null;
+  if (!opts.quiet) { openRunPanel(r.label, r.cmdline); }
+  setRunState('running');
+  pollRun(opts);
+  return r;
+}
+
+async function pollRun(opts = {}) {
+  clearTimeout(run.timer);
+  const tick = async () => {
+    if (!run.id) return;
+    const d = await api(`log?id=${encodeURIComponent(run.id)}&offset=${run.offset}`).catch(e => ({ error: String(e) }));
+    if (d.gone || d.error) { setRunState('failed', d.error || ''); return; }
+    if (d.text) {
+      const log = $('#runLog');
+      // 只在用户本来就贴着底的时候自动滚 —— 他往上翻着看时别把视线拽走
+      const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
+      log.textContent += d.text;
+      if (atBottom) log.scrollTop = log.scrollHeight;
+      run.offset = d.offset;
+    }
+    if (d.state === 'running') {
+      setRunState('running');
+      run.timer = setTimeout(tick, 1200);
+      return;
+    }
+    const okState = d.state === 'done';
+    setRunState(d.state, d.rc !== 0 ? 'rc=' + d.rc : '');
+    toast(okState ? '跑完了' : d.state === 'stopped' ? '已停止' : '跑失败了',
+      run.label, okState ? 'ok' : 'err');
+    if (okState && run.onDone && d.result) run.onDone(d.result);
+    if (opts.then) opts.then(d);
+  };
+  tick();
+}
+
+
 /* ---------- 状态 ---------- */
 const STAGES = ['文案', '音频', '视频', '后期', '字幕', '验收', '交付'];
 const state = {
@@ -137,6 +249,22 @@ async function boot() {
   renderServices();
   renderTagFilter();
   await selectIP(state.ips[0]?.name);
+  await resumeRunning();
+}
+
+/* 页面重开/刷新后把还在跑的任务接回面板。
+   出片动辄二十分钟，中途刷一下页面是很平常的事 —— 以前刷新之后界面上什么都没有，
+   进程还在烧 GPU，人既看不到进度也停不掉，只能去终端 kill。 */
+async function resumeRunning() {
+  if (run.id) return;                       // 本页已经在跟一个任务了，别抢
+  const d = await api('execs').catch(() => null);
+  const r = ((d && d.runs) || []).find(x => x.state === 'running');
+  if (!r) return;
+  run.id = r.id; run.offset = 0;
+  run.label = r.label; run.cmdline = r.cmdline; run.payload = null;
+  openRunPanel(r.label + '　（页面重开后接上的）', r.cmdline);
+  setRunState('running');
+  pollRun({});
 }
 
 function renderServices() {
@@ -189,7 +317,7 @@ async function renderTree() {
     const open = state.ip === i.name;
     const kids = open ? (state.jobs || []).map(j => `
       <div class="tree-item ${state.setId === j.id ? 'active' : ''}" data-set="${esc(j.id)}">
-        <span class="stage-dot" style="background:${j.delivered ? 'var(--ok)' : j.stage === j.done.length ? 'var(--busy)' : 'var(--warn)'}"></span>
+        <span class="stage-dot" style="background:${j.delivered ? 'var(--ok)' : j.stage === (j.done || []).length ? 'var(--busy)' : 'var(--warn)'}"></span>
         <span>${esc(j.id)}</span>
         <span style="color:var(--tx-3);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.title || '')}</span>
         <span class="tag">${j.delivered ? '已交付' : esc(j.stage)}</span>
@@ -259,7 +387,9 @@ function renderHero() {
   const j = state.setId ? (state.jobs.find(x => x.id === state.setId) || {}) : null;
   const card = state.card || {};
   const title = j ? `${j.id} ${j.title || ''}` : (ip.name || '未选中');
-  const doneCount = j ? j.done.length : 0;
+  // j 可能是 {}（刚建的套次还没进索引）—— 直接 .done.length 会整页崩，
+  // 崩在 renderHero 里，表现就是「点了建，界面没反应」。默认值必须给。
+  const doneCount = (j && j.done || []).length;
   $('#hero').innerHTML = `
     <div class="hero-top">
       <div class="hero-id">${esc(j ? j.id : (ip.tag || '·'))}</div>
@@ -277,7 +407,7 @@ function renderHero() {
         <button class="btn sm" id="hNewSet">${ico('plus')} 新套次</button>
         <button class="btn sm" id="hGuard">${ico('shield')} 素材自检</button>
         <button class="btn sm" id="hAlgo">${ico('spark')} 参数预览</button>
-        <button class="btn sm primary" id="hCmd">${ico('term')} 出片命令</button>
+        <button class="btn sm primary" id="hCmd">${ico('play')} 开跑（先看计划）</button>
       </div>
     </div>`;
 }
@@ -292,7 +422,7 @@ async function renderOverview() {
   const cur = STAGES.indexOf(j.stage);
   box.innerHTML = `
     <div class="stages">${STAGES.map((s, i) => {
-      const st = (j.stages || {})[s]?.status || (j.done.includes(s) ? 'ok' : 'pending');
+      const st = (j.stages || {})[s]?.status || ((j.done || []).includes(s) ? 'ok' : 'pending');
       const cls = st === 'ok' ? 'ok' : st === 'fail' ? 'fail' : (i === cur ? 'cur' : '');
       return `<div class="stage ${cls}" data-stage="${s}" role="button" tabindex="0"
         title="点开看这一步的产物，并拿到「从此处重跑」的命令">
@@ -422,16 +552,15 @@ function renderPrompts() {
    ============================================================ */
 async function renderCmd() {
   const kinds = [
-    ['pipeline-fast', '快速试跑（DRY 先看计划）', 'spark'],
-    ['pipeline-std', '正式出片（std 档）', 'play'],
-    ['prompts-gen', 'AI 生成提示词', 'plus'],
-    ['prompts-opt', 'AI 优化提示词', 'refresh'],
-    ['prompts-show', '查看当前提示词', 'eye'],
-    ['algo', '自适应参数预览', 'sliders'],
+    ['pipeline-fast', '快速试跑（先看计划）', 'spark', 0],
+    ['pipeline-std', '正式出片（std 档）', 'play', 1],
+    ['prompts-gen', 'AI 生成提示词', 'plus', 0],
+    ['prompts-opt', 'AI 优化提示词', 'refresh', 0],
+    ['prompts-show', '查看当前提示词', 'eye', -1],
   ];
-  const rows = await Promise.all(kinds.map(async ([k, label, ic]) => {
+  const rows = await Promise.all(kinds.map(async ([k, label, ic, canExec]) => {
     const c = await api('cmdline', { body: { kind: k, ip: state.ip, set: state.setId } });
-    return { k, label, ic, cmd: c.cmdline || '' };
+    return { k, label, ic, cmd: c.cmdline || '', canExec };
   }));
   // 断点重做：交付之后最常见的动作就是"只重做后半段"。
   // 步骤名从 config/pipeline.json 实时取 —— 不在 JS 里硬列一遍（列了就会跟真值分叉）。
@@ -440,19 +569,26 @@ async function renderCmd() {
     <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
       <div class="hint" style="margin-bottom:8px">
         <b>断点重做</b>：改了某一环（换音色 / 改字幕 / 换 BGM），只想从那里往后跑。
-        点一步就复制命令，前面已完成的产物保持不动。</div>
+        点「跑」直接开跑（前面已完成的产物保持不动），点「复制」回终端跑。</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px">${steps.map(s => {
         const meta = (state.cfg.pipeline.steps || {})[s] || {};
         const label = meta.name || meta.desc || s;
-        return `<button class="btn sm" data-redo="${esc(s)}">${ico('undo')} 从「${esc(String(label).slice(0, 6))}」起</button>`;
+        return `<span class="btn-group">
+          <button class="btn sm" data-exe="redo" data-step="${esc(s)}" title="跑到这里为止之后的全部重做">${ico('play')} ${esc(String(label).slice(0, 8))}</button>
+          <button class="btn sm ghost" data-redo="${esc(s)}" title="只复制命令">${ico('copy')}</button></span>`;
       }).join('')}</div>
     </div>` : '';
   $('#cmdBox').innerHTML = `
-    <div class="hint" style="margin-bottom:9px">出片是重活（十几分钟到半小时、要吃 GPU），界面不代跑 —— 复制回终端，看得见全部输出。</div>
+    <div class="hint" style="margin-bottom:9px">
+      这些都能直接跑：点「跑」就在后台执行，日志在右下角实时滚，随时能停。
+      想自己盯整段输出，点「复制」回终端也一样。</div>
     ${rows.map(r => `<div style="margin-bottom:8px">
       <div style="display:flex;align-items:center;gap:7px;margin-bottom:4px">
         ${ico(r.ic, 'ico')}<span style="font-size:12px">${r.label}</span>
-        <div class="spacer"></div><button class="btn sm" data-copy="${esc(r.cmd)}">${ico('copy')} 复制</button></div>
+        <div class="spacer"></div>
+        ${r.canExec >= 0 ? `<button class="btn sm ${r.k === 'pipeline-std' ? 'primary' : ''}"
+            data-exe="${esc(r.k)}">${ico('play')} 跑</button>` : ''}
+        <button class="btn sm ghost" data-copy="${esc(r.cmd)}">${ico('copy')}</button></div>
       <div class="cmdbar"><span class="p">$</span> ${esc(r.cmd)}</div></div>`).join('')}
     ${redo}`;
 }
@@ -758,17 +894,28 @@ async function saveBrief(thenGen) {
   if (thenGen) await genFromBrief();
 }
 
-/* 生成提示词仍然回终端跑 —— 它要调 LLM、几十秒到几分钟，
-   塞进界面黑跑最糟：失败了只看到一句"出错了"，不知道是模型、红线还是网络。 */
-async function genFromBrief() {
-  const c = await api('cmdline', { body: { kind: 'prompts-gen', ip: state.ip, set: state.setId } });
-  await confirmBox('生成提示词', `
-    <div>提示词生成要调 LLM、几十秒起，而且<b>落盘前必须过红线校验</b> ——
-      所以这一步回终端跑，你能看见它被哪条红线拦下。</div>
-    <div class="cmdbar" style="margin-top:10px"><span class="p">$</span> ${esc(c.cmdline || '')}</div>
-    <div class="hint" style="margin-top:8px">命令已复制到剪贴板。先加 <span class="mono">--dry</span> 可以只看不落盘。</div>`, '复制命令');
-  copyText(c.cmdline || '');
+/* 生成/优化提示词：调 LLM、几十秒起，落盘前必须过红线校验。
+   现在直接在界面里跑 —— 但日志不藏起来：被哪条红线拦下、走了哪家车道，都在右下角。
+
+   ★ 点之前先看有没有能切的源。提示词是照着文案切的，没文案就没东西喂模型。
+   后端 CLI 也拦（"切不出段：…没有文案 txt，也没有 SRT"），但让人先点一次确认、
+   等十几秒再看一句失败，体验上跟"点了没反应"是一回事。 */
+async function genPrompts(kind) {
+  if (!state.setId) return toast('先选套次', '', 'err');
+  await loadPrompts().catch(() => { });
+  const src = (state.prompts || {}).source || {};
+  if (!src.ok) {
+    const dir = (state.prompts || {}).set || state.setId;   // 说完整目录名，别让人去猜
+    return toast('这套片子还没有文案',
+      `05_文案/${dir}/ 里没有 txt，07_成片 里也没有 srt。`
+      + `提示词是照着文案逐段切的 —— 先把文案放进去，再点这里。`, 'err');
+  }
+  await startExec({ kind, ip: state.ip, set: state.setId }, {
+    then: async d => { if (d.state === 'done') { await loadPrompts(); renderPrompts(); } },
+  });
 }
+
+async function genFromBrief() { return genPrompts('prompts-gen'); }
 
 /* ============================================================
    偏离 / 脚本列表
@@ -836,7 +983,11 @@ async function showStage(stage) {
     <div class="plan">
       <div class="plan-h"><b>${esc(p.label)}</b>
         <div class="spacer"></div>
-        <button class="btn sm" data-copy="${esc(p.cmd)}">${ico('copy')} 复制</button></div>
+        ${p.exec ? `<button class="btn sm ghost" data-exe="plan-dry" data-plan='${esc(JSON.stringify(p.exec))}'
+            title="只算计划，不提交 GPU">${ico('eye')} 看计划</button>` : ''}
+        ${p.exec ? `<button class="btn sm primary" data-exe="plan" data-plan='${esc(JSON.stringify(p.exec))}'>${ico('play')} 跑</button>` : ''}
+        ${p.run ? `<button class="btn sm" data-quick='${esc(JSON.stringify(p.run))}'>${ico('check')} 执行</button>` : ''}
+        <button class="btn sm ghost" data-copy="${esc(p.cmd)}">${ico('copy')}</button></div>
       <div class="hint" style="margin:4px 0 6px">${esc(p.why)}</div>
       <div class="cmdbar"><span class="p">$</span> ${esc(p.cmd)}</div>
     </div>`).join('') || `<div class="empty">这一步没有流水线命令（人工环节）</div>`;
@@ -864,7 +1015,8 @@ async function showStage(stage) {
     ${next}
     ${preHtml}
     <div class="sec-title" style="margin-top:16px">重做</div>
-    <div class="hint" style="margin-bottom:8px">命令回终端跑 —— 出片要十几分钟、要吃 GPU，塞进浏览器黑跑只会让你看不见它死在哪。</div>
+    <div class="hint" style="margin-bottom:8px">
+      点「跑」就地执行（日志在右下角，随时能停）；只想拿命令就点复制。</div>
     ${plans}`;
   $('#modal').classList.add('show');
   $('#mclose').onclick = closeModal;
@@ -980,12 +1132,13 @@ function showNewCard() {
   $('#ncAI').onclick = async () => {
     const text = ($('#ncTalk')?.value || '').trim();
     if (text.length < 12) return toast('再多说两句', '至少告诉我他是谁、要做什么号', 'err');
-    const btn = $('#ncAI');
-    btn.disabled = true; btn.innerHTML = `${ico('spark')} 正在整理…（约 20 秒）`;
-    const r = await api('card-draft', { body: { text } });
-    btn.disabled = false; btn.innerHTML = `${ico('spark')} AI 出草案`;
-    if (r.error) return toast('AI 没整理出来', r.error, 'err');
-    showNewCardDraft(r, text);
+    closeModal();
+    // 走执行引擎而不是干等：模型可能先试几条车道才通，那段过程要看得见，
+    // 否则用户只会得到一个 20 秒不动的按钮，然后以为坏了。
+    await startExec({ kind: 'ai-card-draft', text }, {
+      onDone: r => showNewCardDraft(r, text),
+      then: d => { if (d.state !== 'done') showNewCardManual(text, true); },
+    });
   };
 }
 
@@ -1065,7 +1218,17 @@ function showNewCardDraft(r, rawText) {
     closeModal();
     toast('档案已建', `${rr.name} · 写了 ${(rr.md || []).length} 篇人设文档`, 'ok');
     await boot();
+    // 建完直接停在新建的这张卡上 —— 不然人还得自己去左边找，第一反应是「没建成吧」
+    await selectIP(rr.name);
+    showNextStepHint(rr.name);
   };
+}
+
+/* 建完卡之后最该干的一件事是开第一套片。这里不替他点，只把路指到那一格。 */
+function showNextStepHint(name) {
+  if (!($('#modal')?.classList.contains('show'))) {
+    toast('下一步：开第一套片', `${name} → 右上「＋ 新套次」`, '');
+  }
 }
 
 /* 手填（保留原表单，AI 不可用时也不堵路） */
@@ -1103,18 +1266,28 @@ function showNewCardManual(prefill, fromDraft) {
     if (r.error) return toast('没建成', r.error, 'err');
     closeModal();
     toast('已提交建档', r.cmdline || '', 'ok');
-    await sleep(2000);
+    await sleep(2500);
     await boot();
+    await selectIP(v('ncName'));
   };
 }
 
 function showNewSet() {
-  const guess = 'S' + String((state.jobs || []).length + 1).padStart(2, '0');
+  // 套次编号的默认值按这个 IP 自己的 tag 走（老王的 M 就别给 S03）
+  const tag = (state.ips.find(i => i.name === state.ip) || {}).tag || 'S';
+  const used = (state.jobs || []).map(j => j.id);
+  let n = used.length + 1;
+  while (used.includes(tag + String(n).padStart(2, '0'))) n++;
+  const guess = tag + String(n).padStart(2, '0');
+
   $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('plus')} 开一套新片</b>
+      <span class="sub">${esc(state.ip || '')}</span>
       <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
     <div class="form-grid">
-      <label class="field"><span>套次编号 *</span><input id="nsId" value="${esc(guess)}"></label>
-      <label class="field"><span>标题 / 主题</span><input id="nsTitle" placeholder="留空就让 AI 按人设出题"></label>
+      <label class="field"><span>套次编号 *</span><input id="nsId" value="${esc(guess)}">
+        <span class="hint">前缀跟着这个 IP 的标签走，别手改前缀</span></label>
+      <label class="field"><span>标题 / 主题</span><input id="nsTitle" placeholder="留空就按人设自动出题">
+        <span class="hint">标题会写进 job.json，是后面提示词的依据</span></label>
     </div>
     <div style="display:flex;gap:7px;align-items:center;margin:12px 0 4px">
       <button class="btn sm" id="nsIdea">${ico('spark')} AI 想几个选题</button>
@@ -1129,8 +1302,6 @@ function showNewSet() {
       <button class="btn primary" id="nsGo">建</button></div>`;
   $('#modal').classList.add('show');
   $('#mclose').onclick = $('#mclose2').onclick = closeModal;
-
-  let picked = null;
 
   const renderTopics = r => {
     const list = r.topics || [];
@@ -1149,7 +1320,6 @@ function showNewSet() {
     $$('#nsTopics .topic').forEach(el => {
       el.onclick = () => {
         const t = list[+el.dataset.topic];
-        picked = t;
         $('#nsTitle').value = t.title;
         $$('#nsTopics .topic').forEach(x => x.classList.toggle('on', x === el));
       };
@@ -1157,44 +1327,80 @@ function showNewSet() {
   };
 
   $('#nsIdea').onclick = async () => {
-    const b = $('#nsIdea');
-    b.disabled = true; b.innerHTML = `${ico('spark')} 想题中…`;
-    const r = await api('topics', { body: { ip: state.ip, n: 5, hint: ($('#nsTitle')?.value || '').trim() } });
-    b.disabled = false; b.innerHTML = `${ico('spark')} AI 想几个选题`;
-    if (r.error) {
-      $('#nsTopics').innerHTML = `<div class="warnbox">${esc(r.error).replace(/\n/g, '<br>')}</div>`;
-      $('#nsIdeaSub').textContent = r.need_persona ? '缺人设材料，先去建档或补 01_人设与规范' : '';
-      return;
+    $('#nsIdeaSub').textContent = '正在想…（跑了几条车道会在右下角日志里看到）';
+    await startExec({ kind: 'ai-topics', ip: state.ip, n: 5, hint: ($('#nsTitle')?.value || '').trim() }, {
+      onDone: r => { $('#nsIdeaSub').textContent = `人设 ${r.persona_chars || 0} 字 · 通道 ${r.provider || '?'}`; renderTopics(r); },
+      then: d => { if (d.state !== 'done') $('#nsIdeaSub').textContent = '没出题（看日志）'; },
+    });
+  };
+
+  const createSet = async (id, title) => {
+    const b = $('#nsGo');
+    if (b) { b.disabled = true; b.textContent = '建中…'; }
+    // ★ 标题必须走 --title：job-new 的第二个位置参数是套次名，不是标题。
+    //   以前写成位置参数，CLI 直接 "unrecognized arguments" 退出，界面却只当成功 ——
+    //   于是「点了建，什么都没发生」。这类错必须看回执，不能只看有没有抛异常。
+    const r = await api('run', { body: { cmd: 'job-new', args: [state.ip, id, '--title', title] } });
+    if (r.error) { if (b) { b.disabled = false; b.textContent = '建'; } return toast('没建成', r.error, 'err'); }
+    // 等 CLI 真跑完再刷新 —— 以前固定 sleep(1500)，机器慢一点就刷出「套次不存在」
+    const done = await waitTask(r.task, 20000);
+    if (!done || done.state !== 'done' || done.rc !== 0) {
+      if (b) { b.disabled = false; b.textContent = '建'; }
+      return toast('没建成', (done && done.out || '').slice(-300) || '看运行日志', 'err');
     }
-    renderTopics(r);
+    closeModal();
+    toast('已建', `${id} ${title}`, 'ok');
+    await loadJobs();
+    // 建完必须自己核对一遍：索引里没有这一套，就说明磁盘上没建成，
+    // 别把「没建成」当成功 —— 用户下一步点哪都会报「没有这个套次」。
+    if (!(state.jobs || []).some(j => j.id === id)) {
+      const fix = await api('run', { body: { cmd: 'index', args: ['--write'] } });
+      await waitTask(fix.task, 15000);
+      await loadJobs();
+    }
+    await renderTree();
+    await selectSet(id);
+    openTab('inspect');
   };
 
   $('#nsGo').onclick = async () => {
     const id = ($('#nsId')?.value || '').trim().toUpperCase();
-    let title = ($('#nsTitle')?.value || '').trim();
     if (!id) return toast('还差东西', '套次编号要填', 'err');
+    if ((state.jobs || []).some(j => j.id === id)) return toast('这套已经在了', id + ' 换个编号', 'err');
+    let title = ($('#nsTitle')?.value || '').trim();
 
-    // 没写标题 → 自动按人设出一个。这一步放这里而不是建完再补，
-    // 是因为 job.json 里标题是后面提示词和人设对齐的依据，空着会一路歪。
+    // 没写标题 → 按人设自动出一条。放这里而不是建完再补：
+    // job.json 里标题是后面提示词和人设对齐的依据，空着会一路歪。
     if (!title) {
       const b = $('#nsGo');
-      b.disabled = true; b.textContent = '没写标题，AI 正在出题…';
-      const r = await api('topics', { body: { ip: state.ip, n: 1 } });
-      b.disabled = false; b.textContent = '建';
-      if (r.error || !(r.topics || []).length) {
-        return toast('标题还是得有', r.error ? 'AI 出题失败：' + r.error : 'AI 没给出选题', 'err');
-      }
-      title = r.topics[0].title;
-      toast('自动取了标题', title, 'ok');
+      b.disabled = true; b.textContent = '没写标题，正在按人设出题…';
+      await startExec({ kind: 'ai-topics', ip: state.ip, n: 1 }, {
+        quiet: false,
+        onDone: r => {
+          const t = (r.topics || [])[0];
+          if (!t) return toast('标题还是得有', 'AI 没给出选题，自己写一个吧', 'err');
+          toast('自动取了标题', t.title, 'ok');
+          createSet(id, t.title);
+        },
+        then: d => { if (d.state !== 'done') { b.disabled = false; b.textContent = '建'; } },
+      });
+      return;
     }
-    const r = await api('run', { body: { cmd: 'job-new', args: [state.ip, id, title] } });
-    if (r.error) return toast('没建成', r.error, 'err');
-    closeModal();
-    toast('已提交', r.cmdline || '', 'ok');
-    await sleep(1500);
-    await loadJobs(); await renderTree();
-    await selectSet(id);
+    await createSet(id, title);
   };
+}
+
+/* 写操作走 /api/run 是异步任务，返回 task id。轮询到它结束再刷新，
+   比固定 sleep 靠谱 —— 机器忙的时候 sleep 永远不够久。 */
+async function waitTask(tid, timeout = 15000) {
+  if (!tid) return;
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    const d = await api('task?id=' + encodeURIComponent(tid)).catch(() => null);
+    if (!d || d.state !== 'running') return d;
+    await sleep(400);
+  }
+  return null;
 }
 
 function bind() {
@@ -1266,6 +1472,69 @@ function bind() {
     if (e.target.closest('#mcopy')) return copyText(decodeURIComponent(e.target.closest('#mcopy').dataset.src || ''));
   });
 
+  /* ---------- 长任务：所有「跑」按钮都从这里进 ---------- */
+  document.addEventListener('click', async e => {
+    const exe = e.target.closest('[data-exe]');
+    if (exe) {
+      e.preventDefault();
+      const kind = exe.dataset.exe;
+      if (kind === 'plan' || kind === 'plan-dry') {
+        let payload = null;
+        try { payload = JSON.parse(exe.dataset.plan); } catch (err) { }
+        if (!payload) return toast('这条计划读不出来', '刷新一下再试', 'err');
+        // 「看计划」= 加 --dry：把流水线打算跑的步骤和参数打出来，不提交 GPU
+        return void await startExec(kind === 'plan-dry' ? { ...payload, dry: true } : payload);
+      }
+      if (kind === 'redo') {
+        return void await startExec({
+          kind: 'pipeline', ip: state.ip, set: state.setId, from: exe.dataset.step,
+        });
+      }
+      // 命令区那几行
+      const map = {
+        'pipeline-fast': { kind: 'pipeline', tier: 'fast', dry: true },
+        'pipeline-std': { kind: 'pipeline', tier: 'std' },
+        'prompts-gen': { kind: 'prompts-gen' },
+        'prompts-opt': { kind: 'prompts-opt' },
+      };
+      if (map[kind]) {
+        return void await startExec({ ...map[kind], ip: state.ip, set: state.setId });
+      }
+      return;
+    }
+
+    // 短动作（改 job.json 之类）：走原来的写白名单，不占运行面板
+    const quick = e.target.closest('[data-quick]');
+    if (quick) {
+      let q = null;
+      try { q = JSON.parse(quick.dataset.quick); } catch (err) { }
+      if (!q) return;
+      const r = await api('run', { body: { cmd: q.cmd, args: q.args } });
+      if (r.error) return toast('没执行成', r.error, 'err');
+      toast('已提交', r.cmdline || '', 'ok');
+      await waitTask(r.task, 15000);
+      if (q.cmd === 'job-set') { await loadJobs(); await selectSet(state.setId); }
+      await renderOverview();
+      return;
+    }
+
+    if (e.target.closest('#runClose')) return closeRunPanel();
+    if (e.target.closest('#runMin')) return runUI().classList.toggle('min');
+    if (e.target.closest('#runCopy')) return copyText(run.cmdline);
+    if (e.target.closest('#runStop')) {
+      if (!run.id) return;
+      const r = await api('exec-stop', { body: { id: run.id } });
+      // 任务可能在你按下之前就跑完了 —— 那时报「已停止」是假话
+      if (r.note) toast('没有可停的', r.note, '');
+      else toast('已发停止信号', '会先把当前这一段收尾，不会留半成品', '');
+      return;
+    }
+    if (e.target.closest('#runAgain')) {
+      if (run.payload) return void await startExec({ ...run.payload, confirm: true });
+      return;
+    }
+  });
+
   // 字体预览：改一下立刻看字形，不落盘
   document.addEventListener('input', e => {
     if (e.target.id === 'prevFs') applyFontPreview();
@@ -1309,17 +1578,15 @@ function bind() {
     if (e.target.closest('#hGuard') || e.target.closest('#btnGuard')) return void runGuard();
     if (e.target.closest('#hAlgo')) return void showAlgo();
     if (e.target.closest('#hCmd')) {
-      const c = await api('cmdline', { body: { kind: 'pipeline-fast', ip: state.ip, set: state.setId } });
-      copyText(c.cmdline || '');
+      // 以前这里是「复制命令」。人真正想点的是「开跑」，而且要先看一眼计划。
+      return void startExec({ kind: 'pipeline', ip: state.ip, set: state.setId, tier: 'fast', dry: true });
     }
     if (e.target.closest('#btnUp')) return void renderFiles(state.fsParent);
     if (e.target.closest('#btnCmdGen')) {
-      const c = await api('cmdline', { body: { kind: 'prompts-gen', ip: state.ip, set: state.setId } });
-      copyText(c.cmdline || '');
+      return void genPrompts('prompts-gen');
     }
     if (e.target.closest('#btnCmdOpt')) {
-      const c = await api('cmdline', { body: { kind: 'prompts-opt', ip: state.ip, set: state.setId } });
-      copyText(c.cmdline || '');
+      return void genPrompts('prompts-opt');
     }
     if (e.target.closest('#actNote')) {
       const t = prompt('记一条习惯/需求/红线（会被写进 card.json）：');
