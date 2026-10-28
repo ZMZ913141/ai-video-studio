@@ -42,6 +42,12 @@ is_ours() {
   curl -s -m 1 "http://127.0.0.1:$1/api/health" 2>/dev/null | grep -Eq '"ok": *true'
 }
 
+# 是不是"当前这版代码"。新版 health 会自报解释器路径（py 字段），
+# 早期版本没有 —— 用它区分"能放心用"和"该清掉的乱码版"。
+is_current() {
+  curl -s -m 1 "http://127.0.0.1:$1/api/health" 2>/dev/null | grep -q '"py":'
+}
+
 # 读小纸条里的端口（小纸条不存在则输出空）
 saved_port() {
   [ -f "$PORTFILE" ] || return 0
@@ -121,11 +127,23 @@ if [ "$PORT_SET" -eq 0 ] && saved_alive; then
   fi
 fi
 
-# ---- 没有小纸条但端口有人应答 = 不可管理的旧实例 ------------------------------
+# ---- 没有小纸条但端口有人应答 = 别人起的实例 ----------------------------------
 # 只在用默认端口段拦人；用户自己指定了端口，说明他就是要绕开，别多嘴。
 if [ "$PORT_SET" -eq 0 ] && STRAY="$(find_stray)"; then
-  echo "⚠ 端口 $STRAY 上有一份工作台在应答，但没留小纸条"
-  echo "  （多半是早期起的版本，中文路径会乱码）。先试着把它清掉……"
+  if is_current "$STRAY"; then
+    # 是当前这版代码，只是没走本脚本（所以没留小纸条）。
+    # 别杀 —— 人家页面开着，杀了就是白屏重来。直接告诉他地址。
+    URL="http://127.0.0.1:$STRAY"
+    echo "✓ 已经在跑了：$URL"
+    echo "  （这份不是本脚本起的，所以没有小纸条，--stop 管不到它）"
+    echo "  要纳入管理：pkill -f 'bin/ui_server.py'; sleep 1; bash bin/start-ui.sh"
+    if [ "$OPEN" -eq 1 ] && command -v xdg-open >/dev/null 2>&1; then
+      xdg-open "$URL" >/dev/null 2>&1 &
+    fi
+    exit 0
+  fi
+  echo "⚠ 端口 $STRAY 上有一份工作台在应答，但它是老版本"
+  echo "  （中文路径会乱码）。先试着清掉它……"
   pkill -f 'bin/ui_server.py' 2>/dev/null || true
   sleep 1
   if STRAY2="$(find_stray)"; then
