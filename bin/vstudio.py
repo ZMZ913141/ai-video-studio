@@ -194,11 +194,26 @@ def derive_stage(job):
 
 
 def load_job(ip_root, setname):
+    """读一套片子。
+
+    ★ 文件系统是真相来源，job.json 只存「人工标记」（stages/qa）。
+    所以每次读都用当前目录刷新 artifacts —— 否则 job.json 是建套那一刻的
+    快照，之后生成的音频/成片/字幕全都不算数，列表会一直显示"缺"。
+    （S05 就是这样：文件早就齐了，列表还显示缺文案。）
+    """
     p = job_path(ip_root, setname)
-    if os.path.exists(p):
-        with open(p, encoding="utf-8") as f:
-            return json.load(f)
-    return None
+    if not os.path.exists(p):
+        return None
+    with open(p, encoding="utf-8") as f:
+        job = json.load(f)
+    job["artifacts"] = scan_artifacts(ip_root, setname)
+    dl = delivered_files(ip_root, setname)
+    job["delivered"] = bool(dl)
+    if dl:
+        job["artifacts"]["交付"] = dl
+        job["stages"].setdefault("交付", {})["status"] = "ok"
+    job["stage"] = derive_stage(job)
+    return job
 
 
 def build_job(ip_entry, setname, write=False):
@@ -242,9 +257,14 @@ def build_job(ip_entry, setname, write=False):
 
 
 def brief(job):
+    # ★ 判据必须和 derive_stage 一致：文件在，或人工标记过 ok，都算完成。
+    #   曾只按文件算，导致 job-set 推进后列表仍显示"缺"，看着像没生效。
     arts = job.get("artifacts", {})
-    done = [s for s in STAGES if arts.get(s)]
-    missing = [s for s in STAGES if s not in done and s != "交付"]
+    stages = job.get("stages", {})
+    def is_done(s):
+        return bool(arts.get(s)) or stages.get(s, {}).get("status") == "ok"
+    done = [s for s in STAGES if is_done(s)]
+    missing = [s for s in STAGES if not is_done(s) and s != "交付"]
     if not job.get("delivered", False):
         missing.append("交付")
     return {
@@ -477,7 +497,15 @@ def cmd_card_new(a):
     for flag, val in (("--tag", a.tag), ("--space", a.space), ("--aliases", a.aliases)):
         if val:
             cmd += [flag, val]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    # 三个坑（2026-10-28 逐个踩过）：
+    #   ① newip.py 按自身位置反推总册，档案挪到独立存储区后会算错
+    #      （/cfu/ai视频档案库/<IP>/03_生产脚本 → 上三级 = /cfu/，册子不在那）
+    #      → 必须用 IP_REGISTRY 显式指回项目册
+    #   ② 缺参数会交互式等输入 → 堵死 stdin，否则挂起到超时被杀（exit 137 像崩溃）
+    #   ③ 加 timeout 兜底
+    env = dict(os.environ, IP_REGISTRY=REGISTRY)
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL, timeout=120, env=env)
     if r.returncode != 0:
         print(r.stdout.strip() or r.stderr.strip())
         sys.exit(r.returncode)
