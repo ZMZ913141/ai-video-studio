@@ -308,6 +308,15 @@ python3 bin/llm_router.py probe --provider zengate  # 只测一条，且不写�
 - **改完代码重启看板，不会丢正在跑的任务**：起跑时落一份 `.cache/runs/<tid>.state.json`，
   启动时 `adopt_runs()` 把还活着的进程接回来（能继续看日志、继续停）。
   拿不到退出码时**如实写「按日志末尾推断」**，不瞎猜成成功。
+  跑完的任务由 `load_history()` 从 `.summary.json` 回填最近 20 条 —— **只写不读的落盘等于没落**，
+  以前每次重启「最近跑过什么」都是空白，磁盘上却存着一份份 summary。
+- **`--stop` 不按 pid 杀**：带一张一次性暗号发 `/api/shutdown`，让服务自己收尾退出。
+  原因：容器/沙箱里每次命令行调用可能是**独立的 PID 命名空间**，纸条上那个号在自己这边
+  可能指向别的进程 —— 实测按 pid `kill` 把自己的 shell 杀了（`rc=143`）。
+- **判服务活没活，必须看响应内容**：这套环境在 `127.0.0.1` 前面有一层反向代理，
+  后端没了它会回 **502 `upstream connect failed`**。所以 `curl -s ... && echo 活着`
+  会把"已经死了"判成"活着"。一律走 `ping_port()`（要求响应里有 `"app":"ai-video-studio"`）。
+  同理， zen-gate 的 `/v1/models` 没带 key 回 401 —— 那是**活着要钥匙**，不是 down。
 - **刷新页面也能接回任务**：`boot()` 末尾 `resumeRunning()` 会找 `state==running` 的那条，
   出片动辄十几分钟，中途刷一下页面是常态 —— 以前刷新后既看不到进度也停不掉。
 - **阶段状态以产物为准**（`normalize_stages`）：`job.json` 的 `status` 只说明「哪条命令跑过」。

@@ -35,6 +35,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -54,6 +55,8 @@ CHANGELOG_GLOBAL = os.path.join(ROOT, "config", ".ui_changelog.jsonl")
 PORTFILE = os.path.join(ROOT, ".cache", "ui.port.json")
 PORTFILE_LEGACY = os.path.join(tempfile.gettempdir(), "vstudio-ui.json")
 BOOT_AT = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# 本进程专属的退出暗号：只有拿到这张纸条的人（同机、同用户）能让它自己退
+SHUTDOWN_TOKEN = uuid.uuid4().hex
 
 PY = sys.executable if sys.version_info >= (3, 9) else "python3"
 VSTUDIO = os.path.join(BIN_DIR, "vstudio.py")
@@ -485,6 +488,49 @@ def adopt_runs():
         _persist(tid)
         if alive:
             threading.Thread(target=_watch_adopted, args=(tid, pid), daemon=True).start()
+        n += 1
+    return n
+
+
+def load_history(limit=20):
+    """把已经跑完的任务从磁盘读回列表。
+
+    ★ 只写不读的落盘等于没落：adopt_runs() 只管 state=="running" 的，
+      跑完的任务它直接 continue 跳过 —— 于是每次重启看板，
+      「最近跑过什么」都是空的，而磁盘上明明存着一份份 summary。
+      人想回看昨天那条出片到底 rc 是多少，在界面上找不到任何痕迹。
+
+    这里按文件时间取最近 limit 条回填；已在内存里的（刚跑完的）不重复加。
+    """
+    if not os.path.isdir(RUN_DIR):
+        return 0
+    tail = ".summary.json"
+    cand = []
+    for fn in os.listdir(RUN_DIR):
+        if not fn.endswith(tail):
+            continue
+        p = os.path.join(RUN_DIR, fn)
+        try:
+            cand.append((fn[:-len(tail)], os.path.getmtime(p)))
+        except OSError:
+            continue
+    cand.sort(key=lambda x: x[1], reverse=True)
+    n = 0
+    for tid, _ in cand[:limit]:
+        with EXEC_LOCK:
+            if tid in EXECS:          # 刚跑完的已经在内存里，别用旧摘要盖掉
+                continue
+        try:
+            with open(os.path.join(RUN_DIR, tid + tail), encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        d.setdefault("id", tid)
+        d["history"] = True           # 前端据此区分「本次跑的」和「上次留下的」
+        with EXEC_LOCK:
+            EXECS[tid] = d
         n += 1
     return n
 
@@ -934,6 +980,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"app": "ai-video-studio", "pid": os.getpid(),
                                    "port": self.server.server_address[1],
                                    "root": ROOT, "started": BOOT_AT})
+            if name == "shutdown":
+                return self._api_shutdown(body)
             if name == "services":
                 return self._json({"services": self._services()})
             if name == "bootstrap":
@@ -1071,11 +1119,24 @@ class Handler(BaseHTTPRequestHandler):
         ]
 
         def probe(item):
+            """探活。★ 分清楚「服务死了」和「服务活着但没给钥匙」。
+
+            zen-gate 的 /v1/models 没带 key 会回 401，以前一律当异常 → 判 down。
+            结果界面上天天挂着一个红点，人跑去重启一个好好在跑的服务。
+            能拿到 HTTP 响应就说明端口在服务；连不上（URLError/超时）才是真 down。
+            """
+            import urllib.error as UE
             name, url = item[0], item[1]
             try:
                 U.urlopen(url, timeout=3)
                 return name, "up"
-            except Exception as ex:
+            except UE.HTTPError as ex:
+                if ex.code in (401, 403):
+                    return name, "up"      # 要鉴权 = 活着
+                if ex.code >= 500:
+                    return name, "down"    # 在跑但内部出错，如实报
+                return name, "up"          # 其它 4xx：端口确实在应答
+            except Exception:
                 return name, "down"
 
         from concurrent.futures import ThreadPoolExecutor
@@ -1315,6 +1376,37 @@ class Handler(BaseHTTPRequestHandler):
         with EXEC_LOCK:
             cmdline = EXECS[tid]["cmdline"]
         return self._json({"id": tid, "label": label, "cmdline": cmdline})
+
+    def _api_shutdown(self, body):
+        """让服务自己退出。
+
+        ★ 为什么不用 `kill <pid>`：这个沙箱/容器里每次命令行调用是**独立的 PID
+          命名空间**，纸条上记的 pid 在自己这边可能对应到**另一个进程**——
+          实测 `--stop` 把自己的 shell 杀了（rc=143）。按端口发个暗号过来，
+          由服务本体收尾退出，跨命名空间也是准的。
+        """
+        tok = ((body or {}).get("token") or "").strip()
+        if not tok or tok != SHUTDOWN_TOKEN:
+            return self._json({"error": "暗号不对，不动手"}, 403)
+        # 先把纸条收掉（os._exit 不走 atexit），再回包，最后退
+        try:
+            cur = read_portfile()
+            if cur and cur.get("pid") == os.getpid() and os.path.exists(PORTFILE):
+                os.remove(PORTFILE)
+        except Exception:
+            pass
+        resp = {"ok": True, "bye": True, "port": self.server.server_address[1]}
+
+        def _bye():
+            time.sleep(0.25)          # 给响应留出发出去的时间
+            try:
+                self.server.shutdown()
+            except Exception:
+                pass
+            os._exit(0)
+
+        threading.Thread(target=_bye, daemon=True).start()
+        return self._json(resp)
 
     def _api_log(self, get):
         tid = get("id") or ""
@@ -1609,7 +1701,9 @@ class Handler(BaseHTTPRequestHandler):
                 info["model_sample"] = ids[:12]
             except Exception as ex:
                 info["models"] = 0
-                info["err"] = str(ex)[:120]
+                # 401 不是坏了：网关要 key，探活这边没带。说清楚，别让人去重启一个好服务
+                info["err"] = ("网关要 API key，这里只是探活没带钥匙（服务本身是活的）"
+                               if "401" in str(ex) or "403" in str(ex) else str(ex)[:120])
         if which == "comfyui":
             try:
                 import urllib.request as U
@@ -1949,7 +2043,12 @@ def write_portfile(url, port):
     光看启动命令猜不出地址，第二次开时常一堆旧实例堆在那儿。"""
     try:
         info = {"pid": os.getpid(), "port": port, "url": url,
-                "started": now(), "root": ROOT}
+                "started": now(), "root": ROOT,
+                # ★ 退出用的握手暗号。--stop 靠 pid 杀是不安全的：
+                #   容器/沙箱里每次调用的 PID 命名空间可能不同，pid 号会被映射成
+                #   别的进程 —— 实测 `--stop` 把自己的 shell 杀过（rc=143）。
+                #   现在改成带着暗号让服务自己退，跨命名空间也准。
+                "token": SHUTDOWN_TOKEN}
         with open(PORTFILE, "w", encoding="utf-8") as f:
             json.dump(info, f, ensure_ascii=False, indent=2)
         # ★ 只能删自己那张。以前无条件删，于是「旧实例后退出 → 把新实例刚写的纸条删了」，
@@ -1987,6 +2086,26 @@ def find_live(base=8790, span=30):
         if d:
             return p, d
     return None, None
+
+
+def ask_shutdown(port, token, timeout=2.0):
+    """带暗号请求服务自己退出。成功返回 True。
+
+    不走 `kill pid` —— 容器里 PID 命名空间可能每次调用都不一样，
+    那个 pid 号在自己这边可能指向别的进程，误杀代价太大。
+    """
+    import urllib.request as U
+    try:
+        req = U.Request(
+            f"http://127.0.0.1:{port}/api/shutdown",
+            data=json.dumps({"token": token}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST")
+        with U.urlopen(req, timeout=timeout) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        return bool(d.get("ok"))
+    except Exception:
+        return False
 
 
 def read_portfile():
@@ -2031,6 +2150,23 @@ def stop_running():
                 pass
             print(f"  （清掉了一张过期的小纸条：{PORTFILE}）")
         return 1
+
+    # ① 首选：带暗号让服务自己退出。
+    #    跨 PID 命名空间安全，也不会像 SIGKILL 那样留下收不掉的纸条。
+    tok = (info or {}).get("token")
+    if not tok:
+        # 老实例没这个字段：纸条里没有暗号就只能走 pid，但那种实例一般是本机直起的
+        print("  （这张纸条是老版本写的，没有退出暗号，改用 pid）")
+    if tok and ask_shutdown(port, tok):
+        for _ in range(50):
+            if not ping_port(port, timeout=0.3):
+                break
+            time.sleep(0.1)
+        if not ping_port(port, timeout=0.3):
+            print(f"✓ 已停 port={port}（服务自己收尾退出，没动 pid）")
+            return 0
+        print(f"  ⚠ 发了退出请求但 {port} 还在响应")
+
     who = pid_is_ours(pid)
     if who is None:
         print(f"进程 {pid} 已经不在了，但端口 {port} 还有东西在听 —— 清掉小纸条，服务可能是个老实例")
@@ -2135,6 +2271,13 @@ def main():
             print(f"  ↺ 接管了 {n_adopt} 个上次没跑完的任务（日志还在，能继续看/继续停）")
     except Exception as ex:
         print(f"  ⚠ 接管旧任务失败：{ex}")
+    # 跑完的任务也要回填：不然重启一次，「最近跑过什么」就空白了
+    try:
+        n_hist = load_history()
+        if n_hist:
+            print(f"  ↺ 回填了 {n_hist} 条历史任务（看板上能看到上次的 rc 和日志）")
+    except Exception as ex:
+        print(f"  ⚠ 回填历史任务失败：{ex}")
     # SIGTERM 默认直接终止进程、不走 atexit → 小纸条会残留成"假在跑"。
     # 转成 SystemExit，让它在退栈时把纸条收掉。
     try:

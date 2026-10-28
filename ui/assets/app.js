@@ -267,6 +267,55 @@ async function resumeRunning() {
   pollRun({});
 }
 
+/* 最近跑过什么 —— 从 .cache/runs/ 回填的记录。
+   出片是十几分钟的事，跑完人往往过一阵才回来看；以前这些记录只在终端里，
+   关掉窗口就再也查不到「昨天那条到底 rc 是多少」。
+   现在起跑落盘、服务启动回填，这里点开就能回看，还能翻当时的日志。 */
+async function showHistory() {
+  const d = await api('execs').catch(() => null);
+  const rows = ((d && d.runs) || []).filter(x => x.state !== 'running');
+  const head = `<div class="modal-head"><b>${ico('hist')} 最近跑过</b>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>`;
+  if (!rows.length) {
+    $('#modalBox').innerHTML = head + `<div class="hint">还没有跑完的记录。</div>`;
+    return void $('#modal').classList.add('show');
+  }
+  const label = { done: '完成', failed: '失败', stopped: '已停' };
+  $('#modalBox').innerHTML = head
+    + `<div class="hist">${rows.slice(0, 12).map(r => `
+        <div class="hist-row" data-hist="${esc(r.id)}" data-hist-log="${esc(r.log || '')}">
+          <span class="hist-st st-${esc(r.state)}">${esc(label[r.state] || r.state)}</span>
+          <span class="hist-lb">${esc(r.label || r.id)}</span>
+          <span class="hist-meta">${r.secs ? Math.round(r.secs) + 's' : '—'}${r.rc !== null && r.rc !== undefined ? ' · rc=' + r.rc : ''}</span>
+          <span class="hist-at">${esc((r.started || '').slice(5, 16))}</span>
+        </div>`).join('')}</div>`
+    + `<div class="hint" style="margin-top:10px">点一条看它当时的日志。记录在项目 <span class="mono">.cache/runs/</span> 里，重启看板也还在。</div>`;
+  $('#modal').classList.add('show');
+}
+
+/* 回放一条历史任务的日志：只读，不接管状态。
+   跑完的活儿再点「停止」没有意义，所以这里让停止/再跑都置灰，
+   免得人以为自己在操控一个还活着的进程。 */
+async function replayLog(tid) {
+  if (!tid) return;
+  run.id = '';                    // 关键：不给轮询接管的机会
+  run.payload = null;
+  run.offset = 0;
+  openRunPanel('历史记录 · ' + tid, '');
+  const d = await api(`log?id=${encodeURIComponent(tid)}&offset=0`).catch(e => ({ error: String(e) }));
+  const log = $('#runLog');
+  log.textContent = d.text || (d.error ? '读不到日志：' + d.error : '（这条没有日志）');
+  log.scrollTop = 0;
+  const near = { done: '完成', failed: '失败', stopped: '已停' };
+  setRunState(d.state || 'done', '');
+  $('#runSub').textContent = (near[d.state] || d.state || '') +
+    (d.secs ? ' · 当时用时 ' + Math.round(d.secs) + 's' : '') +
+    (d.rc !== undefined && d.rc !== null ? ' · rc=' + d.rc : '');
+  $('#runStop').disabled = true;
+  $('#runAgain').disabled = true;
+  if (d.gone) $('#runHint').textContent = '这条的记录已经不在内存里了，日志文件还在 .cache/runs/';
+}
+
 function renderServices() {
   const names = { pipeline: '合成服务', n8n: '编排', comfyui: 'ComfyUI', 'zen-gate': 'LLM 网关' };
   $('#svcBar').innerHTML = Object.entries(state.services).map(([k, v]) =>
@@ -1521,6 +1570,16 @@ function bind() {
     if (e.target.closest('#runClose')) return closeRunPanel();
     if (e.target.closest('#runMin')) return runUI().classList.toggle('min');
     if (e.target.closest('#runCopy')) return copyText(run.cmdline);
+    if (e.target.closest('#runHist')) {
+      closeModal();
+      return void showHistory();
+    }
+    // 翻历史日志：只读回放，不接管状态（那是过去的事了，别让「停止」以为它还活着）
+    const histRow = e.target.closest('.hist-row');
+    if (histRow) {
+      closeModal();
+      return void replayLog(histRow.dataset.hist);
+    }
     if (e.target.closest('#runStop')) {
       if (!run.id) return;
       const r = await api('exec-stop', { body: { id: run.id } });
