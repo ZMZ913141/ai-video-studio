@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "kinocut": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "kinocut",
+        "kino"
+      ]
+    },
+    "om-comfyui": {
+      "command": "/home/qmr/github/ai-video-studio/mcp-servers/om-comfyui/.venv/bin/python",
+      "args": [
+        "/home/qmr/github/ai-video-studio/mcp-servers/om-comfyui/server.py"
+      ],
+      "env": {
+        "COMFYUI_SERVER_URL": "http://localhost:8188",
+        "COMFYUI_WORKFLOWS_DIR": "/home/qmr/github/ai-video-studio/OpenMontage/tools/_comfyui/workflows"
+      }
+    },
+    "ip-studio": {
+      "command": "/home/qmr/github/ai-video-studio/mcp-servers/ip-studio/.venv/bin/python",
+      "args": [
+        "/home/qmr/github/ai-video-studio/bin/mcp_server.py"
+      ]
+    }
+  }
+}

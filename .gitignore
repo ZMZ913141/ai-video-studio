@@ -1,0 +1,37 @@
+# 密钥与本地配置（绝不提交）
+config/llm.env
+orchestration/.env
+*.env
+!.env.example
+
+# 运行时
+__pycache__/
+*.pyc
+.venv/
+output/
+*.log
+*.pid
+
+# ★ 档案卡里的大文件：进 git 会让仓库迅速膨胀，且二进制 diff 无意义
+#   成片 / 过程文件 / 音频 / 视频 —— 一律不提交，靠文件系统与备份管
+profiles/*/07_成片/
+profiles/*/08_过程/
+profiles/*/资产/
+profiles/*/06_音频/
+profiles/*/02_素材真值/
+profiles/*/03_生产脚本/*.mp4
+profiles/*/03_生产脚本/*.wav
+profiles/*/03_生产脚本/*.ass
+*.mp4
+*.mp3
+*.wav
+*.flac
+*.png
+*.ttf
+
+# 索引是派生物，每次 index 命令重生成
+jobs.index.json
+
+# 字幕样式等中间产物
+orchestration/subtitles/
+OpenMontage

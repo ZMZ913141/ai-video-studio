@@ -1,0 +1,176 @@
+{
+  "_readme": [
+    "多供应商自动切换清单。按 priority 从小到大依次尝试，某个限额/报错就自动跳下一个，",
+    "不会因为某家额度用完而停下。注册好新平台后：把 enabled 改成 true、填上 key_env",
+    "对应的 key（写在 config/llm.env）、把 model 换成控制台里实际的模型 id。",
+    "配额冷却状态写在 config/.llm_state.json（自动生成，勿手改）。"
+  ],
+
+  "defaults": {
+    "timeout_sec": 90,
+    "rate_limit_cooldown_min": 5,
+    "quota_cooldown_min": 120,
+    "daily_reset": false
+  },
+
+  "providers": [
+    {
+      "name": "siliconflow",
+      "note": "已注册。旗舰模型付费（DeepSeek-V3.2 质量最好、工具调用最稳），所以排在最后当兜底；9B 以下小模型永久免费",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "key_env": "SF_API_KEY",
+      "model": "deepseek-ai/DeepSeek-V3.2",
+      "priority": 35,
+      "enabled": true
+    },
+    {
+      "name": "modelscope",
+      "note": "已注册。魔搭，约 2000 次调用/天，每天重置",
+      "base_url": "https://api-inference.modelscope.cn/v1",
+      "key_env": "MS_API_KEY",
+      "model": "Qwen/Qwen3.8-27B",
+      "priority": 20,
+      "enabled": true,
+      "daily_reset": true
+    },
+    {
+      "name": "zhipu",
+      "note": "智谱。已实测：glm-4.7-flash 免费但限流明显（约 1/3 概率返回 1305 访问量过大），所以限流只冷却 1 分钟；glm-4.6 / glm-5.3-flash 等需付费（报 1113 余额不足）",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "key_env": "ZHIPU_API_KEY",
+      "model": "glm-4.7-flash",
+      "priority": 5,
+      "enabled": true,
+      "daily_reset": false,
+      "rate_limit_cooldown_min": 1,
+      "quota_cooldown_min": 60,
+      "extra_body": {"thinking": {"type": "disabled"}}
+    },
+    {
+      "name": "qianfan",
+      "note": "百度千帆。已实测：ernie-4.5-turbo-128k 可用且工具调用标准（ernie-lite/speed 已无权限）。/v2/models 接口本身有 QPS 限制，别频繁探",
+      "base_url": "https://qianfan.baidubce.com/v2",
+      "key_env": "QIANFAN_API_KEY",
+      "model": "ernie-4.5-turbo-128k",
+      "priority": 25,
+      "enabled": true,
+      "rate_limit_cooldown_min": 2
+    },
+    {
+      "name": "volcengine",
+      "note": "★ 已停用（用户未充值，避免产生费用）。key 本身有效，但账号 2107991929 未开通任何模型，调用一律 ModelNotOpen（HTTP 404，易误判成模型名错）。要启用必须：控制台开通模型 → 把 enabled 改 true → 跑 `llm_router.py reset`。注意开通后走按量计费，未充值会产生欠费",
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "key_env": "ARK_API_KEY",
+      "model": "doubao-seed-2-1-lite-260915",
+      "priority": 15,
+      "enabled": false,
+      "daily_reset": true
+    },
+    {
+      "name": "bailian",
+      "note": "阿里云百炼。每模型约 100 万 token（90 天有效期），实名后超额转按量付费，注意关掉自动扣费",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "key_env": "DASHSCOPE_API_KEY",
+      "model": "qwen-plus",
+      "priority": 50,
+      "enabled": false
+    },
+    {
+      "name": "tokenhub",
+      "note": "腾讯 TokenHub（混元已并入此平台）。★ 两个坑已排除：①Base URL 是 tokenhub.tencentmaas.com/v1，旧的 api.hunyuan.cloud.tencent.com/v1 对该 key 一律 401；②hunyuan-lite 已下线，现役叫 hy3/hy4-preview。实测 hy3 对话+工具调用均正常。一个 key 可调腾讯聚合的 DeepSeek/GLM/Kimi 等全部模型（GET /v1/models 查，119 个 online）",
+      "base_url": "https://tokenhub.tencentmaas.com/v1",
+      "key_env": "TENCENT_API_KEY",
+      "model": "hy3",
+      "priority": 30,
+      "enabled": true,
+      "extra_body": {"thinking": {"type": "disabled"}}
+    },
+    {
+      "name": "tokenhub-ds",
+      "note": "同一把腾讯 key 的第二个通道：走 DeepSeek-V4.1-Flash。用途是厂商级冗余——万一混元侧模型故障/限流，还有另一个厂商的模型可用（工具调用已实测）",
+      "base_url": "https://tokenhub.tencentmaas.com/v1",
+      "key_env": "TENCENT_API_KEY",
+      "model": "deepseek-v4.1-flash",
+      "priority": 32,
+      "enabled": true,
+      "extra_body": {"thinking": {"type": "disabled"}}
+    },
+    {
+      "name": "moonshot",
+      "note": "Kimi。新用户赠送额度，长上下文",
+      "base_url": "https://api.moonshot.cn/v1",
+      "key_env": "MOONSHOT_API_KEY",
+      "model": "kimi-k2-turbo-preview",
+      "priority": 70,
+      "enabled": false
+    },
+    {
+      "name": "xfyun",
+      "note": "讯飞星火。Spark Lite 永久免费（QPS=2，慢）",
+      "base_url": "https://spark-api-open.xf-yun.com/v1",
+      "key_env": "XFYUN_API_KEY",
+      "model": "lite",
+      "priority": 80,
+      "enabled": false
+    },
+    {
+      "name": "openrouter",
+      "note": "海外聚合，约 50 次/天（:free 模型），一个 key 走遍各家",
+      "base_url": "https://openrouter.ai/api/v1",
+      "key_env": "OPENROUTER_API_KEY",
+      "model": "deepseek/deepseek-v3.2:free",
+      "priority": 90,
+      "enabled": false,
+      "daily_reset": true
+    },
+    {
+      "name": "groq",
+      "note": "海外。约 1000 次/天、30 RPM，速度最快",
+      "base_url": "https://api.groq.com/openai/v1",
+      "key_env": "GROQ_API_KEY",
+      "model": "llama-3.3-70b-versatile",
+      "priority": 100,
+      "enabled": false,
+      "daily_reset": true
+    },
+    {
+      "name": "cerebras",
+      "note": "海外。约 100 万 token/天",
+      "base_url": "https://api.cerebras.ai/v1",
+      "key_env": "CEREBRAS_API_KEY",
+      "model": "qwen-3-32b",
+      "priority": 110,
+      "enabled": false,
+      "daily_reset": true
+    },
+    {
+      "name": "github",
+      "note": "GitHub Models。约 50 次/天，需 PAT",
+      "base_url": "https://models.inference.ai.azure.com",
+      "key_env": "GITHUB_TOKEN",
+      "model": "gpt-4o-mini",
+      "priority": 120,
+      "enabled": false,
+      "daily_reset": true
+    },
+    {
+      "name": "nvidia",
+      "note": "NVIDIA NIM。注册送 credits",
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "key_env": "NVIDIA_API_KEY",
+      "model": "qwen/qwen3-30b-a3b",
+      "priority": 130,
+      "enabled": false
+    },
+    {
+      "name": "google",
+      "note": "Google AI Studio（OpenAI 兼容端点）。Gemini Flash 约 250 次/天",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "key_env": "GEMINI_API_KEY",
+      "model": "gemini-2.5-flash",
+      "priority": 140,
+      "enabled": false,
+      "daily_reset": true
+    }
+  ]
+}

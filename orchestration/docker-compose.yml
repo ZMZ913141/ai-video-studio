@@ -1,0 +1,56 @@
+# n8n + pipeline-service 编排栈
+# 用法（在你的 4080 机器上）：
+#   cd comfy-kdenlive-stack
+#   cp config.env.example .env
+#   docker compose up -d
+#
+# ComfyUI 不在此 compose 内——它独占你的 4080 GPU，单独跑在 :8188 即可。
+# 若想也容器化 ComfyUI，取消下方 comfyui 段落注释并改映像为 comfyorg/comfyui:latest。
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_SECURE_COOKIE=false
+      - GENERIC_TIMEZONE=Asia/Shanghai
+    extra_hosts:
+      # Linux 下容器要访问宿主机必须显式加这条，否则 host.docker.internal 解析不了
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n-workflows:/files        # 导入工作流用
+    depends_on:
+      - pipeline-service
+
+  pipeline-service:
+    # 构建上下文必须是 orchestration/：comfy_guard.py 要和 app.py 一起进镜像
+    build:
+      context: .
+      dockerfile: pipeline-service/Dockerfile
+    restart: unless-stopped
+    # ★ 必须用 host 网络：ComfyUI 只监听 127.0.0.1:8188，
+    #   容器走 host-gateway(172.17.0.1) 会被拒——这是实测踩到的坑。
+    #   用 host 网络后容器内的 127.0.0.1 就是宿主机，直接通。
+    #   （要么就改 ComfyUI 启动参数 --listen 0.0.0.0，但那会把它暴露到局域网）
+    network_mode: host
+    environment:
+      - COMFYUI_SERVER_URL=http://127.0.0.1:8188
+      - COMFYUI_WORKFLOWS_DIR=/workflows
+      - OUTPUT_DIR=/output
+      - POLL_TIMEOUT=3600
+      # 护栏：/proc/meminfo 在容器里读到的仍是宿主机全局值，所以内存预检照样有效
+      - COMFY_AUTO_GUARD=1
+      - COMFY_AUTO_RELEASE=1
+      - GUARD_MIN_RAM_GB=12
+      - GUARD_MIN_VRAM_GB=6
+    volumes:
+      # 把 OpenMontage 已打包的 workflow 挂进容器；想换模型只要更新这里
+      - /home/qmr/github/ai-video-studio/OpenMontage/tools/_comfyui/workflows:/workflows:ro
+      - ./output:/output
+      # ffmpeg 已装在容器镜像内（见 Dockerfile），无需挂载宿主机二进制
+
+volumes:
+  n8n_data:
