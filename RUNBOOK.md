@@ -1,15 +1,18 @@
-# 运行手册（无 UI 版）
+# 运行手册
 
 > **原则：界面是可选项，接口才是本体。**
-> 三个入口，同一批底层函数，能力完全相同：
+> 四个入口，同一批底层函数，能力完全相同：
 >
 > | 入口 | 谁用 | 怎么用 |
 > |---|---|---|
 > | **CLI** | 人、我（WorkBuddy）、任何能跑 Bash 的 agent | `python3 bin/vstudio.py <命令>` |
 > | **MCP** `ip-studio` | 任何支持 MCP 的 AI（Claude Code / Cursor / Qwen Code） | 挂上即用，11 个工具 |
 > | **HTTP** `:8000` | n8n / 外部系统 | pipeline-service REST |
+> | **本地网页** `:8790` | 人（看板 + 安全动作） | `python3 bin/ui_server.py` → 见「一之二」 |
 >
-> UI（`ai-workbench.html`）将来只做**这些数据的显示**，不另发明流程。
+> 三个护栏：**① 界面不发明逻辑**（按钮背后就是 CLI）；
+> **② 同一参数只存一处**（界面只读真值文件那一份）；
+> **③ 出片类重活界面不代跑**，只把命令拼好给你复制回终端。
 
 ---
 
@@ -65,6 +68,60 @@ $V cards         # 所有档案卡
 $V jobs 洁斌      # 套次进度
 $V guard 洁斌     # 开工前自检（素材不齐非零退出）
 ```
+
+---
+
+## 一之二、本地网页工作台（2026-10-29 上线）
+
+**它是驾驶舱，不是第二条生产链路。**
+
+```bash
+cd /home/qmr/github/ai-video-studio
+python3 bin/ui_server.py            # → http://127.0.0.1:8790
+python3 bin/ui_server.py --open     # 顺便开浏览器
+python3 bin/ui_server.py --port 9000
+```
+
+### 它能干什么
+
+| 区 | 内容 | 落到哪个命令/文件 |
+|---|---|---|
+| 左栏 | IP / 套次树 + 搜索 + 标签筛选；生产脚本清单；脚本偏离 | `vstudio ips/jobs/scripts/scripts-diff` |
+| 中栏 | 阶段时间线、缺件、素材自检、素材与成片（缩略图 + 播放 + 文本预览）、提示词、命令串 | `job-show` / `guard` / `prompts.json` |
+| 右栏 | 检查（档案卡/红线/习惯/技术真值）、设置（两层两类）、变更记录 | `card.json` / `ip.json` / `config/pipeline.json` |
+
+### 界面边界（写操作白名单）
+
+**允许界面执行**：`index --write`、`job-set`、`job-new`、`card-new`、`card-note`、`scripts-sync`（第二层，需二次确认）。
+**界面不给**：`pipeline` 出片、`prompts` 生成/优化 —— 只拼命令给你复制。理由：十几分钟到半小时、吃 GPU、要看完整输出的东西，不该塞进 setTimeout 里黑跑。
+
+### 设置的两层两类
+
+```
+第一层 常用          全局：默认档位/CRF/每行字数/重叠帧/全局片段开关
+                    个人：分辨率 MP/字号/语气指令
+第二层 高级（折叠）  全局：通用片段正文、解释器与 ffmpeg 路径、红线阈值
+                    个人：CFG/步数/LoRA 强度/Sage
+```
+- 第二层保存前**必须二次确认**，改完自动追加 changelog：
+  全局 → `config/.ui_changelog.jsonl`；个人 → `<IP>/08_过程/_UI变更.jsonl`
+- 每次写真值文件都会先 `cp` 一份 `.bak.<时间戳>`（已 gitignore）
+- ip.json 里大多数参数**故意不可写**（采样器/二采模型/画幅/UnET）——这类动一处要重介整条链路，只留给脚本调用
+
+### 冒烟（改完前端跑一次）
+
+```bash
+NODE_PATH=/home/qmr/.workbuddy/binaries/node/workspace/node_modules \
+  node ui/smoke_ui.js
+# 打印各区块渲染计数 + 抓运行时异常；有新 error 就是 regression
+```
+
+### 已知实现讲究
+
+- **不走 CDN、不引框架**：`ui_server.py` 是 `http.server` 零第三方依赖，前端无构建。断网照样能开。
+- **中文路径**：`http.server` 把 request line 按 iso-8859-1 解的，直接拿 `self.path` 会把「洁斌」读成乱码 —— 服务端统一重解码。
+- **端口被占自动往后顺延**（8790 撞车是这台机器的常态，不该让人去查 PID）。
+- **文件浏览关在笼子里**：请求的路径 `realpath` 必须落在档案区或项目根之内，越界一律拒绝。
 
 ---
 
@@ -366,6 +423,8 @@ LoRA 改权重所以紧跟 UNET；Sage 改 attention 实现；低显存分块必
 | `llm status\|chat\|models\|vision --image 帧.png "…"` | LLM 路由（见第二节） |
 | `index [--write]` | 重建索引 / 给旧套次补 job.json |
 | `status` | 总览（卡 + 套次 + 三个服务） |
+
+另有：**`bin/ui_server.py`** —— 本地网页工作台（见「一之二」），不是 vstudio 子命令，单独起进程。
 
 全局加 `--json`：输出 JSON，给 agent 解析。
 `ip` 参数写名字/别名都行（"洁斌"、"主号"、"老王"）。

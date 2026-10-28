@@ -10,8 +10,9 @@
 ai-video-studio/                      本仓库（引擎，git，约 59M）
 ├── registry.json   ★ 总册：谁有档案卡，档案在哪
 ├── bin/            vstudio.py（CLI）+ mcp_server.py（MCP）+ llm_router.py
-├── templates/      档案卡模板
-├── docs/ ui/       文档与 UI 草稿
+├── templates/      档案卡模板 + scripts/ 生产脚本真源
+├── docs/           文档
+├── ui/             ★ 本地网页工作台（ index.html + assets/ + smoke_ui.js）
 └── orchestration/ captions/ config/ …   引擎其余部分
 
 /cfu/ai视频档案库/                    档案存储区（生产盘，不在本仓库）
@@ -34,14 +35,18 @@ git 边上迟早被误提交。现在项目只留代码（仓库 1.5M 长期稳�
 
 换档案盘位置：`export STUDIO_ARCHIVE=/新路径`（CLI 即跟随，默认 `/cfu/ai视频档案库`）。
 
-**入口三个，同一批底层函数**：CLI（人 + agent）、MCP（别的 AI）、HTTP（n8n）。
-UI 不是必需品，将来只做数据显示。→ 详见 `RUNBOOK.md`
+**入口四个，同一批底层函数**：CLI（人 + agent）、MCP（别的 AI）、HTTP（n8n）、
+**本地网页 `bin/ui_server.py`**（驾驶舱：看板 + 安全动作，重活回终端）。
 
 ```bash
 python3 bin/vstudio.py cards      # 看所有档案卡
 python3 bin/vstudio.py status     # 总览 + 服务健康
 python3 bin/vstudio.py guard 洁斌  # 开工自检
+python3 bin/ui_server.py          # → http://127.0.0.1:8790  看板 + 安全动作
 ```
+
+UI 三条护栏（详见 `RUNBOOK.md` 一之二）：界面不发明逻辑、同一参数只存一处、
+出片类重活不代跑只给命令。
 
 ## 架构
 

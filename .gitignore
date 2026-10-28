@@ -49,3 +49,7 @@ config/.llm_state.json
 
 # 视觉能力自检用的临时测试图
 .cache/
+
+# 网页工作台的运行痕迹：备份和变更记录都是本机的事，不进版本库
+config/.ui_changelog.jsonl
+config/*.bak.*
