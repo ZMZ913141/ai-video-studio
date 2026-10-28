@@ -92,6 +92,11 @@ IP_WRITABLE = {
     "video.mp":                   {"tier": 1, "type": "float", "label": "出片分辨率 MP", "min": 0.3, "max": 4.0},
     "subtitle.fs_cue":            {"tier": 1, "type": "int",   "label": "正文字号", "min": 20, "max": 120},
     "subtitle.fs_title":          {"tier": 1, "type": "int",   "label": "标题字号", "min": 20, "max": 140},
+    # 字体：名字必须和字体文件里的真实 family 一致，写错 libass 会静默回退 Noto
+    # （字形全错、还不报错），所以算第二层，改完要重跑 ass + burn 两步
+    "subtitle.font_cue":          {"tier": 2, "type": "str",   "label": "正文字体"},
+    "subtitle.font_cue_b":        {"tier": 2, "type": "str",   "label": "强调字体（CTA/花字）"},
+    "subtitle.font_title":        {"tier": 2, "type": "str",   "label": "标题字体"},
     "voice.tts.instruction":      {"tier": 1, "type": "text",  "label": "音色语气指令", "maxlen": 300},
     "voice.tts.cfg_scale":        {"tier": 2, "type": "float", "label": "CFG", "min": 0.5, "max": 3.0},
     "video.overlap":              {"tier": 2, "type": "int",   "label": "重叠帧", "min": 0, "max": 30},
@@ -165,6 +170,17 @@ def run_cli(args, timeout=60):
         return 124, "", f"超时 {timeout}s"
     except Exception as ex:
         return 125, "", f"{type(ex).__name__}: {ex}"
+
+
+def run_git(args, cwd=None, timeout=20):
+    """只读地取 git 里的旧版本（恢复默认要用）。
+    绝不碰工作区：只 show / rev-parse，不做 checkout、reset。"""
+    try:
+        p = subprocess.run(["git"] + list(args), cwd=cwd or ROOT,
+                           capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout, p.stderr
+    except Exception as ex:
+        return 1, "", f"{type(ex).__name__}: {ex}"
 
 
 def cli_json(args, timeout=60):
@@ -440,6 +456,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_set(body or {})
             if name == "cmdline":
                 return self._api_cmdline(body or {})
+            if name == "fonts":
+                return self._api_fonts()
+            if name == "defaults":
+                return self._api_defaults(get)
+            if name == "reset":
+                return self._api_reset(body or {})
+            if name == "brief":
+                return self._api_brief(get, body)
+            if name == "svc":
+                return self._api_svc(get)
             return self._404("未知接口 " + name)
         except Exception as ex:
             import traceback
@@ -642,6 +668,7 @@ class Handler(BaseHTTPRequestHandler):
         kind = body.get("kind")
         ip = body.get("ip", "洁斌")
         setname = body.get("set", "")
+        step = body.get("step", "")
         table = {
             "pipeline":      f"python3 bin/vstudio.py pipeline {ip} {setname}",
             "pipeline-fast": f"python3 bin/vstudio.py pipeline {ip} {setname} --tier fast --dry",
@@ -653,9 +680,241 @@ class Handler(BaseHTTPRequestHandler):
             "sync":          f"python3 bin/vstudio.py scripts-sync {ip}",
             "algo":          f"python3 bin/vstudio.py algo {ip} {setname}",
         }
+        if kind == "redo-from":
+            if not step:
+                return self._bad("缺少 step")
+            return self._json({"cmdline":
+                f"python3 bin/vstudio.py pipeline {ip} {setname} --from {step}",
+                "note": f"从「{step}」重跑，之前的产物保留不动；"
+                        f"要先看它打算干什么就再加 --dry"})
+        if kind == "redo-rest":
+            # --to 是"只跑到这里为止"，不是"从这之后重做"，两者别混
+            return self._json({"cmdline":
+                f"python3 bin/vstudio.py pipeline {ip} {setname} --tier fast --dry"})
         if kind not in table:
             return self._bad("未知命令模板")
         return self._json({"cmdline": table[kind]})
+
+    # ---------- 字体 ----------
+    def _api_fonts(self):
+        """两种字体要分清，混了就出废片：
+        ① 系统里装了 270+ 个中文字体，**浏览器能预览**（前端直接用 CSS 渲染）；
+        ② 真正能烧进字幕的只有 `02_素材真值/字体_字幕标题/` 里那几个 ——
+           libass 的 fontsdir 给大目录会吃爆内存（沙箱 4G 上限），
+           给空目录又会静默回退 Noto，字形全错还不报错。"""
+        fams, burn_files = [], {}
+        # 烧录白名单：按 IP 找精简字体目录
+        try:
+            ip_entries = cli_json(["ips"]).get("ips") or []
+        except Exception:
+            ip_entries = []
+        for e in ip_entries:
+            d = os.path.join(e["path"], "02_素材真值", "字体_字幕标题")
+            if os.path.isdir(d):
+                for fn in sorted(os.listdir(d)):
+                    if fn.lower().endswith((".ttf", ".otf", ".ttc")):
+                        burn_files[fn] = os.path.join(d, fn)
+        try:
+            r = subprocess.run(["fc-list", ":lang=zh", "family"],
+                               capture_output=True, text=True, timeout=10)
+            seen = set()
+            for line in r.stdout.splitlines():
+                for part in line.split(","):
+                    p = part.strip()
+                    # libass/fontconfig 认的是第一个族名，其余是别名
+                    if p and not p.startswith(("Alibaba", "Noto Sans", "Source Han")) and p not in seen:
+                        seen.add(p)
+                        fams.append(p)
+                        break
+        except Exception:
+            pass
+        # 把烧录字体文件的族名查出来，标到列表上
+        # fc-scan 一个文件常返回 4 个名字：家族英文名、家族中文名、具体英文名、具体中文名。
+        # libass 必须拿**具体字重名**（"阿里巴巴普惠体 2.0 95 ExtraBold"），
+        # 给家族名只会得到默认字重 —— 看着能跑，字形是错的。取最后一个。
+        burn_fams = set()
+        for fn, fp in burn_files.items():
+            try:
+                rr = subprocess.run(["fc-scan", "--format", "%{family}\n", fp],
+                                    capture_output=True, text=True, timeout=8)
+                names = [x.strip() for x in (rr.stdout or "").split(",") if x.strip()]
+                if names:
+                    burn_fams.add(names[-1])
+            except Exception:
+                pass
+        items = [{"family": f, "burnable": f in burn_fams} for f in sorted(fams)]
+        for f in sorted(burn_fams):
+            if f not in fams:
+                items.append({"family": f, "burnable": True})
+        cur = ""
+        root = ip_root("陈洁斌主号")
+        if root and os.path.exists(os.path.join(root, "ip.json")):
+            cur = (load_json(os.path.join(root, "ip.json")).get("subtitle") or {}).get("font", "")
+        return self._json({
+            "fonts": items, "current": cur,
+            "burn_dir": (list(burn_files.values())[0].rsplit("/", 1)[0] if burn_files else ""),
+            "burn_files": sorted(burn_files),
+            "note": "标「可烧录」的才是真能进字幕的字体；其余只是浏览器预览，"
+                    "要用于出片得先把字体文件放进精简目录（别一次塞几百个）。",
+        })
+
+    # ---------- 恢复默认 ----------
+    def _api_defaults(self, get):
+        """基线从哪来：git HEAD。不做"猜一个默认值"——猜出来的默认比没有更危险。"""
+        scope = get("scope") or "global"
+        info = {"scope": scope, "source": "git HEAD"}
+        if scope == "global":
+            info["file"] = "config/pipeline.json"
+            rc, out, _ = run_git(["show", "HEAD:config/pipeline.json"], cwd=ROOT)
+            info["available"] = rc == 0 and bool(out.strip())
+        else:
+            root = ip_root(get("path"))
+            if not root:
+                return self._bad("未知 IP")
+            info["file"] = os.path.join(root, "ip.json")
+            rel = os.path.relpath(os.path.join(root, "ip.json"), ARCHIVE)
+            rc, out, _ = run_git(["show", "HEAD:" + rel], cwd=ARCHIVE)
+            info["available"] = rc == 0 and bool(out.strip())
+        info["hint"] = ("「恢复默认」= 回到上一次 git 提交的版本。"
+                        "界面上试过的改动都会被撤掉，提交过的历史不动。")
+        return self._json(info)
+
+    def _api_reset(self, body):
+        scope = body.get("scope") or "global"
+        key = body.get("key") or ""
+        confirm = bool(body.get("confirm"))
+        if not key:
+            return self._bad("缺少 key")
+        table = GLOBAL_WRITABLE if scope == "global" else IP_WRITABLE
+        meta = table.get(key)
+        if not meta:
+            return self._json({"error": f"该参数界面不可写：{key}"}, 403)
+        if not confirm:
+            return self._json({"error": "恢复默认会覆盖当前值，需要确认",
+                               "need_confirm": True, "desc": meta["label"]}, 428)
+
+        if scope == "global":
+            cwd, rel, target = ROOT, "config/pipeline.json", os.path.join(ROOT, "config", "pipeline.json")
+        else:
+            root = ip_root(body.get("path"))
+            if not root:
+                return self._bad("未知 IP")
+            cwd = ARCHIVE
+            rel = os.path.relpath(os.path.join(root, "ip.json"), ARCHIVE)
+            target = os.path.join(root, "ip.json")
+        rc, out, err = run_git(["show", "HEAD:" + rel], cwd=cwd)
+        if rc != 0 or not out.strip():
+            return self._bad("取不到基线版本（这个文件还没进过 git？）" + (err.strip()[:120]))
+        try:
+            base = json.loads(out)
+        except Exception as ex:
+            return self._bad(f"基线不是合法 JSON：{ex}")
+        node = base
+        for p in key.split("."):
+            if not isinstance(node, dict) or p not in node:
+                return self._bad(f"基线里没有这个键：{key}")
+            node = node[p]
+        if isinstance(node, (dict, list)):
+            return self._bad("这是个对象，恢复默认要逐个字段来")
+
+        cur_data = load_json(target)
+        cur_node = cur_data
+        for p in key.split(".")[:-1]:
+            cur_node = cur_node.get(p, {}) if isinstance(cur_node, dict) else {}
+        old = cur_node.get(key.split(".")[-1]) if isinstance(cur_node, dict) else None
+        if old == node:
+            return self._json({"ok": True, "new": node, "unchanged": True,
+                               "msg": "当前值和基线一样，不用改"})
+
+        bak = target + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+        shutil.copy2(target, bak)
+        parts = key.split(".")
+        cur = cur_data
+        for p in parts[:-1]:
+            cur = cur.setdefault(p, {})
+        cur[parts[-1]] = node
+        write_json_atomic(target, cur_data)
+        append_changelog(scope, None if scope == "global" else body.get("path"),
+                         target, key, old, node, actor="ui-reset")
+        return self._json({"ok": True, "old": old, "new": node})
+
+    # ---------- 需求稿（和 AI 沟通的落点） ----------
+    def _api_brief(self, get, body):
+        """需求不是聊天记录，是文件：`05_文案/<套次>/brief.md`。
+        聊天窗口一关就没了，而这条需求后面每个环节都要回头看。"""
+        ip = (body or {}).get("ip") or get("ip")
+        setname = (body or {}).get("set") or get("set")
+        root = ip_root(ip)
+        if not root or not setname:
+            return self._bad("缺少 IP 或套次")
+        base = os.path.join(root, "05_文案")
+        cand = [x for x in (os.listdir(base) if os.path.isdir(base) else [])
+                if x.startswith(setname)]
+        folder = os.path.join(base, cand[0]) if cand else os.path.join(base, setname)
+        path = os.path.join(folder, "brief.md")
+        if body is not None and body.get("text") is not None:
+            os.makedirs(folder, exist_ok=True)
+            old = ""
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    old = f.read()
+            if old.strip():
+                bak = path + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                shutil.copy2(path, bak)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body["text"].rstrip() + "\n")
+            return self._json({"ok": True, "path": path, "len": len(body["text"])})
+        txt = ""
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                txt = f.read()[:20000]
+        return self._json({"path": path, "text": txt, "exists": os.path.exists(path),
+                           "folder": folder})
+
+    # ---------- 服务详情 ----------
+    def _api_svc(self, get):
+        """点徽章要能看到"它是什么、在哪、怎么起"——否则那个点就是个死的装饰。"""
+        which = get("name") or ""
+        detail = {
+            "pipeline": {"label": "视频合成服务", "url": "http://127.0.0.1:8000",
+                         "start": "bash bin/start-native.sh",
+                         "role": "n8n / 外部系统调流水线的 HTTP 入口"},
+            "n8n": {"label": "自动化编排", "url": "http://127.0.0.1:5678",
+                    "start": "bash bin/start-native.sh --n8n",
+                    "role": "可选。这边一条龙走 CLI，n8n 只在接外部系统时用"},
+            "comfyui": {"label": "ComfyUI", "url": "http://127.0.0.1:8188",
+                        "start": "（你自己终端里的 ComfyUI 启动脚本）",
+                        "role": "真正吃 GPU 出视频的，出片前先看显存水位"},
+            "zen-gate": {"label": "LLM 网关", "url": "http://127.0.0.1:8787",
+                         "start": "systemctl --user start zen-gate（或 /usr/bin/zen-gate）",
+                         "role": "免费车道聚合。★ 客户内容不许走这里——免费池提示词可能被上游记录"},
+        }.get(which)
+        if not detail:
+            return self._bad("未知服务")
+        info = dict(detail, name=which)
+        if which == "zen-gate":
+            try:
+                import urllib.request as U
+                with U.urlopen("http://127.0.0.1:8787/v1/models", timeout=3) as r:
+                    data = json.loads(r.read().decode("utf-8"))
+                ids = [m.get("id") for m in (data.get("data") or [])]
+                info["models"] = len(ids)
+                info["model_sample"] = ids[:12]
+            except Exception as ex:
+                info["models"] = 0
+                info["err"] = str(ex)[:120]
+        if which == "comfyui":
+            try:
+                import urllib.request as U
+                with U.urlopen("http://127.0.0.1:8188/system_stats", timeout=3) as r:
+                    st = json.loads(r.read().decode("utf-8"))
+                dev = (st.get("devices") or [{}])[0]
+                info["vram_free"] = round((dev.get("vram_free") or 0) / 1073741824, 1)
+                info["vram_total"] = round((dev.get("vram_total") or 0) / 1073741824, 1)
+            except Exception as ex:
+                info["err"] = str(ex)[:120]
+        info["up"] = self._services().get(which) == "up"
+        return self._json(info)
 
     def _api_set(self, body):
         """改一处必须有讲究：只允许白名单键、类型校验、第二层要 confirm、改动前后都记 changelog"""

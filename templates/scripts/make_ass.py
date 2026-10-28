@@ -235,10 +235,38 @@ def build(tag, srt_path, out_ass, dur=None):
     return ev, warns
 
 
+def _apply_ip_fonts():
+    """字体取本 IP 的 ip.json（subtitle.font_cue / font_cue_b / font_title）。
+    没写就沿用 substyle 的定板默认值 —— 也就是"不填 = 行为与以前一模一样"。
+
+    为什么用环境变量传：substyle 的字体常量是 import 时固化的，而 ass_head()
+    是每次现拼的。要在"已经 import 之后"还能改，只有 env 这条路。
+    ⚠️ 名字必须和字体文件里的真实 family 完全一致，否则 libass 静默回退 Noto，
+       字形全错还不报错（别信"看起来能跑"）。
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    p = os.path.normpath(os.path.join(here, "..", "ip.json"))
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p, encoding="utf-8") as f:
+            sub = (json.load(f) or {}).get("subtitle") or {}
+    except Exception:
+        return {}
+    for key, env in (("font_cue", "SUB_FONT_CUE"),
+                     ("font_cue_b", "SUB_FONT_CUE_B"),
+                     ("font_title", "SUB_FONT_TITLE")):
+        v = sub.get(key)
+        if v:
+            os.environ[env] = str(v)
+    return sub
+
+
 if __name__ == "__main__":
     # 用法: make_ass.py <tag> <srt> <out.ass> [宽 高]
     # 给了宽高就按该分辨率等比缩放字幕几何（PlayRes/字号/安全区/边距），
     # 不给则沿用定板 768x1376。
+    _apply_ip_fonts()
     if len(sys.argv) >= 6:
         W_, H_ = int(sys.argv[4]), int(sys.argv[5])
         S.set_size(W_, H_)

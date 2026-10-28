@@ -34,6 +34,9 @@
   <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/></symbol>
   <symbol id="i-hist" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3.5 5v4h4"/><path d="M12 8v4.6l3.2 2"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 8.9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.56 1z"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8v6h6"/><path d="M3.5 14a8.5 8.5 0 1 0 2-8.5"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></symbol>
 </svg>
 
 <div class="app">
@@ -58,7 +61,10 @@
 
     <div class="services" id="svcBar"></div>
 
-    <button class="btn icon" id="btnDensity" title="紧凑 / 舒适密度">
+    <button class="btn icon" id="btnSettings" title="设置（右栏 · 两层两类参数）">
+      <svg><use href="#i-gear"/></svg>
+    </button>
+    <button class="btn icon" id="btnDensity" title="紧凑 / 舒适密度（只改留白，不是设置）">
       <svg><use href="#i-sliders"/></svg>
     </button>
     <button class="btn icon" id="btnRefresh" title="刷新全部（F5）">
@@ -80,6 +86,9 @@
         <div class="panel-body"><div class="inner">
           <div class="filter-row" id="tagFilter"></div>
           <div id="ipTree"></div>
+          <button class="btn sm" id="btnNewCard" style="width:100%;margin-top:8px;justify-content:center">
+            <svg><use href="#i-plus"/></svg> 新建档案卡（接新客户）
+          </button>
         </div></div>
       </section>
 
@@ -131,6 +140,18 @@
           <svg class="caret"><use href="#i-chev"/></svg>
         </div>
         <div class="panel-body"><div class="inner" id="filesBox"></div></div>
+      </section>
+
+      <section class="panel glass" data-panel="brief">
+        <div class="panel-head">
+          <h3><svg class="ico" style="width:14px;height:14px;color:#ffd166"><use href="#i-mic"/></svg> 需求台（开工前先说清）</h3>
+          <span class="sub" id="briefSub"></span>
+          <div class="panel-actions">
+            <button class="btn sm" id="btnBriefSave"><svg><use href="#i-save"/></svg> 存需求</button>
+          </div>
+          <svg class="caret"><use href="#i-chev"/></svg>
+        </div>
+        <div class="panel-body"><div class="inner" id="briefBox"></div></div>
       </section>
 
       <section class="panel glass" data-panel="prompts">

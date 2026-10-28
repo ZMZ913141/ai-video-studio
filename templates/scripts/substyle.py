@@ -124,6 +124,20 @@ FONT_TITLE = "阿里巴巴普惠体 2.0 115 Black"      # 标题：最硬最抓�
 FONT_TITLE_SOFT = "站酷仓耳渔阳体 W04"           # 备用：偏人文，适合金句
 FONT_TITLE_ALT = "优设标题黑"                    # 备用：偏设计感，适合短钩子
 
+# 字体要能被 IP 单独换 —— 写死在模块里就意味着"想换字体得改引擎代码"，
+# 而每个 IP 的字幕气质本来就不该一样。
+# 走环境变量而不是构造参数：调用方（make_ass）已经在 import 之后再决定用哪个字体，
+# 常量是 import 时就固化的，改不动；ass_head() 是每次现拼的，那里读才生效。
+_FONT_ENV = {"cue": ("SUB_FONT_CUE", FONT_CUE),
+             "cue_b": ("SUB_FONT_CUE_B", FONT_CUE_B),
+             "title": ("SUB_FONT_TITLE", FONT_TITLE)}
+
+
+def font_of(kind):
+    """取字体名；环境变量没设就用定板默认值（不设 = 行为与从前完全一致）"""
+    env, default = _FONT_ENV[kind]
+    return os.environ.get(env) or default
+
 # ---------- 关键位置 ----------
 CUE_MARGIN_V = 288          # 字幕底边落在 y≈1088，安全区内且不压下巴
 TITLE_MARGIN_V = 150        # 标题顶部下移，避开系统状态栏
@@ -143,12 +157,12 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cue,{FONT_CUE},{FS_CUE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,1,0,1,{OUT_CUE},{SHA_CUE},2,{SAFE_LEFT},{SAFE_LEFT},{CUE_MARGIN_V},1
-Style: CueB,{FONT_CUE_B},{FS_CUE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,1,0,1,{OUT_CUE},{SHA_CUE},2,{SAFE_LEFT},{SAFE_LEFT},{CUE_MARGIN_V},1
-Style: Title,{FONT_TITLE},{FS_TITLE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H78000000,0,0,0,0,100,100,2,0,1,{OUT_TITLE},{SHA_TITLE},8,{SAFE_LEFT},{SAFE_LEFT},{TITLE_MARGIN_V},1
-Style: Sub,{FONT_CUE},{FS_SUB},&H{C_WARM},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,3,0,1,3,2,8,{SAFE_LEFT},{SAFE_LEFT},{int(round(260*H/BASE_H))},1
-Style: CTA,{FONT_CUE_B},{FS_CTA},&H{C_WHITE},&H000000FF,&H{C_ORANGE},&H90000000,0,0,0,0,100,100,2,0,1,6,3,2,60,60,{int(round(300*H/BASE_H))},1
-Style: Tag,{FONT_CUE},{FS_TAG},&H{C_GOLD},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,4,0,1,3,0,8,{SAFE_LEFT},{SAFE_LEFT},{int(round(200*H/BASE_H))},1
+Style: Cue,{font_of("cue")},{FS_CUE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,1,0,1,{OUT_CUE},{SHA_CUE},2,{SAFE_LEFT},{SAFE_LEFT},{CUE_MARGIN_V},1
+Style: CueB,{font_of("cue_b")},{FS_CUE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,1,0,1,{OUT_CUE},{SHA_CUE},2,{SAFE_LEFT},{SAFE_LEFT},{CUE_MARGIN_V},1
+Style: Title,{font_of("title")},{FS_TITLE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H78000000,0,0,0,0,100,100,2,0,1,{OUT_TITLE},{SHA_TITLE},8,{SAFE_LEFT},{SAFE_LEFT},{TITLE_MARGIN_V},1
+Style: Sub,{font_of("cue")},{FS_SUB},&H{C_WARM},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,3,0,1,3,2,8,{SAFE_LEFT},{SAFE_LEFT},{int(round(260*H/BASE_H))},1
+Style: CTA,{font_of("cue_b")},{FS_CTA},&H{C_WHITE},&H000000FF,&H{C_ORANGE},&H90000000,0,0,0,0,100,100,2,0,1,6,3,2,60,60,{int(round(300*H/BASE_H))},1
+Style: Tag,{font_of("cue")},{FS_TAG},&H{C_GOLD},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,4,0,1,3,0,8,{SAFE_LEFT},{SAFE_LEFT},{int(round(200*H/BASE_H))},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

@@ -547,3 +547,92 @@ label.field > span { display: block; font-size: 11px; color: var(--tx-2); margin
   *, *::before, *::after { animation-duration: .001s !important; transition-duration: .001s !important; }
 }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+/* ============================================================
+   2026-10-29 补：音频预览 / 字体预览 / 需求台 / 表单
+   ============================================================ */
+
+/* 服务徽章现在可以点开了，光标得说实话 */
+.svc { cursor: pointer; }
+.svc:active { transform: translateY(1px); }
+
+/* 音频播放：定板音频是整条流水线的基准，必须能听 */
+.audio-box {
+  padding: 18px 6px 10px; text-align: center;
+  background: radial-gradient(120% 90% at 50% 0%, rgba(53, 214, 208, .10), transparent 70%);
+  border-radius: var(--r-md);
+}
+.audio-box .wave {
+  width: 64px; height: 64px; margin: 0 auto 14px; border-radius: 50%;
+  display: grid; place-items: center; color: var(--accent-2);
+  background: rgba(53, 214, 208, .10); border: 1px solid rgba(53, 214, 208, .28);
+  box-shadow: 0 0 30px rgba(53, 214, 208, .16) inset;
+}
+.audio-box .wave svg { width: 26px; height: 26px; }
+.audio-box audio { width: 100%; max-width: 520px; height: 38px; display: block; margin: 0 auto; }
+.audio-box .hint { margin-top: 10px; }
+
+/* 字体预览：按 1080 宽等比缩到一个盒子，看的是比例和气质，不是"能不能显示" */
+.font-panel { margin: 4px 0 14px; }
+.font-stage {
+  margin-top: 8px; padding: 16px 14px; border-radius: var(--r-md);
+  background: linear-gradient(160deg, rgba(255, 255, 255, .05), rgba(0, 0, 0, .28));
+  border: 1px solid var(--stroke);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .28) inset;
+  text-align: center; overflow: hidden;
+}
+.font-stage .fs-title {
+  color: #fff; line-height: 1.2; letter-spacing: .5px;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, .55);
+  margin-bottom: 8px; word-break: break-all;
+}
+.font-stage .fs-cue {
+  color: #fff; line-height: 1.35;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .6);
+  word-break: break-all;
+}
+
+/* 需求台：这是开工前的第一份文件，给它该有的体量 */
+.brief-area {
+  width: 100%; min-height: 132px; resize: vertical;
+  background: rgba(0, 0, 0, .3); color: var(--tx-1);
+  border: 1px solid var(--stroke); border-radius: var(--r-md);
+  padding: 10px 12px; font-size: 12px; line-height: 1.65;
+  font-family: inherit;
+}
+.brief-area::placeholder { color: var(--tx-3); }
+.brief-area:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); outline: 0; }
+
+/* 弹层里的表单 */
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+@media (max-width: 640px) { .form-grid { grid-template-columns: 1fr; } }
+
+/* 滑杆：默认样式在暗色玻璃上像根白棍子 */
+input[type="range"] {
+  -webkit-appearance: none; appearance: none; width: 100%; height: 22px;
+  background: transparent; cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2)) no-repeat,
+              rgba(255, 255, 255, .12);
+  background-size: var(--fill, 40%) 100%, 100% 100%;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px;
+  border-radius: 50%; background: #fff; border: 0;
+  box-shadow: 0 0 0 3px rgba(124, 108, 255, .35), 0 2px 8px rgba(0, 0, 0, .5);
+}
+input[type="range"]::-moz-range-track {
+  height: 4px; border-radius: 999px; background: rgba(255, 255, 255, .12);
+}
+input[type="range"]::-moz-range-progress {
+  height: 4px; border-radius: 999px; background: var(--accent);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 14px; height: 14px; border: 0; border-radius: 50%; background: #fff;
+}
+
+/* 设置里"默认"按钮比"保存"弱一档，别让人误点 */
+.btn.ghost[data-reset-key] { color: var(--tx-3); }
+.btn.ghost[data-reset-key]:hover { color: var(--tx-1); }

@@ -139,7 +139,30 @@ async function boot() {
 function renderServices() {
   const names = { pipeline: '合成服务', n8n: '编排', comfyui: 'ComfyUI', 'zen-gate': 'LLM 网关' };
   $('#svcBar').innerHTML = Object.entries(state.services).map(([k, v]) =>
-    `<div class="svc ${v === 'up' ? 'up' : 'down'}" title="${k} ${v}"><span class="dot"></span><span>${names[k] || k}</span></div>`).join('');
+    `<div class="svc ${v === 'up' ? 'up' : 'down'}" data-svc="${esc(k)}"
+       title="${esc(k)} · ${esc(v)}　点开看它是什么、怎么起"><span class="dot"></span><span>${names[k] || k}</span></div>`).join('');
+}
+
+/* 点服务徽章 → 说清楚它是什么、地址、怎么起。
+   以前这几个点子是个纯装饰，点了没反应，看着像坏了。 */
+async function showSvc(name) {
+  const d = await api('svc?name=' + encodeURIComponent(name));
+  if (d.error) return toast('打不开', d.error, 'err');
+  const rows = [
+    ['状态', d.up ? '在跑' : '没起来'],
+    ['地址', d.url],
+    ['作用', d.role],
+    ['怎么起', d.start],
+  ];
+  if (d.models !== undefined) rows.push(['模型数', d.models + ' 个' + (d.models ? '' : '（一条都用不了时先查登录态）')]);
+  if (d.vram_total) rows.push(['显存', `${d.vram_free} / ${d.vram_total} GB 可用`]);
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('term')} ${esc(d.label)}</b>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <div class="kv">${rows.map(([k, v]) =>
+      `<dt>${esc(k)}</dt><dd class="${String(v).length > 30 ? 'mono' : ''}">${esc(v)}</dd>`).join('')}</div>
+    ${d.model_sample?.length ? `<div class="hint" style="margin-top:10px">样例模型：${d.model_sample.map(esc).join('、')}</div>` : ''}
+    ${name === 'zen-gate' ? `<div class="hint" style="margin-top:8px;color:var(--warn)">⚠ 免费车道，提示词可能被上游记录 —— 客户台词与档案不要走这里。</div>` : ''}`;
+  $('#modal').classList.add('show');
 }
 
 function renderTagFilter() {
@@ -181,10 +204,17 @@ async function selectIP(name) {
   state.ipRoot = (state.ips.find(i => i.name === name) || {}).path;
   state.setId = null; state.setPath = null; state.job = null;
   $('#btnGuard').disabled = false;
-  await Promise.all([loadJobs(), loadCard(), loadIpCfg(), (async () => { state.cfg = await api('config'); })()]);
+  await Promise.all([loadJobs(), loadCard(), loadIpCfg(), loadFonts(),
+                     (async () => { state.cfg = await api('config'); })()]);
   await renderTree();
   renderHero();
   await selectSet((state.jobs.find(j => !j.delivered) || state.jobs[0] || {}).id);
+}
+
+async function loadFonts() {
+  if (state.fonts) return state.fonts;
+  state.fonts = await api('fonts').catch(() => ({ fonts: [] }));
+  return state.fonts;
 }
 
 async function loadJobs() {
@@ -212,7 +242,7 @@ async function selectSet(id) {
   state.job = job && job.id ? job : null;
   state.setPath = root ? root.path : state.ipRoot + '/07_成片';
   await Promise.all([loadPrompts(), renderFiles(), renderOverview(), renderCmd(),
-    renderInspect(), renderSettings(), renderLog()]);
+    renderInspect(), renderSettings(), renderLog(), renderBrief()]);
   renderPrompts();
 }
 
@@ -239,6 +269,7 @@ function renderHero() {
         </div>
       </div>
       <div class="hero-actions">
+        <button class="btn sm" id="hNewSet">${ico('plus')} 新套次</button>
         <button class="btn sm" id="hGuard">${ico('shield')} 素材自检</button>
         <button class="btn sm" id="hAlgo">${ico('spark')} 参数预览</button>
         <button class="btn sm primary" id="hCmd">${ico('term')} 出片命令</button>
@@ -322,25 +353,36 @@ async function renderFiles(path) {
 
 function openFile(p, type) {
   const name = p.split('/').pop();
+  const head = `<div class="modal-head"><b>${esc(name)}</b><div class="spacer"></div>
+      <button class="btn icon" id="mcopy" data-src="${encodeURIComponent(p)}">${ico('copy')}</button>
+      <button class="btn icon" id="mclose">${ico('close')}</button></div>`;
   if (type === 'video') {
-    $('#modalBox').innerHTML = `<div class="modal-head"><b>${esc(name)}</b><div class="spacer"></div>
-        <button class="btn icon" id="mcopy" data-src="${encodeURIComponent(p)}">${ico('copy')}</button><button class="btn icon" id="mclose">${ico('close')}</button></div>
-      <video controls autoplay src="/api/raw?path=${encodeURIComponent(p)}"></video>`;
+    $('#modalBox').innerHTML = head + `<video controls autoplay src="/api/raw?path=${encodeURIComponent(p)}"></video>`;
+  } else if (type === 'audio') {
+    // 音频以前落到「不支持预览」那一支 —— 而配音恰恰是最该先听的东西：
+    // 定板音频是后面整条流水线的基准，靠文件名判断不了对不对。
+    $('#modalBox').innerHTML = head + `<div class="audio-box">
+        <div class="wave">${ico('audio', 'ico')}</div>
+        <audio controls autoplay preload="metadata" src="/api/raw?path=${encodeURIComponent(p)}"></audio>
+        <div class="hint">${esc(typeOf(name))} · 直接拖进度条即可（支持 Range）</div>
+      </div>`;
   } else if (type === 'image') {
-    $('#modalBox').innerHTML = `<div class="modal-head"><b>${esc(name)}</b><div class="spacer"></div>
-        <button class="btn icon" id="mclose">${ico('close')}</button></div><img src="/api/raw?path=${encodeURIComponent(p)}">`;
+    $('#modalBox').innerHTML = head + `<img src="/api/raw?path=${encodeURIComponent(p)}">`;
   } else if (type === 'text') {
-    $('#modalBox').innerHTML = `<div class="modal-head"><b>${esc(name)}</b><div class="spacer"></div>
-        <button class="btn icon" id="mclose">${ico('close')}</button></div><pre id="mtext">载入中…</pre>`;
+    $('#modalBox').innerHTML = head + `<pre id="mtext">载入中…</pre>`;
     api('text?path=' + encodeURIComponent(p)).then(t =>
       ($('#mtext').textContent = t.text || t.error || '（空）'));
   } else {
-    $('#modalBox').innerHTML = `<div class="modal-head"><b>${esc(name)}</b><div class="spacer"></div>
-        <button class="btn icon" id="mclose">${ico('close')}</button></div>
-      <div class="empty">不支持预览，<a href="/api/raw?path=${encodeURIComponent(p)}" download>点此下载</a></div>`;
+    $('#modalBox').innerHTML = head +
+      `<div class="empty">这类文件浏览器放不了，<a href="/api/raw?path=${encodeURIComponent(p)}" download>点此下载</a></div>`;
   }
   $('#modal').classList.add('show');
 }
+
+const typeOf = n => {
+  const e = (n.split('.').pop() || '').toLowerCase();
+  return e ? e.toUpperCase() + ' 文件' : '文件';
+};
 
 /* ============================================================
    提示词
@@ -384,13 +426,28 @@ async function renderCmd() {
     const c = await api('cmdline', { body: { kind: k, ip: state.ip, set: state.setId } });
     return { k, label, ic, cmd: c.cmdline || '' };
   }));
+  // 断点重做：交付之后最常见的动作就是"只重做后半段"。
+  // 步骤名从 config/pipeline.json 实时取 —— 不在 JS 里硬列一遍（列了就会跟真值分叉）。
+  const steps = Object.keys((state.cfg && state.cfg.pipeline && state.cfg.pipeline.steps) || {});
+  const redo = steps.length ? `
+    <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
+      <div class="hint" style="margin-bottom:8px">
+        <b>断点重做</b>：改了某一环（换音色 / 改字幕 / 换 BGM），只想从那里往后跑。
+        点一步就复制命令，前面已完成的产物保持不动。</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">${steps.map(s => {
+        const meta = (state.cfg.pipeline.steps || {})[s] || {};
+        const label = meta.name || meta.desc || s;
+        return `<button class="btn sm" data-redo="${esc(s)}">${ico('undo')} 从「${esc(String(label).slice(0, 6))}」起</button>`;
+      }).join('')}</div>
+    </div>` : '';
   $('#cmdBox').innerHTML = `
     <div class="hint" style="margin-bottom:9px">出片是重活（十几分钟到半小时、要吃 GPU），界面不代跑 —— 复制回终端，看得见全部输出。</div>
     ${rows.map(r => `<div style="margin-bottom:8px">
       <div style="display:flex;align-items:center;gap:7px;margin-bottom:4px">
         ${ico(r.ic, 'ico')}<span style="font-size:12px">${r.label}</span>
         <div class="spacer"></div><button class="btn sm" data-copy="${esc(r.cmd)}">${ico('copy')} 复制</button></div>
-      <div class="cmdbar"><span class="p">$</span> ${esc(r.cmd)}</div></div>`).join('')}`;
+      <div class="cmdbar"><span class="p">$</span> ${esc(r.cmd)}</div></div>`).join('')}
+    ${redo}`;
 }
 
 /* ============================================================
@@ -461,6 +518,8 @@ async function renderSettings() {
       return `<label class="field"><span>${esc(m.label)} <code class="mono" style="color:var(--tx-3)">${esc(key)}</code></span>${ctrl}
         <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
           <span class="hint" style="flex:1">现为 <b class="mono">${esc(typeof cur === 'object' ? JSON.stringify(cur) : String(cur))}</b>${m.tier === 2 ? ' · 高级' : ''}</span>
+          <button class="btn sm ghost" data-reset-key="${esc(key)}" data-reset-scope="${scope}"
+            title="回到上一次 git 提交的版本">${ico('undo')} 默认</button>
           <button class="btn sm" data-set-key="${esc(key)}" data-set-scope="${scope}" data-set-tier="${m.tier}" data-set-ctrl="${id}">${ico('save')} 保存</button>
         </div></label>`;
     }).join('');
@@ -480,11 +539,65 @@ async function renderSettings() {
         <svg class="caret"><use href="#i-chev"/></svg></div>
       <div class="panel-body"><div class="inner">
         ${build(W.ip || {}, ipdata, 'ip', 1, '常用')}
+        ${fontPanel()}
         ${build(W.ip || {}, ipdata, 'ip', 2, '高级（改前请想清楚）')}
         <div class="hint">ip.json 里绝大多数参数界面不可写 —— 采样器、二采模型、画幅这类动一处就要重介整条链路的，只留脚本调用。</div>
+        <div class="hint" style="margin-top:8px">
+          「默认」按钮 = 回到<strong>上一次 git 提交</strong>的那个值，不是某个出厂常量。
+          界面上试过但没提交的改动会被它撤掉，提交过的历史不动（撤前自动备份 ip.json）。</div>
       </div></div></div>`;
   $('#tabSettings').innerHTML = html;
+  applyFontPreview();
   applyLayout();
+}
+
+/* ---------- 字体：选 + 预览 ---------- */
+function fontPanel() {
+  const F = state.fonts || { fonts: [] };
+  const sub = (state.ipcfg || {}).subtitle || {};
+  const list = F.fonts || [];
+  // 可烧录的排前面 —— 一堆不能进片子的字体混在里面只会误导
+  const sorted = [...list].sort((a, b) => (b.burnable ? 1 : 0) - (a.burnable ? 1 : 0) || a.family.localeCompare(b.family));
+  const opt = sel => sorted.map(f =>
+    `<option value="${esc(f.family)}" ${f.family === sel ? 'selected' : ''}>${f.burnable ? '✓ ' : ''}${esc(f.family)}</option>`).join('');
+  return `<h2 class="sec-title">字幕外观（选完能立刻看字形）</h2>
+    <div class="font-panel">
+      <label class="field"><span>正文字体 <span class="hint">✓ = 已在精简字体目录里，能真烧进片子</span></span>
+        <select id="prevFontCue">${opt(sub.font_cue || '')}</select></label>
+      <label class="field"><span>标题字体</span>
+        <select id="prevFontTitle">${opt(sub.font_title || '')}</select></label>
+      <div class="font-stage" id="fontStage">
+        <div class="fs-title" id="fsTitle">二十分钟里做了什么</div>
+        <div class="fs-cue" id="fsCue">这套活儿，一个人干完</div>
+      </div>
+      <label class="field" style="margin-top:10px"><span>正文字号
+        <b class="mono" id="fsVal">${esc(sub.fs_cue || 52)}</b>
+        <span class="hint">定板画布 1080 宽；预览按比例缩小显示</span></span>
+        <input type="range" id="prevFs" min="20" max="120" value="${esc(sub.fs_cue || 52)}">
+      </label>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="btn sm" id="btnFontApply">${ico('save')} 存进 ip.json</button>
+        <span class="hint" style="flex:1;align-self:center">
+          存完要重跑 <span class="mono">ass</span> 和 <span class="mono">burn</span> 两步才看得到（见「命令」里的断点重做）。</span>
+      </div>
+      <div class="hint" style="margin-top:8px;color:var(--warn)">
+        ⚠ 只有 ${(F.burn_files || []).length} 个字体文件在精简目录里（libass 给它几百个字体目录会吃爆内存）。
+        想用别的字体，先把 ttf 放进 <span class="mono">${esc(F.burn_dir || '02_素材真值/字体_字幕标题')}</span>，别一次塞一堆。
+      </div>
+    </div>`;
+}
+
+function applyFontPreview() {
+  const st = $('#fontStage');
+  if (!st) return;
+  const cue = $('#prevFontCue'), title = $('#prevFontTitle'), fs = $('#prevFs');
+  const baseFs = +(fs?.value || 52);
+  // 预览按 1080 宽等比缩到当前容器宽 —— 比例对，观感才对；硬给一个 14px 只是"能看见"而已
+  const scale = Math.max(0.14, st.clientWidth / 1080);
+  const t = $('#fsTitle'), c = $('#fsCue');
+  if (t) { t.style.fontFamily = `"${title?.value || ''}"`; t.style.fontSize = (baseFs * 1.55 * scale) + 'px'; }
+  if (c) { c.style.fontFamily = `"${cue?.value || ''}"`; c.style.fontSize = (baseFs * scale) + 'px'; }
+  if ($('#fsVal')) $('#fsVal').textContent = baseFs;
 }
 
 async function renderLog() {
@@ -529,6 +642,127 @@ async function saveSetting(scope, key, ctrlId, tier) {
 
 function closeModal() { $('#modal').classList.remove('show'); }
 
+/* ---------- 通用确认框 ---------- */
+function confirmBox(title, bodyHtml, yesText = '确认') {
+  return new Promise(res => {
+    $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('alert')} ${esc(title)}</b></div>
+      <div style="margin:6px 0 14px">${bodyHtml}</div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn ghost" id="cNo">取消</button>
+        <button class="btn danger" id="cYes">${esc(yesText)}</button></div>`;
+    $('#modal').classList.add('show');
+    const done = v => { closeModal(); res(v); };
+    $('#cYes').onclick = () => done(true);
+    $('#cNo').onclick = () => done(false);
+  });
+}
+
+/* ---------- 恢复默认 ---------- */
+async function saveReset(scope, key) {
+  const where = scope === 'global' ? 'config/pipeline.json' : (state.ip + '/ip.json');
+  const ok = await confirmBox('恢复默认', `
+    <div><code class="mono">${esc(key)}</code> 会改回<b>上一次 git 提交</b>的值。</div>
+    <div class="hint" style="margin-top:8px">文件：<span class="mono">${esc(where)}</span><br>
+      改动前会自动备份一份，撤错了还能捞回来。</div>`, '恢复');
+  if (!ok) return;
+  const r = await api('reset', { body: { scope, key, path: state.ip, confirm: true } });
+  if (r.ok) {
+    toast(r.unchanged ? '本来就是这个值' : '已恢复',
+      r.unchanged ? key : `${key}：${r.old} → ${r.new}`, 'ok');
+    await Promise.all([loadIpCfg(), (async () => { state.cfg = await api('config'); })()]);
+    renderSettings(); renderInspect(); renderLog();
+  } else toast('没恢复成', r.error || '', 'err');
+}
+
+/* ---------- 字体保存（三项一起提交，一次确认） ---------- */
+async function saveFont() {
+  const cue = $('#prevFontCue')?.value, title = $('#prevFontTitle')?.value;
+  const fs = +($('#prevFs')?.value || 0);
+  const changes = [
+    ['subtitle.font_cue', cue],
+    ['subtitle.font_title', title],
+    ['subtitle.fs_cue', fs],
+  ].filter(([k, v]) => String(get(state.ipcfg, k) ?? '') !== String(v ?? ''));
+  if (!changes.length) return toast('没变', '和当前值一样', '');
+
+  const rows = changes.map(([k, v], i) => {
+    const steps = (state.cfg?.pipeline?.steps || {});
+    const order = Object.keys(steps);
+    const ass = order.indexOf('ass'), burn = order.indexOf('burn');
+    return `<div style="display:flex;gap:8px;padding:4px 0">
+      <span class="mono" style="color:var(--accent-2);min-width:150px">${esc(k)}</span>
+      <span style="color:var(--tx-3)">${esc(String(get(state.ipcfg, k) ?? '—'))}</span>
+      <span>→</span><b>${esc(String(v))}</b></div>`;
+  }).join('');
+  const ok = await confirmBox('改字幕外观', `
+    ${rows}
+    <div class="hint" style="margin-top:10px">
+      改完不会自动重出片子：要重跑 <span class="mono">ass</span>（重排字幕文件）和
+      <span class="mono">burn</span>（烧进画面）两步才看得到效果。
+      去「命令」面板最下面的「断点重做」，点「从 ass 起」复制命令。</div>`, '保存');
+  if (!ok) return;
+
+  for (const [k, v] of changes) {
+    const r = await api('set', { body: { scope: 'ip', key: k, value: v, path: state.ip, confirm: true } });
+    if (!r.ok) return toast('第 ' + k + ' 项失败', r.error || '', 'err');
+  }
+  toast('已存进 ip.json', '记得重跑 ass + burn', 'ok');
+  await loadIpCfg();
+  renderSettings(); renderInspect(); renderLog();
+}
+
+/* ---------- 需求台 ---------- */
+async function renderBrief() {
+  const box = $('#briefBox');
+  if (!state.setId) {
+    box.innerHTML = '<div class="empty">先选左侧一个套次 —— 需求是跟着某一套片子走的</div>';
+    $('#briefSub').textContent = '';
+    return;
+  }
+  const d = await api('brief?ip=' + encodeURIComponent(state.ip) + '&set=' + encodeURIComponent(state.setId));
+  state.brief = d;
+  $('#briefSub').textContent = d.exists ? '已写' : '还没写';
+  box.innerHTML = `
+    <div class="hint" style="margin-bottom:8px">
+      开工前先把自己的要求写清楚：讲什么、给谁看、多长、什么语气、绝对不能出现什么。
+      这段会存成 <span class="mono">brief.md</span> 放在这套片子旁边 ——
+      生成提示词、返工、跟客户对齐，后面每一步都回来看它。
+      <b>聊天窗口会关，文件不会。</b></div>
+    <textarea id="briefText" class="brief-area"
+      placeholder="例：这条讲「一条片子为什么值这个价」，35 秒左右，给犹豫中的准客户看。
+语气：平实、有底气，不吹。画面：白衬衫、暖墙、固定机位近景。
+必须说到：二十分钟、一条龙、不用客户出镜。不要提：具体报价数字。">${esc(d.text || '')}</textarea>
+    <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
+      <button class="btn sm" id="btnBriefSave2">${ico('save')} 存需求</button>
+      <button class="btn sm primary" id="btnBriefGen">${ico('spark')} 生成提示词</button>
+      <span class="hint" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+        title="${esc(d.path || '')}">${esc((d.path || '').replace(state.ipRoot || '', ''))}</span>
+    </div>`;
+}
+
+async function saveBrief(thenGen) {
+  const ta = $('#briefText');
+  if (!ta) return;
+  if (!state.setId) return toast('先选套次', '', 'err');
+  const r = await api('brief', { body: { ip: state.ip, set: state.setId, text: ta.value } });
+  if (!r.ok) return toast('没存成', r.error || '', 'err');
+  toast('需求已存', r.path || '', 'ok');
+  await renderBrief();
+  if (thenGen) await genFromBrief();
+}
+
+/* 生成提示词仍然回终端跑 —— 它要调 LLM、几十秒到几分钟，
+   塞进界面黑跑最糟：失败了只看到一句"出错了"，不知道是模型、红线还是网络。 */
+async function genFromBrief() {
+  const c = await api('cmdline', { body: { kind: 'prompts-gen', ip: state.ip, set: state.setId } });
+  await confirmBox('生成提示词', `
+    <div>提示词生成要调 LLM、几十秒起，而且<b>落盘前必须过红线校验</b> ——
+      所以这一步回终端跑，你能看见它被哪条红线拦下。</div>
+    <div class="cmdbar" style="margin-top:10px"><span class="p">$</span> ${esc(c.cmdline || '')}</div>
+    <div class="hint" style="margin-top:8px">命令已复制到剪贴板。先加 <span class="mono">--dry</span> 可以只看不落盘。</div>`, '复制命令');
+  copyText(c.cmdline || '');
+}
+
 /* ============================================================
    偏离 / 脚本列表
    ============================================================ */
@@ -558,6 +792,84 @@ async function renderDeviation() {
 /* ============================================================
    事件
    ============================================================ */
+function openTab(name) {
+  state.tab = name;
+  $$('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
+  ['inspect', 'settings', 'log'].forEach(k =>
+    $('#tab' + k[0].toUpperCase() + k.slice(1)).style.display = state.tab === k ? '' : 'none');
+  if (name === 'settings') renderSettings();
+  if (name === 'log') renderLog();
+}
+
+/* ---------- 建档 / 新套次 ---------- */
+function showNewCard() {
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('plus')} 新建档案卡</b>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <div class="form-grid">
+      <label class="field"><span>名字（= 目录名，只能用中文/字母/数字/下划线）*</span>
+        <input id="ncName" placeholder="陈洁斌主号"></label>
+      <label class="field"><span>口头叫法，逗号分隔 *</span>
+        <input id="ncAlias" placeholder="洁斌,主号,陈洁斌">
+        <span class="hint">口头叫人名、目录是品牌名，没别名会重复建档</span></label>
+      <label class="field"><span>类型</span>
+        <select id="ncType"><option>本人</option><option>客户</option><option>角色</option></select>
+        <span class="hint">选「客户」时默认禁止内容上云（走本地模型）</span></label>
+      <label class="field"><span>标签</span><input id="ncTag" placeholder="S / A / B"></label>
+      <label class="field"><span>定位（一句话）</span><input id="ncRole" placeholder="AI 口播 · 讲交付真相"></label>
+      <label class="field"><span>存储空间名</span><input id="ncSpace" placeholder="陈洁斌主号资产"></label>
+    </div>
+    <div class="hint" style="margin:8px 0 12px">
+      会建全套目录 + card.json，并登记进总册。技术真值（音色/静帧/画幅）还得后面填，缺了出不了片。</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn ghost" id="mclose2">取消</button>
+      <button class="btn primary" id="ncGo">建档</button></div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = $('#mclose2').onclick = closeModal;
+  $('#ncGo').onclick = async () => {
+    const v = id => ($('#' + id)?.value || '').trim();
+    if (!v('ncName') || !v('ncAlias') || !v('ncSpace'))
+      return toast('还差东西', '名字、别名、空间名是必填（不给空间名脚本会卡住等输入）', 'err');
+    const args = ['--name', v('ncName'), '--type', v('ncType'), '--tag', v('ncTag') || 'C',
+      '--role', v('ncRole') || '', '--aliases', v('ncAlias'), '--space', v('ncSpace')];
+    const r = await api('run', { body: { cmd: 'card-new', args } });
+    if (r.error) return toast('没建成', r.error, 'err');
+    closeModal();
+    toast('已提交建档', r.cmdline || '', 'ok');
+    await sleep(2000);
+    await boot();
+  };
+}
+
+function showNewSet() {
+  const guess = 'S' + String((state.jobs || []).length + 1).padStart(2, '0');
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('plus')} 开一套新片</b>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <div class="form-grid">
+      <label class="field"><span>套次编号 *</span><input id="nsId" value="${esc(guess)}"></label>
+      <label class="field"><span>标题 / 主题 *</span><input id="nsTitle" placeholder="一条片子值多少钱"></label>
+    </div>
+    <div class="hint" style="margin:8px 0 12px">
+      会在 <span class="mono">${esc(state.ip || '')}</span> 下建这一套的目录，并写进索引。
+      建完先去「需求台」把要求写清楚，再生成提示词。</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn ghost" id="mclose2">取消</button>
+      <button class="btn primary" id="nsGo">建</button></div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = $('#mclose2').onclick = closeModal;
+  $('#nsGo').onclick = async () => {
+    const id = ($('#nsId')?.value || '').trim().toUpperCase();
+    const title = ($('#nsTitle')?.value || '').trim();
+    if (!id || !title) return toast('还差东西', '编号和标题都要填', 'err');
+    const r = await api('run', { body: { cmd: 'job-new', args: [state.ip, id, title] } });
+    if (r.error) return toast('没建成', r.error, 'err');
+    closeModal();
+    toast('已提交', r.cmdline || '', 'ok');
+    await sleep(1500);
+    await loadJobs(); await renderTree();
+    await selectSet(id);
+  };
+}
+
 function bind() {
   // 树
   document.addEventListener('click', async e => {
@@ -580,17 +892,32 @@ function bind() {
     if (saveBtn) return void saveSetting(saveBtn.dataset.setScope, saveBtn.dataset.setKey,
       saveBtn.dataset.setCtrl, +saveBtn.dataset.setTier);
 
-    const tab = e.target.closest('.tab');
-    if (tab) {
-      state.tab = tab.dataset.tab;
-      $$('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === state.tab));
-      ['inspect', 'settings', 'log'].forEach(k => $('#tab' + k[0].toUpperCase() + k.slice(1)).style.display = state.tab === k ? '' : 'none');
-      if (state.tab === 'settings') renderSettings();
-      if (state.tab === 'log') renderLog();
+    const rst = e.target.closest('[data-reset-key]');
+    if (rst) return void await saveReset(rst.dataset.resetScope, rst.dataset.resetKey);
+
+    const svc = e.target.closest('[data-svc]');
+    if (svc) return void await showSvc(svc.dataset.svc);
+
+    const redo = e.target.closest('[data-redo]');
+    if (redo) {
+      const c = await api('cmdline', { body: { kind: 'redo-from', ip: state.ip, set: state.setId, step: redo.dataset.redo } });
+      if (c.error) return toast('拼不出命令', c.error, 'err');
+      copyText(c.cmdline);
       return;
     }
+
+    const tab = e.target.closest('.tab');
+    if (tab) return void openTab(tab.dataset.tab);
     if (e.target.closest('#mclose')) return closeModal();
     if (e.target.closest('#mcopy')) return copyText(decodeURIComponent(e.target.closest('#mcopy').dataset.src || ''));
+  });
+
+  // 字体预览：改一下立刻看字形，不落盘
+  document.addEventListener('input', e => {
+    if (e.target.id === 'prevFs') applyFontPreview();
+  });
+  document.addEventListener('change', e => {
+    if (e.target.id === 'prevFontCue' || e.target.id === 'prevFontTitle') applyFontPreview();
   });
 
   // 顶栏
@@ -619,6 +946,12 @@ function bind() {
 
   // 中栏按钮：hero 里的三个 + overview 里的自检
   document.addEventListener('click', async e => {
+    if (e.target.closest('#btnSettings')) return void openTab('settings');
+    if (e.target.closest('#btnNewCard')) return void showNewCard();
+    if (e.target.closest('#hNewSet')) return void showNewSet();
+    if (e.target.closest('#btnFontApply')) return void saveFont();
+    if (e.target.closest('#btnBriefSave') || e.target.closest('#btnBriefSave2')) return void saveBrief(false);
+    if (e.target.closest('#btnBriefGen')) return void saveBrief(true);
     if (e.target.closest('#hGuard') || e.target.closest('#btnGuard')) return void runGuard();
     if (e.target.closest('#hAlgo')) return void showAlgo();
     if (e.target.closest('#hCmd')) {

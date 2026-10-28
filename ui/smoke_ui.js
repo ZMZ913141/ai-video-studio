@@ -59,6 +59,43 @@ vc.on('warn', (...a) => errors.push('console.warn: ' + a.join(' ')));
   await new Promise(r => setTimeout(r, 900));
   report.log_rows = win.document.querySelectorAll('#tabLog .timeline-item').length;
 
+  // ---- 2026-10-29 新增：需求台 / 字体预览 / 恢复默认 / 音频 / 服务详情 ----
+  report.brief_area = win.document.querySelectorAll('#briefBox textarea').length;
+  report.brief_sub = ($('#briefSub') || {}).textContent;
+
+  win.document.querySelector('.tab[data-tab="settings"]')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 800));
+  report.font_selects = win.document.querySelectorAll('#tabSettings select#prevFontCue, #tabSettings select#prevFontTitle').length;
+  report.font_options = win.document.querySelectorAll('#tabSettings #prevFontCue option').length;
+  report.font_burnable_opt = [...win.document.querySelectorAll('#tabSettings #prevFontCue option')]
+    .filter(o => o.textContent.startsWith('✓')).length;
+  report.reset_buttons = win.document.querySelectorAll('#tabSettings [data-reset-key]').length;
+  report.stage_rendered = win.document.querySelectorAll('#tabSettings .font-stage').length;
+
+  // 服务徽章：以前点了没反应，现在必须弹出详情
+  const svc = win.document.querySelector('#svcBar [data-svc]');
+  if (svc) {
+    svc.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 900));
+    report.svc_modal_rows = win.document.querySelectorAll('#modalBox .kv dt').length;
+    win.document.querySelector('#mclose')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  // 音频预览：以前落到「不支持预览」，现在必须出 <audio>
+  const au = win.document.querySelector('[data-file][data-type="audio"]');
+  report.audio_files = win.document.querySelectorAll('[data-file][data-type="audio"]').length;
+  if (au) {
+    au.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 400));
+    report.audio_player = win.document.querySelectorAll('#modalBox audio').length;
+    win.document.querySelector('#mclose')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  }
+
+  // 断点重做按钮
+  report.redo_buttons = win.document.querySelectorAll('#cmdBox [data-redo]').length;
+
   console.log(JSON.stringify(report, null, 2));
   console.log('\n=== errors (' + errors.length + ') ===');
   errors.slice(0, 12).forEach(e => console.log('- ' + e.slice(0, 300)));
