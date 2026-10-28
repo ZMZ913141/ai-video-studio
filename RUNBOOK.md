@@ -82,6 +82,38 @@ $V job-new 老王 "M01_开业第一条"
 **`--aliases` 不是可选项**：你口头叫的是人名（老王），目录名是品牌名。
 没有别名，按口头名字搜不到已有档案 → 又建一个重复的。
 
+### 实测过的完整接单动线（2026-10-28）
+
+```bash
+# ① 建档（--space 要显式给，否则 newip.py 会卡住等交互输入）
+$ vstudio card-new --name 演示客户老王 --type 客户 --tag M \
+      --role "本地生活口播·竖屏" --aliases "老王,王总,老王家" --space 老王资产
+✓ 建档 演示客户老王  [客户]（已补登记进总册）
+
+# ② 立刻自检 —— 缺真值，直接拒绝开工
+$ vstudio guard 老王
+  ？ voice.ref_audio        未登记（null）
+  ？ visual.still           未登记（null）
+✗ 演示客户老王 素材未就绪（4 项），不能出片        ← 退出码 1
+
+# ③ 录 8 秒人声 / 写逐字稿 / 定起始静帧 → 填进 ip.json
+$ vstudio guard 老王
+✓ 演示客户老王 素材齐备，可以出片                  ← 退出码 0
+
+# ④ 记习惯与红线
+$ vstudio card-note 老王 "字幕一律用品牌蓝 #1A5FA8" --kind habit
+$ vstudio card-note 老王 "不许出现同行品牌名" --kind redline
+$ vstudio card-note 老王 "每周三交付两条" --kind need --key 出片频率
+
+# ⑤ 开工
+$ vstudio job-new 老王 "M01_开业第一条"
+```
+
+客户卡的 `policy.allow_cloud_llm` 是 **false**（内容不上云，走本地 9B），
+本人 IP 才是 true。验证：`vstudio card-show 老王` 最后一行会写明。
+
+模板见 `templates/card.template.json`。
+
 ⚠ **客户档案默认禁止内容上云**（`card.json` 里 `policy.allow_cloud_llm: false`），
 文案走本地 9B。本人 IP 是 `true`。
 
@@ -161,7 +193,23 @@ $V job-show 洁斌 S05
 
 ---
 
-## 七、⚠ 旧位置已废弃
+## 七、版本管理（2026-10-28 补上）
+
+项目原本**没有 git**——引擎改坏了没法回滚，与「两边分家」的诉求直接冲突。现已初始化：
+
+```bash
+cd /home/qmr/github/ai-video-studio
+git log --oneline        # 两个提交：重构 + 排除嵌套仓库
+git status               # 引擎改动看得见；档案改动也看得见，但互不混在一起
+```
+
+**`.gitignore` 排除大文件**（成片/音频/图片/字体），只管文本与代码——
+仓库 1.1M，不会因为出片越来越多而膨胀。
+`profiles/*/07_成片/`、`08_过程/`、`资产/`、`02_素材真值/` 靠文件系统和备份管，不进 git。
+
+⚠ `OpenMontage/` 有自己的 `.git`，已从本仓库排除（否则会被当 gitlink，clone 后内容丢失）。
+
+## 八、⚠ 旧位置已废弃
 
 `/cfu/洁斌资产/陈洁斌主号` 是**迁移前的物理备份**，已全量复制到本项目
 `profiles/陈洁斌主号/`（133 个文件、530M，已逐项核对）。
