@@ -8,7 +8,7 @@
 > | **CLI** | 人、我（WorkBuddy）、任何能跑 Bash 的 agent | `python3 bin/vstudio.py <命令>` |
 > | **MCP** `ip-studio` | 任何支持 MCP 的 AI（Claude Code / Cursor / Qwen Code） | 挂上即用，11 个工具 |
 > | **HTTP** `:8000` | n8n / 外部系统 | pipeline-service REST |
-> | **本地网页** `:8790` | 人（看板 + 安全动作） | `python3 bin/ui_server.py` → 见「一之二」 |
+> | **本地网页** `:8790` | 人（看板 + 安全动作） | `bash bin/start-ui.sh` → 见「一之二」 |
 >
 > 三个护栏：**① 界面不发明逻辑**（按钮背后就是 CLI）；
 > **② 同一参数只存一处**（界面只读真值文件那一份）；
@@ -77,22 +77,36 @@ $V guard 洁斌     # 开工前自检（素材不齐非零退出）
 
 ```bash
 cd /home/qmr/github/ai-video-studio
-python3 bin/ui_server.py            # 前台跑，Ctrl+C 停
-python3 bin/ui_server.py --open     # 顺便开浏览器
-python3 bin/ui_server.py --status   # 有没有在跑、地址是多少
-python3 bin/ui_server.py --stop     # 停掉上一次起的那个
+bash bin/start-ui.sh            # 后台起，打印真实地址（推荐）
+bash bin/start-ui.sh --fg       # 前台跑，Ctrl+C 停，日志直接刷屏
+bash bin/start-ui.sh --open     # 起完顺便开浏览器
+bash bin/start-ui.sh --status   # 有没有在跑、地址是多少
+bash bin/start-ui.sh --stop     # 停掉上一次起的那个
+bash bin/start-ui.sh --restart  # 停掉再起
+bash bin/start-ui.sh --port 9000
+```
+
+脚本只做三件手工容易做错的事：**先扫掉没留小纸条的旧实例**（否则你打开的是会乱码的初版）、
+**等小纸条出现再报地址**（端口会顺延，`_8790_` 不能当默认答案）、
+**起之前发现已经在跑就不起第二个**。
+
+不想用脚本也行，底层就是下面这四个开关：
+
+```bash
+python3 bin/ui_server.py --port 8790
+python3 bin/ui_server.py --status
+python3 bin/ui_server.py --stop
 ```
 
 端口撞车会自动往后顺延，**所以别靠命令行猜地址** —— 起完看这三条中的任意一条：
-启动时的那行 `✓ UI 服务已启动 http://…`、或者 `python3 bin/ui_server.py --status`、
+启动时的那行 `✓ UI 服务已启动 http://…`、或者 `--status`、
 或者小纸条 `/tmp/vstudio-ui.json`（记着 pid、真实端口、启动时间，`--stop` 就是读它）。
 
-先把旧实例清干净（之前起过的进程看不见摸不着，会一直占着 8790）：
+手工清旧实例（脚本识别到会自己试一次，同一个终端里多半一次就过）：
 
 ```bash
 pkill -f "bin/ui_server.py"; sleep 1
 python3 bin/ui_server.py --status          # 应答「没在跑」
-python3 bin/ui_server.py                   # 干净的只有这一个
 ```
 
 > `--stop` 动手前会先读 `/proc/<pid>/cmdline` 验明正身：PID 会被系统复用，

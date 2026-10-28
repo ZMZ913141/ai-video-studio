@@ -770,7 +770,11 @@ def stop_running():
     pid = info.get("pid")
     who = pid_is_ours(pid)
     if who is None:
-        os.path.exists(PORTFILE) and os.remove(PORTFILE)
+        if os.path.exists(PORTFILE):
+            try:
+                os.remove(PORTFILE)
+            except OSError:
+                pass
         print(f"进程 {pid} 已经不在了，小纸条清掉")
         return 0
     if not who:
@@ -791,6 +795,13 @@ def stop_running():
         except OSError:
             break
     print(f"✓ 已停 pid={pid} port={info.get('port')}（起于 {info.get('started')}）")
+    # 小纸条原本靠进程的 atexit 收尾，但它要是被 SIGKILL 就来不及写 ——
+    # 残留的纸条会让下一次 --status 说谎，这里主动清掉。
+    if os.path.exists(PORTFILE):
+        try:
+            os.remove(PORTFILE)
+        except OSError:
+            pass
     return 0
 
 
@@ -809,8 +820,14 @@ def main():
             print("没在跑。启动：python3 bin/ui_server.py")
             return 0
         alive = pid_is_ours(info["pid"])          # 顺便确认那个号确实是我们的
-        print(f"{'运行中' if alive else '小纸条还在但进程已不是它了'}："
-              f"{info['url']}  pid={info['pid']}  起于 {info['started']}")
+        if alive is None:
+            print(f"没在跑（小纸条是上次没收尾的残留：{info['url']}）。"
+                  f"启动：python3 bin/ui_server.py")
+        elif alive:
+            print(f"运行中：{info['url']}  pid={info['pid']}  起于 {info['started']}")
+        else:
+            print(f"⚠ pid={info['pid']} 已经被系统复用给别的进程了，工作台其实没在跑"
+                  f"（小纸条记的是 {info['url']}）。启动：python3 bin/ui_server.py")
         return 0
     if a.stop:
         sys.exit(stop_running())
@@ -843,6 +860,12 @@ def main():
 
     url = f"http://{a.host}:{port}"
     write_portfile(url, port)
+    # SIGTERM 默认直接终止进程、不走 atexit → 小纸条会残留成"假在跑"。
+    # 转成 SystemExit，让它在退栈时把纸条收掉。
+    try:
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    except Exception:
+        pass
     print(f"✓ UI 服务已启动 {url}" + (f"   （{a.port} 被占，已顺延）" if port != a.port else ""))
     print(f"  引擎根 {ROOT}")
     print(f"  档案区 {ARCHIVE}")

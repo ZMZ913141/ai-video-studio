@@ -42,7 +42,7 @@ git 边上迟早被误提交。现在项目只留代码（仓库 1.5M 长期稳�
 python3 bin/vstudio.py cards      # 看所有档案卡
 python3 bin/vstudio.py status     # 总览 + 服务健康
 python3 bin/vstudio.py guard 洁斌  # 开工自检
-python3 bin/ui_server.py          # → http://127.0.0.1:8790  看板 + 安全动作
+bash bin/start-ui.sh              # 起网页工作台，打印真实地址（端口会顺延）
 ```
 
 UI 三条护栏（详见 `RUNBOOK.md` 一之二）：界面不发明逻辑、同一参数只存一处、
