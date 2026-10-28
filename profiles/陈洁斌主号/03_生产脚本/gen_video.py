@@ -1358,12 +1358,18 @@ def build_prompt(i, segs, cues, audio_sec):
     if not acts:
         acts.append("He speaks the line carried in on the locked voice while holding the same steady framing. ")
 
-    # ★ 2026-10-28：第 4 段起（i>=3）表情收敛 —— 显式压住大笑 / 挑眉带来的
+    # ★ 2026-10-28：第 4 段起（i>=3）表情收敛 —— 压住大笑 / 挑眉带来的
     #   法令纹 / 抬头纹加深，让脸保持平静、嘴部小幅、眉不挑。
+    #
+    #   ⚠️ 2026-10-28 S05 首跑即失败：原写法 "with no broad smiles and no raised brows"
+    #   撞了本 IP 的 negative_free 红线（ip.json rules，2026-10-27 用户定板），
+    #   被 DRY 的否定词 assert 拦下。这段是 S04 出片之后才加的，所以**从未被真跑验证过**。
+    #   已改为正向描述（语义等价：嘴只小幅、眉平放），不得再写回 no/not/never/without。
     calm_expr = (
         "His facial expression stays calm and contained throughout this segment: he speaks with a relaxed, "
-        "even face and only small, controlled mouth movement, with no broad smiles and no raised brows, "
-        "keeping his forehead smooth and the lines beside his nose soft and uncreased. "
+        "even face and only small, controlled mouth movement, his mouth holding a faint closed-lip smile and "
+        "his brows resting level and settled in their natural position, keeping his forehead smooth and the "
+        "lines beside his nose soft and uncreased. "
         if i >= 3 else ""
     )
     act = opening + "".join(acts) + (

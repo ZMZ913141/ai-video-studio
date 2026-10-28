@@ -231,7 +231,8 @@ def load_ip(strict=True, verbose=True, allow_env=True, start=None):
         print("\n✗ 找不到 ip.json。", file=sys.stderr)
         print(f"  当前起点：{os.path.dirname(os.path.abspath(sys.argv[0]))}",
               file=sys.stderr)
-        print("  请确认脚本位于某个 IP 的工作区内（如 /cfu/洁斌资产/陈洁斌主号/03_生产脚本/）。",
+        print("  请确认脚本位于某个 IP 的工作区内"
+              "（如 /home/qmr/github/ai-video-studio/profiles/陈洁斌主号/03_生产脚本/）。",
               file=sys.stderr)
         print("  新建 IP 请用：python newip.py\n", file=sys.stderr)
         sys.exit(2)

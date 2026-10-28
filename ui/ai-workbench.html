@@ -1,0 +1,1452 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#080B11">
+<title>陈洁斌 AI-IP 作战台</title>
+<!-- 本工作台通过 WorkBuddy「资料库」skill 搭建、存储和部署 -->
+<style>
+:root{
+  --bg:#080B11;
+  --card:#121A26;
+  --card2:#0E1520;
+  --line:rgba(255,255,255,.075);
+  --line2:rgba(255,255,255,.14);
+  --txt:#E8EDF6;
+  --dim:#8B97AC;
+  --dim2:#68748A;
+  --cyan:#22D3EE;
+  --violet:#8B5CF6;
+  --red:#F87171;
+  --amber:#FBBF24;
+  --green:#34D399;
+  --r:14px;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;
+  background:
+    radial-gradient(900px 520px at 10% -10%,rgba(34,211,238,.14),transparent 62%),
+    radial-gradient(780px 460px at 94% 2%,rgba(139,92,246,.14),transparent 60%),
+    var(--bg);
+  color:var(--txt);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  font-size:15px;
+  line-height:1.6;
+  min-height:100vh;
+  padding-bottom:calc(30px + env(safe-area-inset-bottom));
+}
+.wrap{max-width:1060px;margin:0 auto;padding:0 18px}
+svg{display:block}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+
+/* ---------- 顶部 ---------- */
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;gap:14px;
+  padding:22px 0 18px;flex-wrap:wrap;
+}
+.brand{display:flex;align-items:center;gap:12px;min-width:0}
+.logo{
+  width:42px;height:42px;border-radius:12px;flex:none;
+  background:linear-gradient(140deg,rgba(34,211,238,.22),rgba(139,92,246,.26));
+  border:1px solid rgba(34,211,238,.32);
+  display:flex;align-items:center;justify-content:center;color:var(--cyan);
+}
+.brand-txt h1{margin:0;font-size:17px;font-weight:650;letter-spacing:.2px}
+.brand-txt p{margin:2px 0 0;font-size:12.5px;color:var(--dim2)}
+.tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sync{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:12px;color:var(--dim);
+  background:rgba(255,255,255,.04);border:1px solid var(--line);
+  padding:6px 11px;border-radius:20px;white-space:nowrap;
+}
+.sync .dot{width:6px;height:6px;border-radius:50%;background:var(--amber);box-shadow:0 0 8px currentColor}
+.sync.ok .dot{background:var(--green);color:var(--green)}
+.sync.err .dot{background:var(--red);color:var(--red)}
+.tool{
+  display:inline-flex;align-items:center;gap:5px;
+  font-size:12.5px;color:var(--dim);
+  border:1px solid var(--line);border-radius:10px;
+  padding:7px 11px;background:rgba(255,255,255,.03);
+  transition:.18s;
+}
+.tool:hover{color:var(--txt);border-color:var(--line2);background:rgba(255,255,255,.06)}
+.tool.danger:hover{color:var(--red);border-color:rgba(248,113,113,.4)}
+
+/* ---------- 今天要处理 ---------- */
+.today{
+  position:relative;
+  background:linear-gradient(160deg,rgba(34,211,238,.07),rgba(19,26,38,.92) 42%);
+  border:1px solid rgba(34,211,238,.18);
+  border-radius:16px;
+  padding:16px 18px 14px;
+  margin-bottom:14px;
+  overflow:hidden;
+}
+.today::before{
+  content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:linear-gradient(180deg,var(--cyan),var(--violet));
+}
+.today-hd{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.today-title{display:flex;align-items:center;gap:8px}
+.today-title h2{margin:0;font-size:15px;font-weight:650;letter-spacing:.3px}
+.ic{color:var(--cyan)}
+.pill{
+  font-size:11.5px;padding:2px 9px;border-radius:20px;
+  background:rgba(34,211,238,.14);color:var(--cyan);
+  border:1px solid rgba(34,211,238,.28);white-space:nowrap;
+}
+.pill.hot{background:rgba(248,113,113,.15);color:var(--red);border-color:rgba(248,113,113,.32)}
+.today-date{font-size:12px;color:var(--dim2)}
+.today-body{margin-top:12px;display:flex;flex-direction:column;gap:8px}
+.todo{
+  display:flex;align-items:center;gap:12px;
+  background:rgba(255,255,255,.028);
+  border:1px solid var(--line);border-radius:11px;
+  padding:10px 12px;
+}
+.todo.over{background:rgba(248,113,113,.07);border-color:rgba(248,113,113,.26)}
+.todo.soon{background:rgba(251,191,36,.055);border-color:rgba(251,191,36,.2)}
+.todo-main{min-width:0;flex:1}
+.todo-main strong{display:block;font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.todo-meta{font-size:11.5px;color:var(--dim2);margin-top:2px;display:flex;gap:8px;flex-wrap:wrap}
+.todo-meta .warn{color:var(--red)}
+.todo-meta .soon{color:var(--amber)}
+.btn-adv{
+  flex:none;font-size:12px;padding:8px 12px;border-radius:9px;
+  background:rgba(34,211,238,.14);color:var(--cyan);
+  border:1px solid rgba(34,211,238,.3);transition:.18s;white-space:nowrap;
+  min-height:36px;
+}
+.btn-adv:hover{background:rgba(34,211,238,.22)}
+.btn-adv:disabled{opacity:.5;cursor:default}
+.empty-mini{font-size:13px;color:var(--dim2);padding:8px 2px}
+
+/* ---------- 统计 ---------- */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px}
+.stat{
+  background:linear-gradient(160deg,rgba(255,255,255,.045),rgba(255,255,255,.012));
+  border:1px solid var(--line);border-radius:12px;padding:12px 14px;
+}
+.stat-num{font-size:24px;font-weight:660;letter-spacing:-.5px;line-height:1.2}
+.stat-num.red{color:var(--red)}
+.stat-num.cyan{color:var(--cyan)}
+.stat-num.green{color:var(--green)}
+.stat-num.violet{color:#A78BFA}
+.stat-label{font-size:11.5px;color:var(--dim2);margin-top:2px}
+
+/* ---------- Tabs ---------- */
+.tabs{
+  position:sticky;top:0;z-index:20;
+  display:flex;gap:6px;padding:8px 0;
+  background:linear-gradient(180deg,rgba(8,11,17,.96) 62%,rgba(8,11,17,0));
+  backdrop-filter:blur(8px);
+  margin-bottom:12px;
+}
+.tab{
+  display:inline-flex;align-items:center;gap:7px;
+  font-size:13.5px;color:var(--dim);
+  padding:9px 15px;border-radius:11px;
+  border:1px solid transparent;transition:.18s;min-height:40px;
+}
+.tab:hover{color:var(--txt);background:rgba(255,255,255,.04)}
+.tab.is-active{
+  color:var(--txt);
+  background:linear-gradient(150deg,rgba(34,211,238,.16),rgba(139,92,246,.14));
+  border-color:rgba(34,211,238,.26);
+}
+.tab .cnt{
+  font-size:11px;color:var(--dim2);
+  background:rgba(255,255,255,.07);border-radius:20px;padding:0 6px;min-width:18px;text-align:center;
+}
+.tab.is-active .cnt{color:var(--cyan);background:rgba(34,211,238,.16)}
+
+/* ---------- 面板 ---------- */
+.panel{display:none;padding-bottom:20px}
+.panel.is-active{display:block;animation:fade .22s ease}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.panel-hd{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.panel-hd h2{margin:0;font-size:16px;font-weight:650}
+.panel-sub{margin:3px 0 0;font-size:12.5px;color:var(--dim2)}
+.btn-primary{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:13px;font-weight:600;color:#04121A;
+  background:linear-gradient(135deg,#4FE3F5,#22D3EE 55%,#7C6BF5);
+  padding:10px 16px;border-radius:11px;min-height:42px;
+  box-shadow:0 6px 20px rgba(34,211,238,.2);transition:.18s;
+}
+.btn-primary:hover{filter:brightness(1.08)}
+.btn-primary:disabled{opacity:.6}
+
+.list{display:flex;flex-direction:column;gap:10px}
+.row{
+  background:linear-gradient(165deg,rgba(255,255,255,.045),rgba(255,255,255,.012));
+  border:1px solid var(--line);border-radius:var(--r);
+  padding:14px 16px;transition:.18s;
+}
+.row:hover{border-color:var(--line2);background:linear-gradient(165deg,rgba(255,255,255,.06),rgba(255,255,255,.018))}
+.row-hd{display:flex;align-items:flex-start;gap:10px}
+.row-title{font-size:14.5px;font-weight:640;flex:1;min-width:0;word-break:break-word}
+.row-badges{display:flex;gap:6px;flex-wrap:wrap;flex:none}
+.badge{
+  font-size:11px;padding:3px 9px;border-radius:20px;white-space:nowrap;
+  border:1px solid var(--line2);color:var(--dim);background:rgba(255,255,255,.04);
+}
+.badge.b-cyan{color:var(--cyan);border-color:rgba(34,211,238,.32);background:rgba(34,211,238,.12)}
+.badge.b-violet{color:#A78BFA;border-color:rgba(167,139,250,.32);background:rgba(139,92,246,.14)}
+.badge.b-green{color:var(--green);border-color:rgba(52,211,153,.3);background:rgba(52,211,153,.12)}
+.badge.b-red{color:var(--red);border-color:rgba(248,113,113,.32);background:rgba(248,113,113,.12)}
+.badge.b-amber{color:var(--amber);border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.12)}
+.row-body{margin-top:10px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px}
+.kv{min-width:0}
+.kv.full{grid-column:1/-1}
+.kv-k{font-size:11px;color:var(--dim2);letter-spacing:.2px;display:flex;align-items:center;gap:8px;justify-content:space-between}
+.kv-k .mini.cp{font-size:10px;padding:1px 7px;height:18px;line-height:16px;opacity:.55}
+.kv-k .mini.cp:hover{opacity:1}
+.kv-v{font-size:13px;color:#CBD5E4;margin-top:1px;word-break:break-word;white-space:pre-wrap}
+.kv-v.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:#9FB0C8}
+.kv-v a{color:var(--cyan);text-decoration:none;border-bottom:1px dashed rgba(34,211,238,.4)}
+.row-ft{display:flex;justify-content:flex-end;gap:6px;margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.05)}
+.mini{
+  display:inline-flex;align-items:center;gap:5px;
+  font-size:12px;color:var(--dim2);padding:6px 10px;border-radius:8px;transition:.18s;
+}
+.mini:hover{color:var(--txt);background:rgba(255,255,255,.06)}
+.mini.del:hover{color:var(--red);background:rgba(248,113,113,.1)}
+.skeleton{font-size:13px;color:var(--dim2);padding:24px 4px;text-align:center}
+
+/* ---------- 弹层 ---------- */
+.mask{
+  position:fixed;inset:0;z-index:100;
+  background:rgba(3,6,11,.72);backdrop-filter:blur(6px);
+  display:none;align-items:center;justify-content:center;padding:20px;
+}
+.mask.show{display:flex}
+.sheet{
+  width:100%;max-width:580px;max-height:88vh;overflow:auto;
+  background:linear-gradient(170deg,#141C2A,#0D131D 70%);
+  border:1px solid var(--line2);border-radius:18px;
+  box-shadow:0 24px 60px rgba(0,0,0,.55);
+  padding:20px 20px 18px;
+}
+.sheet-hd{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:16px}
+.sheet-hd h3{margin:0;font-size:15.5px;font-weight:650}
+.x{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;color:var(--dim)}
+.x:hover{background:rgba(255,255,255,.07);color:var(--txt)}
+.field{margin-bottom:13px}
+.field label{display:block;font-size:12px;color:var(--dim);margin-bottom:5px}
+.field input,.field select,.field textarea{
+  width:100%;font-family:inherit;font-size:16px;
+  background:#0A1018;color:var(--txt);
+  border:1px solid var(--line2);border-radius:10px;
+  padding:11px 12px;min-height:44px;
+  outline:none;transition:.16s;-webkit-appearance:none;appearance:none;
+}
+.field textarea{min-height:78px;resize:vertical;font-size:15px;line-height:1.55}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:rgba(34,211,238,.55);box-shadow:0 0 0 3px rgba(34,211,238,.1)}
+.field select{background-image:url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%238B97AC' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:34px}
+.sheet-ft{display:flex;gap:10px;justify-content:flex-end;margin-top:18px;padding-top:14px;border-top:1px solid var(--line)}
+.btn-ghost{font-size:13.5px;color:var(--dim);padding:11px 16px;border-radius:10px;border:1px solid var(--line2);min-height:44px}
+.btn-ghost:hover{color:var(--txt);background:rgba(255,255,255,.05)}
+.btn-save{font-size:13.5px;font-weight:600;color:#04121A;background:linear-gradient(135deg,#4FE3F5,#22D3EE 60%,#7C6BF5);padding:11px 20px;border-radius:10px;min-height:44px}
+.btn-save:disabled{opacity:.6}
+
+/* ---------- toast ---------- */
+.toast{
+  position:fixed;left:50%;bottom:calc(26px + env(safe-area-inset-bottom));transform:translate(-50%,14px);
+  z-index:200;pointer-events:none;opacity:0;transition:.24s;
+  background:rgba(20,28,42,.97);border:1px solid var(--line2);
+  color:var(--txt);font-size:13px;padding:11px 18px;border-radius:11px;
+  box-shadow:0 12px 30px rgba(0,0,0,.45);max-width:88vw;text-align:center;
+}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.toast.bad{border-color:rgba(248,113,113,.45);color:#FCA5A5}
+
+/* ---------- 移动端 ---------- */
+@media (max-width:768px){
+  body{font-size:15px}
+  .wrap{padding:0 14px}
+  .topbar{padding:16px 0 12px}
+  .brand-txt h1{font-size:15.5px}
+  .brand-txt p{font-size:11.5px}
+  .tools{width:100%;justify-content:space-between}
+  .tool span{display:none}
+  .tool{padding:9px 12px;min-height:40px}
+  .sync{order:-1}
+  .stats{grid-template-columns:repeat(2,1fr);gap:8px}
+  .stat{padding:11px 12px}
+  .stat-num{font-size:21px}
+  .row-body{grid-template-columns:1fr;gap:7px}
+  .row{padding:13px 14px}
+  .todo{flex-wrap:wrap}
+  .btn-adv{width:100%;min-height:42px}
+  .tabs{overflow-x:auto;scrollbar-width:none}
+  .tabs::-webkit-scrollbar{display:none}
+  .tab{flex:none}
+  .sheet{max-height:92vh;border-radius:16px;padding:18px 16px 16px}
+  .panel-hd .btn-primary{flex:1;justify-content:center}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2.5" y="6" width="13" height="12" rx="2.6"></rect>
+          <path d="M15.5 11l6-3.2v8.4l-6-3.2z"></path>
+        </svg>
+      </div>
+      <div class="brand-txt">
+        <h1>陈洁斌 · AI-IP 作战台</h1>
+        <p>主号出片 + 客户分身，横竖双尺寸随时切</p>
+      </div>
+    </div>
+    <div class="tools">
+      <span class="sync" id="syncState"><i class="dot"></i><span id="syncText">连接中</span></span>
+      <button class="tool" id="btnExport" title="导出 JSON 备份">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 20h16"></path></svg>
+        <span>备份</span>
+      </button>
+      <button class="tool" id="btnImport" title="从 JSON 恢复">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0L8 8m4-4l4 4M4 20h16"></path></svg>
+        <span>恢复</span>
+      </button>
+      <button class="tool danger" id="btnClearDemo" title="删除预置的示例数据">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V4.6h5V7M6.5 7l1 13h9l1-13"></path></svg>
+        <span>清示例</span>
+      </button>
+    </div>
+  </header>
+
+  <section class="today">
+    <div class="today-hd">
+      <div class="today-title">
+        <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7.5V12l3 2"></path></svg>
+        <h2>今天要处理</h2>
+        <span class="pill" id="todayPill">—</span>
+      </div>
+      <span class="today-date" id="todayDate"></span>
+    </div>
+    <div class="today-body" id="todayList">
+      <div class="empty-mini">正在读取云端数据…</div>
+    </div>
+  </section>
+
+  <section class="stats">
+    <div class="stat">
+      <div class="stat-num cyan" id="stat-active" data-stat="active" data-sp-bindable="database" data-sp-database-id="X8kIjcmG94x2M0IAiIDJE3">—</div>
+      <div class="stat-label">在制片子</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num red" id="stat-over" data-stat="over" data-sp-bindable="database" data-sp-database-id="X8kIjcmG94x2M0IAiIDJE3">—</div>
+      <div class="stat-label">已逾期</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num green" id="stat-persona" data-stat="persona" data-sp-bindable="database" data-sp-database-id="CMZVG53syyCGls8mXJR2q4">—</div>
+      <div class="stat-label">IP 数（主号 + 客户）</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num violet" id="stat-workflow" data-stat="workflow" data-sp-bindable="database" data-sp-database-id="c126ewqPwEnPdXOSY4OGl0">—</div>
+      <div class="stat-label">稳定工作流</div>
+    </div>
+  </section>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab is-active" data-tab="pipeline">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h10M4 18h13"></path></svg>
+      选题流水线<span class="cnt" id="cnt-pipeline" data-sp-bindable="database" data-sp-database-id="X8kIjcmG94x2M0IAiIDJE3">0</span>
+    </button>
+    <button class="tab" data-tab="persona">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.4"></circle><path d="M5 20c0-3.4 3.1-5.8 7-5.8s7 2.4 7 5.8"></path></svg>
+      IP 人设（主号 + 客户）<span class="cnt" id="cnt-persona" data-sp-bindable="database" data-sp-database-id="CMZVG53syyCGls8mXJR2q4">0</span>
+    </button>
+    <button class="tab" data-tab="workflow">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.4"></circle><circle cx="18" cy="6" r="2.4"></circle><circle cx="12" cy="18" r="2.4"></circle><path d="M8.2 7.2l2.3 8.6M15.8 7.2l-2.3 8.6"></path></svg>
+      插件与工作流<span class="cnt" id="cnt-workflow" data-sp-bindable="database" data-sp-database-id="c126ewqPwEnPdXOSY4OGl0">0</span>
+    </button>
+  </nav>
+
+  <section class="panel is-active" id="panel-pipeline">
+    <div class="panel-hd">
+      <div>
+        <h2>选题流水线</h2>
+        <p class="panel-sub">每条选题从脚本走到发布，卡在哪一步一眼看见；横竖模式在卡里定</p>
+      </div>
+      <button class="btn-primary" data-add="pipeline">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+        新建选题
+      </button>
+    </div>
+    <div class="list" id="list-pipeline"><div class="skeleton">加载中…</div></div>
+  </section>
+
+  <section class="panel" id="panel-persona">
+    <div class="panel-hd">
+      <div>
+        <h2>IP 人设（主号 + 客户）</h2>
+        <p class="panel-sub">主号是你自己；接新客户 = 复制一张卡 + 采集底图和 10 秒声音，工作流零改动</p>
+      </div>
+      <button class="btn-primary" data-add="persona">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+        新增人设
+      </button>
+    </div>
+    <div class="list" id="list-persona"><div class="skeleton">加载中…</div></div>
+  </section>
+
+  <section class="panel" id="panel-workflow">
+    <div class="panel-hd">
+      <div>
+        <h2>插件与工作流</h2>
+        <p class="panel-sub">12 个插件各管一段，每张卡写明调哪个节点、什么参数、横竖怎么切</p>
+      </div>
+      <button class="btn-primary" data-add="workflow">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+        新增步骤
+      </button>
+    </div>
+    <div class="list" id="list-workflow"><div class="skeleton">加载中…</div></div>
+  </section>
+
+</div>
+
+<div class="mask" id="mask">
+  <div class="sheet" id="sheet">
+    <div class="sheet-hd">
+      <h3 id="sheetTitle">编辑</h3>
+      <button class="x" id="sheetClose" aria-label="关闭">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+      </button>
+    </div>
+    <form id="sheetForm" autocomplete="off">
+      <div id="sheetFields"></div>
+      <div class="sheet-ft">
+        <button type="button" class="btn-ghost" id="sheetCancel">取消</button>
+        <button type="submit" class="btn-save" id="sheetSave">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<input type="file" id="fileInput" accept="application/json,.json" style="display:none">
+
+<script>
+(function () {
+  'use strict';
+
+  /* ================= 常量与配置 ================= */
+  var DB = {
+    persona: 'CMZVG53syyCGls8mXJR2q4',
+    workflow: 'c126ewqPwEnPdXOSY4OGl0',
+    pipeline: 'X8kIjcmG94x2M0IAiIDJE3'
+  };
+
+  // 雅太社真实生产顺序：TTS 是地基，配音过审后才做静帧和出片
+  var STAGES = ['待脚本', '写脚本', '配音', '静帧', '出片', '交付', '待发布', '已发布'];
+
+  var VIEWS = {
+    pipeline: {
+      key: 'pipeline',
+      dbId: DB.pipeline,
+      primary: '选题标题',
+      badges: ['优先级', '尺寸模式', '当前环节'],
+      fields: [
+        { n: '选题标题', t: 'text', primary: true },
+        { n: '内容系列', t: 'text' },
+        { n: '当前环节', t: 'select' },
+        { n: '尺寸模式', t: 'select' },
+        { n: '优先级', t: 'select' },
+        { n: '截止日期', t: 'date' },
+        { n: '关联工作流', t: 'text' },
+        { n: '脚本要点', t: 'text', long: true },
+        { n: '发布链接', t: 'url' },
+        { n: '备注', t: 'text', long: true }
+      ],
+      sortBy: '截止日期'
+    },
+    persona: {
+      key: 'persona',
+      dbId: DB.persona,
+      primary: 'IP名称',
+      badges: ['类型', '更新时间'],
+      fields: [
+        { n: 'IP名称', t: 'text', primary: true },
+        { n: '类型', t: 'select' },
+        { n: '账号定位', t: 'text', long: true },
+        { n: '目标人群', t: 'text', long: true },
+        { n: '人格设定', t: 'text', long: true },
+        { n: '形象真值', t: 'text', long: true, mono: true },
+        { n: '声音真值', t: 'text', long: true },
+        { n: '口播结构', t: 'text', long: true },
+        { n: '内容支柱', t: 'text', long: true },
+        { n: '视觉规范', t: 'text', long: true },
+        { n: '获客钩子', t: 'text', long: true },
+        { n: '禁止项', t: 'text', long: true },
+        { n: '更新时间', t: 'date' }
+      ],
+      sortBy: 'IP名称'
+    },
+    workflow: {
+      key: 'workflow',
+      dbId: DB.workflow,
+      primary: '步骤名',
+      badges: ['制作环节', '适用尺寸', '可用状态'],
+      fields: [
+        { n: '步骤名', t: 'text', primary: true },
+        { n: '制作环节', t: 'select' },
+        { n: '适用尺寸', t: 'select' },
+        { n: '调用插件', t: 'text' },
+        { n: '核心节点', t: 'text' },
+        { n: '单条耗时', t: 'number', unit: 'sec' },
+        { n: '可用状态', t: 'select' },
+        { n: '关键参数', t: 'text', long: true, mono: true },
+        { n: '提示词模板', t: 'text', long: true, mono: true },
+        { n: '备注', t: 'text', long: true }
+      ],
+      // 名称前缀 ①②③ 即生产顺序，按名称排序比按环节文本排序更准
+      sortBy: '步骤名'
+    }
+  };
+
+  var BADGE_COLOR = {
+    '已发布': 'b-green', '待发布': 'b-violet', '交付': 'b-violet', '配音': 'b-cyan',
+    '出片': 'b-cyan', '静帧': 'b-amber', '写脚本': 'b-violet', '待脚本': '', '设置': 'b-violet',
+    'P0': 'b-red', 'P1': 'b-amber', 'P2': '',
+    '自营主号': 'b-green', '客户 IP': 'b-cyan', '备用分线': 'b-amber',
+    '稳定可用': 'b-green', '调试中': 'b-amber', '待优化': 'b-red',
+    '横屏 16:9': 'b-cyan', '竖屏 9:16': 'b-violet',
+    '横竖通用': '', '横屏优先': 'b-cyan', '竖屏优先': 'b-violet'
+  };
+
+  var S = {
+    data: { pipeline: [], persona: [], workflow: [] },
+    options: {},
+    ready: false,
+    editing: { view: null, record: null }
+  };
+
+  var db = window.__SMART_PAGE__ && window.__SMART_PAGE__.database;
+
+  /* ================= 小工具 ================= */
+  function $(id) { return document.getElementById(id); }
+  function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+  function todayStr() {
+    var d = new Date();
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
+
+  function dOnly(v) {
+    if (!v) return '';
+    var s = String(v);
+    var d = new Date(s);
+    if (isNaN(d.getTime())) return s.slice(0, 10);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
+
+  function diffDays(fromStr, toStr) {
+    var a = new Date(fromStr + 'T00:00:00');
+    var b = new Date(toStr + 'T00:00:00');
+    return Math.round((b.getTime() - a.getTime()) / 86400000);
+  }
+
+  function valueText(v) {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'object') {
+      if (v.link) return v.link;
+      if (v.text) return v.text;
+      return '';
+    }
+    if (v === true) return '是';
+    if (v === false) return '否';
+    return String(v);
+  }
+
+  function markBind(el, dbId) {
+    el.setAttribute('data-sp-bindable', 'database');
+    el.setAttribute('data-sp-database-id', dbId);
+  }
+
+  function toast(msg, bad) {
+    var t = $('toast');
+    t.textContent = msg;
+    t.className = 'toast show' + (bad ? ' bad' : '');
+    clearTimeout(t._t);
+    t._t = setTimeout(function () { t.className = 'toast'; }, 2400);
+  }
+
+  function setSync(state, text) {
+    var el = $('syncState');
+    el.className = 'sync' + (state === 'ok' ? ' ok' : state === 'err' ? ' err' : '');
+    $('syncText').textContent = text;
+  }
+
+  /* ================= 数据层 ================= */
+  // 每个库的读写都显式带着自己的库 ID，避免运行时把数据写到别的表里
+  function queryFn(dbId) {
+    if (dbId === DB.persona) {
+      return function (cur) { return db.query({ databaseId: 'CMZVG53syyCGls8mXJR2q4', pageSize: 200, startCursor: cur }); };
+    }
+    if (dbId === DB.workflow) {
+      return function (cur) { return db.query({ databaseId: 'c126ewqPwEnPdXOSY4OGl0', pageSize: 200, startCursor: cur }); };
+    }
+    return function (cur) { return db.query({ databaseId: 'X8kIjcmG94x2M0IAiIDJE3', pageSize: 200, startCursor: cur }); };
+  }
+
+  function schemaFn(dbId) {
+    if (dbId === DB.persona) return db.getSchema({ databaseId: 'CMZVG53syyCGls8mXJR2q4' });
+    if (dbId === DB.workflow) return db.getSchema({ databaseId: 'c126ewqPwEnPdXOSY4OGl0' });
+    return db.getSchema({ databaseId: 'X8kIjcmG94x2M0IAiIDJE3' });
+  }
+
+  function dbAdd(viewKey, props) {
+    if (viewKey === 'persona') return db.addRecord({ databaseId: 'CMZVG53syyCGls8mXJR2q4', properties: props });
+    if (viewKey === 'workflow') return db.addRecord({ databaseId: 'c126ewqPwEnPdXOSY4OGl0', properties: props });
+    return db.addRecord({ databaseId: 'X8kIjcmG94x2M0IAiIDJE3', properties: props });
+  }
+
+  function dbUpdate(viewKey, recordId, props) {
+    if (viewKey === 'persona') return db.updateRecord({ databaseId: 'CMZVG53syyCGls8mXJR2q4', recordId: recordId, properties: props });
+    if (viewKey === 'workflow') return db.updateRecord({ databaseId: 'c126ewqPwEnPdXOSY4OGl0', recordId: recordId, properties: props });
+    return db.updateRecord({ databaseId: 'X8kIjcmG94x2M0IAiIDJE3', recordId: recordId, properties: props });
+  }
+
+  function dbDelete(viewKey, recordId) {
+    if (viewKey === 'persona') return db.deleteRecord({ databaseId: 'CMZVG53syyCGls8mXJR2q4', recordId: recordId });
+    if (viewKey === 'workflow') return db.deleteRecord({ databaseId: 'c126ewqPwEnPdXOSY4OGl0', recordId: recordId });
+    return db.deleteRecord({ databaseId: 'X8kIjcmG94x2M0IAiIDJE3', recordId: recordId });
+  }
+
+  function loadAll(dbId) {
+    var fetchPage = queryFn(dbId);
+    return new Promise(function (resolve, reject) {
+      var acc = [];
+      var guard = 0;
+      function step(cursor) {
+        if (guard > 100) { resolve(acc); return; }
+        guard++;
+        fetchPage(cursor).then(function (r) {
+          var list = (r && r.results) || [];
+          acc = acc.concat(list);
+          var next = r && r.nextCursor;
+          if (r && r.hasMore && next && next !== cursor && list.length) {
+            step(next);
+          } else {
+            resolve(acc);
+          }
+        }).catch(reject);
+      }
+      step(undefined);
+    });
+  }
+
+  function loadSchema(dbId) {
+    return schemaFn(dbId).then(function (sc) {
+      var map = {};
+      ((sc && sc.properties) || []).forEach(function (f) {
+        if ((f.type === 'select' || f.type === 'multi_select') && f.config && f.config.options) {
+          map[f.name] = f.config.options;
+        }
+      });
+      S.options[dbId] = map;
+    }).catch(function (err) {
+      console.error('[database] schema 加载失败:', err);
+      S.options[dbId] = {};
+    });
+  }
+
+  function reloadAll() {
+    return Promise.all([
+      loadAll(DB.pipeline),
+      loadAll(DB.persona),
+      loadAll(DB.workflow)
+    ]).then(function (res) {
+      S.data.pipeline = res[0] || [];
+      S.data.persona = res[1] || [];
+      S.data.workflow = res[2] || [];
+      S.ready = true;
+      rememberDemoIds();
+      renderAll();
+    }).catch(function (err) {
+      console.error('[database] 数据加载失败:', err);
+      setSync('err', '云端连接失败');
+      toast('数据加载失败，请刷新重试', true);
+      renderAll();
+    });
+  }
+
+  /* ================= 渲染层（只读数据，不互相调用） ================= */
+  function renderAll() {
+    renderToday();
+    renderStats();
+    renderTabCounts();
+    renderList('pipeline');
+    renderList('persona');
+    renderList('workflow');
+  }
+
+  function renderTabCounts() {
+    $('cnt-pipeline').textContent = S.data.pipeline.length;
+    $('cnt-persona').textContent = S.data.persona.length;
+    $('cnt-workflow').textContent = S.data.workflow.length;
+  }
+
+  function renderStats() {
+    var t = todayStr();
+    var active = 0, over = 0, personaOn = 0, wfOk = 0;
+    S.data.pipeline.forEach(function (r) {
+      var stage = valueText(r['当前环节']);
+      if (stage !== '已发布') active++;
+      var d = dOnly(r['截止日期']);
+      if (stage !== '已发布' && d && d < t) over++;
+    });
+    S.data.persona.forEach(function (r) {
+      var ptype = valueText(r['类型']);
+      if (ptype === '自营主号' || ptype === '客户 IP') personaOn++;
+    });
+    S.data.workflow.forEach(function (r) {
+      if (valueText(r['可用状态']) === '稳定可用') wfOk++;
+    });
+    $('stat-active').textContent = active;
+    $('stat-over').textContent = over;
+    $('stat-persona').textContent = personaOn;
+    $('stat-workflow').textContent = wfOk;
+  }
+
+  function dueInfo(row) {
+    var d = dOnly(row['截止日期']);
+    if (!d) return null;
+    var t = todayStr();
+    if (d < t) return { state: 'over', days: diffDays(d, t), d: d };
+    if (d === t) return { state: 'today', days: 0, d: d };
+    var ahead = diffDays(t, d);
+    if (ahead <= 3) return { state: 'soon', days: ahead, d: d };
+    return null;
+  }
+
+  function renderToday() {
+    var box = $('todayList');
+    var pill = $('todayPill');
+    var weekday = ['日', '一', '二', '三', '四', '五', '六'][new Date().getDay()];
+    $('todayDate').textContent = todayStr() + ' 周' + weekday;
+
+    var items = [];
+    S.data.pipeline.forEach(function (r) {
+      if (valueText(r['当前环节']) === '已发布') return;
+      var info = dueInfo(r);
+      if (!info) return;
+      items.push({ row: r, info: info });
+    });
+    items.sort(function (a, b) {
+      if (a.info.d === b.info.d) return 0;
+      return a.info.d < b.info.d ? -1 : 1;
+    });
+    items = items.slice(0, 6);
+
+    var overCount = 0;
+    S.data.pipeline.forEach(function (r) {
+      var info = dueInfo(r);
+      if (info && info.state === 'over' && valueText(r['当前环节']) !== '已发布') overCount++;
+    });
+
+    pill.textContent = overCount > 0 ? overCount + ' 条逾期' : (items.length ? items.length + ' 条待推进' : '清爽');
+    pill.className = 'pill' + (overCount > 0 ? ' hot' : '');
+
+    box.innerHTML = '';
+    if (!S.ready) { box.innerHTML = '<div class="empty-mini">正在读取云端数据…</div>'; return; }
+    if (!items.length) {
+      var e = document.createElement('div');
+      e.className = 'empty-mini';
+      e.textContent = '今天没有到期任务。要么去流水线加一条，要么去工作流库调一套更快的参数。';
+      box.appendChild(e);
+      return;
+    }
+
+    items.forEach(function (it) {
+      var r = it.row;
+      var cls = it.info.state === 'over' ? ' over' : it.info.state === 'soon' ? ' soon' : '';
+      var d = document.createElement('div');
+      d.className = 'todo' + cls;
+
+      var main = document.createElement('div');
+      main.className = 'todo-main';
+      var strong = document.createElement('strong');
+      strong.textContent = valueText(r[VIEWS.pipeline.primary]) || '未命名片子';
+      markBind(strong, DB.pipeline);
+      main.appendChild(strong);
+
+      var meta = document.createElement('div');
+      meta.className = 'todo-meta';
+      var c = document.createElement('span');
+      c.textContent = valueText(r['内容系列']) || '未定系列';
+      markBind(c, DB.pipeline);
+      meta.appendChild(c);
+
+      var ds = document.createElement('span');
+      ds.className = it.info.state === 'over' ? 'warn' : it.info.state === 'soon' ? 'soon' : '';
+      ds.textContent = it.info.state === 'over'
+        ? '已逾期 ' + it.info.days + ' 天 · 截止 ' + it.info.d
+        : it.info.state === 'today'
+          ? '今天到期'
+          : it.info.days + ' 天后到期';
+      markBind(ds, DB.pipeline);
+      meta.appendChild(ds);
+
+      var st = document.createElement('span');
+      st.textContent = '当前：' + (valueText(r['当前环节']) || '待脚本');
+      markBind(st, DB.pipeline);
+      meta.appendChild(st);
+      main.appendChild(meta);
+      d.appendChild(main);
+
+      var stage = valueText(r['当前环节']) || '待脚本';
+      var idx = STAGES.indexOf(stage);
+      var next = idx >= 0 && idx < STAGES.length - 1 ? STAGES[idx + 1] : '';
+      if (next) {
+        var btn = document.createElement('button');
+        btn.className = 'btn-adv';
+        btn.setAttribute('data-advance', r._id);
+        btn.setAttribute('data-next', next);
+        btn.textContent = '推进到「' + next + '」';
+        d.appendChild(btn);
+      }
+      box.appendChild(d);
+    });
+  }
+
+  function buildBadge(text, dbId) {
+    var b = document.createElement('span');
+    b.className = 'badge ' + (BADGE_COLOR[text] || '');
+    b.textContent = text;
+    markBind(b, dbId);
+    return b;
+  }
+
+  function renderList(key) {
+    var view = VIEWS[key];
+    var box = $('list-' + key);
+    var rows = S.data[key] || [];
+    box.innerHTML = '';
+
+    if (!S.ready) { box.innerHTML = '<div class="skeleton">加载中…</div>'; return; }
+    if (!rows.length) {
+      var e = document.createElement('div');
+      e.className = 'skeleton';
+      e.textContent = '还没有记录，点右上角新建一条。';
+      box.appendChild(e);
+      return;
+    }
+
+    var sorted = rows.slice();
+    var sb = view.sortBy;
+    if (sb) {
+      sorted.sort(function (a, b) {
+        var av = valueText(a[sb]), bv = valueText(b[sb]);
+        if (!av && !bv) return 0;
+        if (!av) return 1;
+        if (!bv) return -1;
+        return av < bv ? -1 : av > bv ? 1 : 0;
+      });
+    }
+
+    sorted.forEach(function (row) {
+      box.appendChild(buildRow(view, row));
+    });
+  }
+
+  function durText(n) {
+    var s = Number(n);
+    if (!s || isNaN(s)) return '';
+    if (s >= 120) return Math.round(s / 60) + ' 分钟';
+    return s + ' 秒';
+  }
+
+  function copyText(t, btn) {
+    var old = btn.textContent;
+    var done = function () {
+      btn.textContent = '已复制';
+      setTimeout(function () {
+        btn.textContent = old;
+      }, 1400);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(done, function () {
+        fallbackCopy(t, done);
+      });
+    } else {
+      fallbackCopy(t, done);
+    }
+  }
+
+  function fallbackCopy(t, done) {
+    var ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    document.body.appendChild(ta);
+    ta.select();
+    if (document.execCommand) {
+      document.execCommand('copy');
+    }
+    document.body.removeChild(ta);
+    done();
+  }
+
+  function buildRow(view, row) {
+    var card = document.createElement('div');
+    card.className = 'row';
+
+    var hd = document.createElement('div');
+    hd.className = 'row-hd';
+
+    var title = document.createElement('div');
+    title.className = 'row-title';
+    title.textContent = valueText(row[view.primary]) || '未命名';
+    markBind(title, view.dbId);
+    hd.appendChild(title);
+
+    var badges = document.createElement('div');
+    badges.className = 'row-badges';
+    view.badges.forEach(function (bn) {
+      var v = valueText(row[bn]);
+      if (v) badges.appendChild(buildBadge(v, view.dbId));
+    });
+    hd.appendChild(badges);
+    card.appendChild(hd);
+
+    var body = document.createElement('div');
+    body.className = 'row-body';
+    view.fields.forEach(function (f) {
+      if (f.primary) return;
+      var val = row[f.n];
+      var txt = f.t === 'date' ? dOnly(val) : valueText(val);
+      if (!txt) return;
+      var kv = document.createElement('div');
+      kv.className = 'kv' + (f.long ? ' full' : '');
+      var k = document.createElement('div');
+      k.className = 'kv-k';
+      k.textContent = f.n;
+      if (f.mono) {
+        var cp = document.createElement('button');
+        cp.className = 'mini cp';
+        cp.type = 'button';
+        cp.textContent = '复制';
+        cp.addEventListener('click', function () {
+          copyText(txt, cp);
+        });
+        k.appendChild(cp);
+      }
+      var v = document.createElement('div');
+      v.className = 'kv-v' + (f.mono ? ' mono' : '');
+      if (f.t === 'url' && val && val.link) {
+        var a = document.createElement('a');
+        a.href = val.link;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = val.text || val.link;
+        v.appendChild(a);
+      } else if (f.t === 'number' && f.unit === 'sec') {
+        v.textContent = durText(val);
+      } else {
+        v.textContent = txt + (f.unit && f.t === 'number' ? f.unit : '');
+      }
+      markBind(v, view.dbId);
+      kv.appendChild(k);
+      kv.appendChild(v);
+      body.appendChild(kv);
+    });
+    if (body.children.length) card.appendChild(body);
+
+    var ft = document.createElement('div');
+    ft.className = 'row-ft';
+    var edit = document.createElement('button');
+    edit.className = 'mini';
+    edit.setAttribute('data-edit', view.key + '|' + row._id);
+    edit.textContent = '编辑';
+    var del = document.createElement('button');
+    del.className = 'mini del';
+    del.setAttribute('data-del', view.key + '|' + row._id);
+    del.textContent = '删除';
+    ft.appendChild(edit);
+    ft.appendChild(del);
+    card.appendChild(ft);
+
+    return card;
+  }
+
+  /* ================= 表单层 ================= */
+  var LABELS = { pipeline: '片子', persona: '人设', workflow: '工作流' };
+
+  function optId(dbId, field, text) {
+    var list = (S.options[dbId] || {})[field] || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].text === text) return list[i].id;
+    }
+    return text;
+  }
+
+  function defaultsFor(viewKey, fieldName) {
+    var D = {
+      pipeline: { '当前环节': '待脚本', '优先级': 'P1', '尺寸模式': '竖屏 9:16' },
+      persona: { '类型': '客户 IP' },
+      workflow: { '可用状态': '调试中', '适用尺寸': '横竖通用' }
+    };
+    return (D[viewKey] || {})[fieldName] || '';
+  }
+
+  function openSheet(viewKey, record) {
+    var view = VIEWS[viewKey];
+    S.editing.view = view;
+    S.editing.record = record || null;
+    $('sheetTitle').textContent = (record ? '编辑' : '新建') + LABELS[viewKey];
+    $('sheetSave').textContent = record ? '保存修改' : '创建';
+    renderFields(view, record);
+    if (!record) restoreDraft(view);
+    $('mask').className = 'mask show';
+  }
+
+  function closeSheet() {
+    $('mask').className = 'mask';
+    S.editing.view = null;
+    S.editing.record = null;
+  }
+
+  function renderFields(view, record) {
+    var box = $('sheetFields');
+    box.innerHTML = '';
+    view.fields.forEach(function (f) {
+      var wrap = document.createElement('div');
+      wrap.className = 'field';
+      var lb = document.createElement('label');
+      lb.setAttribute('for', 'f_' + f.n);
+      lb.textContent = f.n;
+      wrap.appendChild(lb);
+
+      var val = record ? record[f.n] : null;
+      var el;
+
+      if (f.t === 'select') {
+        el = document.createElement('select');
+        var opts = (S.options[view.dbId] || {})[f.n] || [];
+        var cur = valueText(val);
+        var first = document.createElement('option');
+        first.value = '';
+        first.textContent = '请选择';
+        el.appendChild(first);
+        opts.forEach(function (o) {
+          var op = document.createElement('option');
+          op.value = o.id;
+          op.textContent = o.text;
+          if (o.text === cur) op.selected = true;
+          el.appendChild(op);
+        });
+        if (!record) {
+          var df = defaultsFor(view.key, f.n);
+          if (df) el.value = optId(view.dbId, f.n, df);
+        }
+      } else if (f.t === 'date') {
+        el = document.createElement('input');
+        el.type = 'date';
+        el.value = val ? dOnly(val) : (record ? '' : defaultDate(view.key, f.n));
+      } else if (f.t === 'number') {
+        el = document.createElement('input');
+        el.type = 'number';
+        el.value = (val === null || val === undefined) ? '' : val;
+      } else if (f.long) {
+        el = document.createElement('textarea');
+        el.value = valueText(val);
+      } else {
+        el = document.createElement('input');
+        el.type = 'text';
+        el.value = f.t === 'url' ? (val && val.link ? val.link : '') : valueText(val);
+      }
+
+      el.id = 'f_' + f.n;
+      el.name = f.n;
+      el.setAttribute('data-field', f.n);
+      wrap.appendChild(el);
+      box.appendChild(wrap);
+    });
+  }
+
+  function defaultDate(viewKey, fieldName) {
+    if (viewKey === 'pipeline' && fieldName === '截止日期') {
+      var d = new Date();
+      d.setDate(d.getDate() + 3);
+      return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+    }
+    if (fieldName === '更新时间') return todayStr();
+    return '';
+  }
+
+  var SLASH = '/';
+  function normUrl(v) {
+    var s = String(v || '').trim();
+    if (!s) return '';
+    var low = s.toLowerCase();
+    if (low.indexOf('http:') !== 0 && low.indexOf('https:') !== 0) {
+      s = 'https:' + SLASH + SLASH + s;
+    }
+    return s;
+  }
+
+  var draftTimer = null;
+  function cacheDraft() {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(function () {
+      var view = S.editing.view;
+      if (!view) return;
+      try {
+        var o = {};
+        view.fields.forEach(function (f) {
+          var el = $('f_' + f.n);
+          if (el && el.value) o[f.n] = el.value;
+        });
+        localStorage.setItem('wb_aiwb_draft_' + view.key, JSON.stringify(o));
+      } catch (e) { /* 本地存储不可用时静默降级 */ }
+    }, 300);
+  }
+
+  function clearDraft(viewKey) {
+    try { localStorage.removeItem('wb_aiwb_draft_' + viewKey); } catch (e) { }
+  }
+
+  function restoreDraft(view) {
+    try {
+      var raw = localStorage.getItem('wb_aiwb_draft_' + view.key);
+      if (!raw) return;
+      var o = JSON.parse(raw);
+      view.fields.forEach(function (f) {
+        var el = $('f_' + f.n);
+        if (el && o[f.n] !== undefined && o[f.n] !== '') el.value = o[f.n];
+      });
+    } catch (e) { }
+  }
+
+  function submitSheet(e) {
+    e.preventDefault();
+    var view = S.editing.view;
+    var record = S.editing.record;
+    if (!view) return;
+
+    var props = {};
+    var missing = '';
+    view.fields.forEach(function (f) {
+      var el = $('f_' + f.n);
+      if (!el) return;
+      var v = el.value;
+      if (f.t === 'text') {
+        if (f.primary && !String(v).trim() && !missing) missing = f.n;
+        props[f.n] = { text: String(v) };
+      } else if (f.t === 'number') {
+        if (v !== '') props[f.n] = { number: parseFloat(v) };
+      } else if (f.t === 'select') {
+        if (v) props[f.n] = { select: v };
+      } else if (f.t === 'date') {
+        if (v) props[f.n] = { date: v };
+      } else if (f.t === 'url') {
+        var u = normUrl(v);
+        if (u) props[f.n] = { url: { text: u, link: u } };
+      }
+    });
+
+    if (missing) { toast('「' + missing + '」不能为空', true); return; }
+
+    var btn = $('sheetSave');
+    btn.disabled = true;
+    btn.textContent = '提交中…';
+
+    var task = record
+      ? dbUpdate(view.key, record._id, props)
+      : dbAdd(view.key, props);
+
+    task.then(function () {
+      clearDraft(view.key);
+      closeSheet();
+      toast(record ? '已保存修改' : '已创建');
+      return reloadAll();
+    }).then(function () {
+      setSync('ok', '云端已同步');
+    }).catch(function (err) {
+      console.error('[database] 保存失败:', err);
+      toast('保存失败，请检查网络后重试', true);
+    }).then(function () {
+      btn.disabled = false;
+      btn.textContent = record ? '保存修改' : '创建';
+    });
+  }
+
+  /* ================= 交互动作 ================= */
+  function advance(recordId, next, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
+    db.updateRecord({
+      databaseId: 'X8kIjcmG94x2M0IAiIDJE3',
+      recordId: recordId,
+      properties: { '当前环节': { select: optId(DB.pipeline, '当前环节', next) } }
+    }).then(function () {
+      toast('已推进到「' + next + '」');
+      return reloadAll();
+    }).then(function () {
+      setSync('ok', '云端已同步');
+    }).catch(function (err) {
+      console.error('[database] 推进失败:', err);
+      if (btn) { btn.disabled = false; btn.textContent = '推进到「' + next + '」'; }
+      toast('推进失败，请重试', true);
+    });
+  }
+
+  function removeRecord(viewKey, recordId) {
+    var view = VIEWS[viewKey];
+    if (!window.confirm('删除后不可恢复，确定删除这条记录？')) return;
+    dbDelete(viewKey, recordId).then(function () {
+      toast('已删除');
+      return reloadAll();
+    }).catch(function (err) {
+      console.error('[database] 删除失败:', err);
+      toast('删除失败，请重试', true);
+    });
+  }
+
+  function findRecord(viewKey, recordId) {
+    var rows = S.data[viewKey] || [];
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i]._id === recordId) return rows[i];
+    }
+    return null;
+  }
+
+  function closestAttr(el, attr) {
+    while (el && el.getAttribute) {
+      if (el.getAttribute(attr) !== null) return el;
+      el = el.parentNode;
+    }
+    return null;
+  }
+
+  /* ================= 备份 / 恢复 / 示例 ================= */
+  var DEMO_KEY = 'wb_aiwb_demo_ids';
+
+  function rememberDemoIds() {
+    try {
+      if (localStorage.getItem(DEMO_KEY)) return;
+      var o = { pipeline: [], persona: [], workflow: [] };
+      ['pipeline', 'persona', 'workflow'].forEach(function (k) {
+        o[k] = (S.data[k] || []).map(function (r) { return r._id; });
+      });
+      localStorage.setItem(DEMO_KEY, JSON.stringify(o));
+    } catch (e) { }
+  }
+
+  function exportBackup() {
+    var payload = {
+      app: 'jiebin-ai-shortvideo-workbench',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      data: { pipeline: S.data.pipeline, persona: S.data.persona, workflow: S.data.workflow }
+    };
+    try {
+      var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'AI短视频作战台备份-' + todayStr() + '.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1500);
+      toast('备份已导出到下载目录');
+    } catch (e) {
+      toast('导出失败，请换个浏览器试试', true);
+    }
+  }
+
+  function importBackup(file) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var obj = null;
+      try { obj = JSON.parse(String(reader.result)); } catch (e) { }
+      if (!obj) { toast('文件格式不对，无法解析', true); return; }
+      var data = obj.data ? obj.data : obj;
+      var keys = ['pipeline', 'persona', 'workflow'];
+      var total = 0;
+      keys.forEach(function (k) {
+        if (data && data[k] && data[k].length) total += data[k].length;
+      });
+      if (!total) { toast('备份里没有可导入的记录', true); return; }
+      if (!window.confirm('将把备份中的 ' + total + ' 条记录追加到云端，不会覆盖现有数据。继续？')) return;
+
+      setSync('', '导入中');
+      var jobs = [];
+      keys.forEach(function (k) {
+        (data[k] || []).forEach(function (row) {
+          var props = {};
+          VIEWS[k].fields.forEach(function (f) {
+            var v = row[f.n];
+            if (v === null || v === undefined || v === '') return;
+            if (f.t === 'text') props[f.n] = { text: valueText(v) };
+            else if (f.t === 'number') props[f.n] = { number: Number(v) };
+            else if (f.t === 'select') props[f.n] = { select: valueText(v) };
+            else if (f.t === 'date') props[f.n] = { date: dOnly(v) };
+            else if (f.t === 'url') props[f.n] = { url: (v && v.link) ? v : { text: v, link: v } };
+          });
+          jobs.push(dbAdd(k, props));
+        });
+      });
+
+      Promise.all(jobs).then(function () {
+        toast('已导入 ' + jobs.length + ' 条记录');
+        return reloadAll();
+      }).then(function () {
+        setSync('ok', '云端已同步');
+      }).catch(function (err) {
+        console.error('[database] 导入失败:', err);
+        setSync('err', '导入异常');
+        toast('部分记录导入失败，请检查后重试', true);
+      });
+    };
+    reader.readAsText(file);
+  }
+
+  function clearDemo() {
+    var ids = null;
+    try { ids = JSON.parse(localStorage.getItem(DEMO_KEY) || 'null'); } catch (e) { }
+    var total = 0;
+    if (ids) {
+      ['pipeline', 'persona', 'workflow'].forEach(function (k) {
+        total += (ids[k] || []).length;
+      });
+    }
+    if (!total) { toast('当前数据都是正式数据，没有示例标记。要删某条请进卡片详情删除。', true); return; }
+    if (!window.confirm('将删除 ' + total + ' 条预置示例数据（不含你后来自己加的），删除后不可恢复。继续？')) return;
+
+    setSync('', '清理中');
+    var jobs = [];
+    ['pipeline', 'persona', 'workflow'].forEach(function (k) {
+      (ids[k] || []).forEach(function (rid) {
+        jobs.push(dbDelete(k, rid));
+      });
+    });
+    Promise.all(jobs).then(function () {
+      try { localStorage.removeItem(DEMO_KEY); } catch (e) { }
+      toast('示例数据已清空');
+      return reloadAll();
+    }).then(function () {
+      setSync('ok', '云端已同步');
+    }).catch(function (err) {
+      console.error('[database] 清理失败:', err);
+      setSync('err', '清理异常');
+      toast('部分示例数据未能删除', true);
+    });
+  }
+
+  /* ================= 事件绑定 ================= */
+  function bindEvents() {
+    $('tabs').addEventListener('click', function (e) {
+      var btn = closestAttr(e.target, 'data-tab');
+      if (!btn) return;
+      var key = btn.getAttribute('data-tab');
+      var tabs = $('tabs').querySelectorAll('.tab');
+      for (var i = 0; i < tabs.length; i++) {
+        tabs[i].className = 'tab' + (tabs[i].getAttribute('data-tab') === key ? ' is-active' : '');
+      }
+      ['pipeline', 'persona', 'workflow'].forEach(function (k) {
+        $('panel-' + k).className = 'panel' + (k === key ? ' is-active' : '');
+      });
+    });
+
+    document.addEventListener('click', function (e) {
+      var add = closestAttr(e.target, 'data-add');
+      if (add) { openSheet(add.getAttribute('data-add'), null); return; }
+
+      var edit = closestAttr(e.target, 'data-edit');
+      if (edit) {
+        var p = edit.getAttribute('data-edit').split('|');
+        var rec = findRecord(p[0], p[1]);
+        if (rec) openSheet(p[0], rec);
+        return;
+      }
+
+      var del = closestAttr(e.target, 'data-del');
+      if (del) {
+        var q = del.getAttribute('data-del').split('|');
+        removeRecord(q[0], q[1]);
+        return;
+      }
+    });
+
+    $('todayList').addEventListener('click', function (e) {
+      var btn = closestAttr(e.target, 'data-advance');
+      if (!btn) return;
+      advance(btn.getAttribute('data-advance'), btn.getAttribute('data-next'), btn);
+    });
+
+    $('sheetForm').addEventListener('submit', submitSheet);
+    $('sheetForm').addEventListener('input', cacheDraft);
+    $('sheetForm').addEventListener('change', cacheDraft);
+    $('sheetClose').addEventListener('click', closeSheet);
+    $('sheetCancel').addEventListener('click', closeSheet);
+    $('mask').addEventListener('click', function (e) {
+      if (e.target === $('mask')) closeSheet();
+    });
+
+    $('btnExport').addEventListener('click', exportBackup);
+    $('btnImport').addEventListener('click', function () { $('fileInput').click(); });
+    $('fileInput').addEventListener('change', function () {
+      if (this.files && this.files[0]) importBackup(this.files[0]);
+      this.value = '';
+    });
+    $('btnClearDemo').addEventListener('click', clearDemo);
+  }
+
+  function subscribe() {
+    if (!db || typeof db.onUpdated !== 'function') return;
+    var timer = null;
+    db.onUpdated(function (payload) {
+      var ids = (payload && payload.databaseIds) || [];
+      var hit = false;
+      [DB.pipeline, DB.persona, DB.workflow].forEach(function (id) {
+        if (ids.indexOf(id) > -1) hit = true;
+      });
+      if (!hit) return;
+      clearTimeout(timer);
+      timer = setTimeout(function () { reloadAll(); }, 300);
+    });
+  }
+
+  /* ================= 启动 ================= */
+  function boot() {
+    bindEvents();
+    renderToday();
+
+    if (!db) {
+      setSync('err', '离线模式');
+      S.ready = true;
+      renderAll();
+      toast('没连上资料库，当前只能查看，无法保存', true);
+      return;
+    }
+
+    setSync('', '同步中');
+    Promise.all([loadSchema(DB.pipeline), loadSchema(DB.persona), loadSchema(DB.workflow)])
+      .then(function () { return reloadAll(); })
+      .then(function () {
+        setSync('ok', '云端已同步');
+        subscribe();
+      });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();
+</script>
+</body>
+</html>

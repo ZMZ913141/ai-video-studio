@@ -123,8 +123,19 @@ BASE_TEMPLATE = {
 
 # 总档位置。刻意放在不属于任何单个 IP 的地方，
 # 这样每个 IP 目录里的脚本副本都能找到同一份册子。
-# 想换位置：export IP_REGISTRY=/path/to/IP总档.json
-REGISTRY = os.environ.get("IP_REGISTRY") or "/cfu/洁斌资产/IP总档.json"
+# 想换位置：export IP_REGISTRY=/path/to/registry.json
+#
+# ⚠️ 2026-10-28 改：原默认值 `/cfu/洁斌资产/IP总档.json`（旧位置）。迁移到
+#   ai-video-studio 后总册是项目根的 `registry.json`。旧的默认值有两个问题：
+#     ① 旧目录清理后会变成死链，直接跑本脚本会往不存在的路径写；
+#     ② 更隐蔽的：vstudio.py 通过 IP_REGISTRY 环境变量指路，但任何人**直接**
+#        跑 newip.py（不经 CLI）时仍会写进旧册 → 两份总册分叉，新建的 IP 在
+#        CLI 里查不到。（S05 建档前实测踩到过，旧册被写入脏数据。）
+#   现在默认值直接指向项目册，按本文件位置反推（profiles/<IP>/03_生产脚本/ → 上三层）。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+REGISTRY = os.environ.get("IP_REGISTRY") or os.path.normpath(
+    os.path.join(_HERE, "..", "..", "..", "registry.json")
+)
 
 
 def _norm(s):
