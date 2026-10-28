@@ -21,7 +21,7 @@
   "ips": [
     {
       "name": "陈洁斌主号",
-      "path": "/home/qmr/github/ai-video-studio/profiles/陈洁斌主号",
+      "path": "/cfu/ai视频档案库/陈洁斌主号",
       "tag": "S",
       "space": "洁斌资产",
       "aliases": [
@@ -56,5 +56,10 @@
     "  }",
     "aliases 很关键：用户口头叫的常常是人名/昵称，而目录名是品牌名。",
     "没有别名，按口头名字搜不到已有工作区 → 又建一个重复目录。"
-  ]
+  ],
+  "_archive": {
+    "_说明": "档案存储区。每个 IP 一个子目录（card.json + ip.json + 01~08 + 资产/）。引擎代码在项目里，档案不进 git。换位置改 vstudio.py 的 PROFILES 或设 STUDIO_ARCHIVE。",
+    "path": "/cfu/ai视频档案库",
+    "layout": "{IP名}/{card.json, ip.json, 01_人设与规范/, 02_素材真值/, 03_生产脚本/, 04_验收工具/, 05_文案/, 06_音频/, 07_成片/, 08_过程/, 资产/}"
+  }
 }

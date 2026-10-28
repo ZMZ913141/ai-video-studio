@@ -30,11 +30,18 @@ import sys
 from datetime import datetime
 
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(BIN_DIR)                      # 项目根
+ROOT = os.path.dirname(BIN_DIR)                      # 项目根（引擎代码，进 git）
 REGISTRY = os.path.join(ROOT, "registry.json")       # 总册：谁有档案卡
-PROFILES = os.path.join(ROOT, "profiles")            # 档案卡目录（一人一张）
 TEMPLATE = os.path.join(ROOT, "templates", "card.template.json")
 INDEX_FILE = os.path.join(ROOT, "jobs.index.json")
+
+# ★ 档案存储区 —— 与引擎分家，2026-10-28 定
+#   结构：/cfu/ai视频档案库/<IP名>/{card.json, ip.json, 01~08/, 资产/}
+#   为什么档案不放项目里：一套片子 500M+，项目目录会随出片数量线性膨胀，
+#   而且素材/成片是二进制，放 git 仓库边上迟早被误提交。
+#   现在项目只留引擎（代码/文档/模板），档案全在生产盘，一人一个目录互不干扰。
+#   换盘/换位置：export STUDIO_ARCHIVE=/别的/路径（不设则用下面的默认值）
+PROFILES = os.environ.get("STUDIO_ARCHIVE") or "/cfu/ai视频档案库"
 
 # 生产阶段（顺序即流程，对齐 README 的开工顺序）
 STAGES = ["文案", "音频", "视频", "后期", "字幕", "验收", "交付"]
