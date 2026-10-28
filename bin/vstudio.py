@@ -746,6 +746,31 @@ def cmd_pipeline(a):
     # pipeline.main 内部 sys.exit，这里只是兜底
 
 
+def cmd_batch(a):
+    """批量出片 —— 转发给 bin/batch.py
+
+    ★ 这里的参数表跟 batch.py 里那份是同一个意思，转发而不是重写逻辑：
+      批量跑的是 `vstudio pipeline` 子进程，参数语义必须完全一致，
+      否则「批量和单条出的片不一样」这种鬼问题会查很久。
+    """
+    import batch
+    argv = []
+    if getattr(a, "ip", ""):
+        argv.append(a.ip)
+    for k, flag in (("queue", "--queue"), ("topics", "--topics"),
+                    ("sets", "--sets"), ("tier", "--tier"),
+                    ("start", "--from"), ("end", "--to")):
+        v = getattr(a, k, "")
+        if v:
+            argv += [flag, str(v)]
+    if getattr(a, "limit", 0):
+        argv += ["--limit", str(a.limit)]
+    for k in ("dry", "force", "stop_on_error", "no_guard", "json"):
+        if getattr(a, k, False):
+            argv.append("--" + k.replace("_", "-"))
+    sys.exit(batch.main(argv))
+
+
 def cmd_prompts(a):
     """提示词工作台 —— 转发给 bin/prompts.py"""
     import prompts
@@ -1058,6 +1083,22 @@ def main():
     p.add_argument("--reseed", action="store_true",
                    help="换一个新种子（同一套提示词再赌一次画面）")
     p.set_defaults(func=cmd_pipeline)
+
+    p = sub.add_parser("batch", help="批量出片：一份队列串行出多条（GPU 独占，不能并行）")
+    p.add_argument("ip", nargs="?", default="")
+    p.add_argument("--queue", help="队列文件（JSON），格式见 bin/batch.py 顶部")
+    p.add_argument("--topics", default="", help="快捷方式：分号分隔的选题 '甲;乙;丙'")
+    p.add_argument("--sets", default="", help="配 --topics 用，逗号分隔的套次名")
+    p.add_argument("--tier", default="")
+    p.add_argument("--from", dest="start", default="")
+    p.add_argument("--to", dest="end", default="")
+    p.add_argument("--dry", action="store_true")
+    p.add_argument("--force", action="store_true")
+    p.add_argument("--stop-on-error", action="store_true")
+    p.add_argument("--no-guard", action="store_true")
+    p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_batch)
 
     p = sub.add_parser("prompts", help="提示词工作台（AI 生成/优化/微调，过红线才落盘）")
     p.add_argument("ip", nargs="?", default="洁斌")

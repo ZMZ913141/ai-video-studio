@@ -1493,6 +1493,64 @@ function showNextStepHint(rr) {
 }
 
 /* 手填（保留原表单，AI 不可用时也不堵路） */
+function showBatch() {
+  // 复用后端 build_exec 的 batch 分支：前端只组 payload（ip / topics / sets / tier / dry / stop_on_error），
+  // 真正拼命令、串行跑、写报告都在后端。点「开始批量」走 startExec —— 它会在吃 GPU 时弹二次确认。
+  const ips = state.ips || [];
+  if (!ips.length) return toast('还没有 IP', '先去「新建档案卡」接一个客户', 'err');
+  const opts = ips.map(i =>
+    `<option value="${esc(i.name)}"${i.name === state.ip ? ' selected' : ''}>${esc(i.name)}</option>`).join('');
+  $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('layers')} 批量出片</b>
+      <span class="sub">一份队列 · 串行（GPU 只有一个）</span>
+      <div class="spacer"></div><button class="btn icon" id="mclose">${ico('close')}</button></div>
+    <div class="form-grid">
+      <label class="field"><span>IP / 账号 *</span>
+        <select id="bIp">${opts}</select></label>
+      <label class="field"><span>档位</span>
+        <select id="bTier">
+          <option value="">默认（配置）</option>
+          <option value="fast">fast · 快速档</option>
+          <option value="pilot">pilot · 试跑</option>
+          <option value="std">std · 标准</option>
+          <option value="high">high · 高清</option>
+        </select></label>
+    </div>
+    <label class="field" style="margin-top:6px"><span>选题（每行一条，逐条 AI 写文案 + 出片）</span>
+      <textarea id="bTopics" class="brief-area" style="min-height:120px"
+        placeholder="为什么我不用真人出镜&#10;一条片子到底多少钱&#10;AI 分身会不会显得假"></textarea>
+      <span class="hint">套次号不写就按这个 IP 现有最大编号往后顺排（S05 之后即 S06）。</span></label>
+    <label class="field" style="margin-top:6px"><span>套次号（可选，逗号分隔，数量须与选题一致）</span>
+      <input id="bSets" placeholder="留空 = 自动顺排；要写就和上面行数对齐"></label>
+    <div class="chk-row" style="margin:12px 0 4px">
+      <label class="chk"><input type="checkbox" id="bDry"> ${ico('eye')} 先看计划（只算要出哪些，不真烧 GPU）</label>
+      <label class="chk"><input type="checkbox" id="bStop"> ${ico('alert')} 某条失败就停（默认继续跑剩下的）</label>
+    </div>
+    <div class="hint" style="margin-bottom:12px">批量是排队不是并发：这台机器一块 4080S，并行只会撞 OOM 被内核杀。
+      一条接一条出，结束给汇总报告（写在 08_过程/batch-*.json）。</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn ghost" id="mclose2">取消</button>
+      <button class="btn primary" id="bGo">${ico('play')} 开始批量</button></div>`;
+  $('#modal').classList.add('show');
+  $('#mclose').onclick = $('#mclose2').onclick = closeModal;
+  $('#bGo').onclick = () => {
+    const ip = ($('#bIp').value || '').trim();
+    const topics = ($('#bTopics').value || '').split('\n').map(t => t.trim()).filter(Boolean);
+    if (!ip) return toast('先选个 IP', '', 'err');
+    if (!topics.length) return toast('至少写一条选题', '每行一条', 'err');
+    const sets = ($('#bSets').value || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (sets.length && sets.length !== topics.length)
+      return toast('套次号数量对不上', `选题 ${topics.length} 条，套次号 ${sets.length} 个`, 'err');
+    const payload = {
+      kind: 'batch', ip, topics: topics.join(';'),
+      tier: ($('#bTier').value || '').trim(),
+      dry: $('#bDry').checked, stop_on_error: $('#bStop').checked,
+    };
+    if (sets.length) payload.sets = sets.join(',');
+    closeModal();
+    startExec(payload);
+  };
+}
+
 function showNewCardManual(prefill, fromDraft) {
   $('#modalBox').innerHTML = `<div class="modal-head"><b>${ico('plus')} 新建档案卡</b>
       <span class="sub">手填</span>
@@ -1900,6 +1958,7 @@ function bind() {
   // 中栏按钮：hero 里的三个 + overview 里的自检
   document.addEventListener('click', async e => {
     if (e.target.closest('#btnSettings')) return void openTab('settings');
+    if (e.target.closest('#btnBatch')) return void showBatch();
     if (e.target.closest('#btnNewCard')) return void showNewCard();
     if (e.target.closest('#hNewSet')) return void showNewSet();
     if (e.target.closest('#btnFontApply')) return void saveFont();

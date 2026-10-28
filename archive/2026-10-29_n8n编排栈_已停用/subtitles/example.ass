@@ -1,0 +1,15 @@
+[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+WrapStyle: 2
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, BackColour, Bold, Italic, Alignment, MarginL, MarginR, MarginV, Outline, Shadow
+Style: Default,Noto Sans CJK SC,72,&H00FFFFFF,&H00000000,1,0,2,60,60,80,3,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,这是用 ffmpeg + ASS 烧录的硬字幕
+Dialogue: 0,0:00:03.00,0:00:06.50,Default,,0,0,0,,字体、颜色、位置全部可控
+Dialogue: 0,0:00:06.50,0:00:10.00,Default,,0,0,0,,把它替换成你的 SRT 用工具转成 ASS 即可

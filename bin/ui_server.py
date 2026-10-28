@@ -691,6 +691,30 @@ def build_exec(b, want_result=False):
         if not _valid_set(ip, setname):
             raise ValueError(f"{ip} 下没有套次 {setname}")
 
+    if kind == "batch":
+        # 批量：不需要先有套次（编号会顺排），但必须有 IP —— 片子总归是某个人的。
+        # 选题一行一条，前端拼成 '甲;乙;丙' 传进来。
+        # ★ tier 给 2：这是「一口气烧几十分钟 GPU」的动作，必须二次确认。
+        topics = [t.strip() for t in (b.get("topics") or "").split(";") if t.strip()]
+        if not topics:
+            raise ValueError("一条选题都没有（每行一条）")
+        argv = ["bin/vstudio.py", "batch", ip, "--topics", ";".join(topics)]
+        sets = [s.strip() for s in (b.get("sets") or "").split(",") if s.strip()]
+        if sets:
+            argv += ["--sets", ",".join(sets)]
+        tier = (b.get("tier") or "").strip()
+        if tier:
+            if tier not in ("fast", "pilot", "std", "high"):
+                raise ValueError(f"不认识的档位：{tier}")
+            argv += ["--tier", tier]
+        if b.get("dry"):
+            argv.append("--dry")
+        if b.get("stop_on_error"):
+            argv.append("--stop-on-error")
+        return (argv, f"批量出片 {ip} · {len(topics)} 条"
+                      + ("（先看计划）" if b.get("dry") else ""),
+                1 if b.get("dry") else 2, False)
+
     if kind == "pipeline":
         need_set()
         argv = ["bin/vstudio.py", "pipeline", ip, setname]
