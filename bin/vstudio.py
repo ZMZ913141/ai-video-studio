@@ -793,7 +793,7 @@ def cmd_algo(a):
           f"  单段上限 {p['maxlen']}")
     print(f"  {p['segs']} 段  格数 {'/'.join(str(x) for x in p['grid'])}"
           f"  切点 {p['cuts_sec']}")
-    print(f"  段长 {p['seg_sec']}   配乐 {p['bgm_gain']} dB")
+    print(f"  段长 {p['seg_sec']}   配乐低人声 {p['bgm_offset']} LU")
     print(f"\n  SEG_GRID={','.join(str(x) for x in p['grid'])}"
           f"  （手动锁定时用；不传则由脚本按停顿自适应）")
 

@@ -163,14 +163,15 @@
         "{graded}",
         "{bgm}",
         "{dir07}/{jid}_成片_混音_{audio_dur}s.mp4",
-        "{bgm_gain}"
+        "{bgm_offset}"
       ],
       "out_glob": "{dir07}/{jid}_成片_混音_{audio_dur}s.mp4",
       "set_var": "mixed",
       "depends": [
         "graded",
         "bgm"
-      ]
+      ],
+      "_argv_note": "第 4 个参数是「配乐比人声低几 LU」，不是 dB 增益。绝对增益由 mix_bgm 实测人声/配乐响度反算，见该文件头 ④。"
     },
     {
       "id": "ass",

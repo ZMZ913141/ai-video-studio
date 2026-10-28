@@ -53,7 +53,15 @@ def load_cfg():
 
 # ---------------- 小工具 ----------------
 def newest(pattern):
-    fs = [p for p in glob.glob(pattern) if os.path.isfile(p)]
+    """最新的产物文件。★ 0 字节的不算产物。
+
+    为什么：ffmpeg 失败时会**先把输出文件建出来**再报错退出，
+    留下一个 0 字节的空壳。下一轮断点续跑看到"文件在"就跳过，
+    于是拿着空壳去烧字幕 —— 报错看着像字幕脚本的问题，实际源头是空壳。
+    （2026-10-28 23:53 就在这条上卡了一次）
+    """
+    fs = [p for p in glob.glob(pattern)
+          if os.path.isfile(p) and os.path.getsize(p) > 0]
     return max(fs, key=os.path.getmtime) if fs else None
 
 
@@ -191,7 +199,7 @@ class Pipeline:
         c["grid"] = ",".join(str(x) for x in p["grid"])
         c["plan_json"] = json.dumps(p, ensure_ascii=False)
         c["pad_head"], c["pad_tail"] = p["pad_head"], p["pad_tail"]
-        c["bgm_gain"] = str(p["bgm_gain"])
+        c["bgm_offset"] = str(p["bgm_offset"])
         if self.opt_grid:
             c["grid"] = self.opt_grid
         self.log["plan"] = p
@@ -300,6 +308,19 @@ class Pipeline:
         if rc != 0:
             rec["status"] = "failed" if not st.get("optional") else "warn"
             rec["error"] = f"退出码 {rc}"
+            # ★ 把这一步**刚生成的空壳产物**清掉。否则下一轮 --from 会把它
+            #   当成"已有产物"跳过，然后拿着 0 字节文件往下跑。
+            #   只删本步时间窗内新建的、且属于本步 out_glob 的文件，不碰旧文件。
+            if out:
+                for f in glob.glob(out):
+                    try:
+                        if os.path.isfile(f) and os.path.getmtime(f) >= rec["t0"] - 1:
+                            sz = os.path.getsize(f)
+                            os.remove(f)
+                            print(f"    清掉本步产生的半成品：{os.path.basename(f)}"
+                                  f"（{sz} 字节）")
+                    except OSError:
+                        pass
             if st.get("optional"):
                 print(f"  ⚠ {sid} 报问题（rc={rc}）—— 这是**验收**步骤，"
                       f"不影响成片，但结论要看一眼")
@@ -357,6 +378,25 @@ class Pipeline:
         return rc
 
     # -------- 跑全流程 --------
+    def seed_from_disk(self):
+        """按步骤顺序，把**已经存在**的产物路径填回 ctx。
+
+        为什么需要：`--from mix` 这种从中间接手时，前面的步骤根本没被执行，
+        没人给 ctx["graded"] 赋值 → mix 报「模板变量未解析：['graded']」，
+        可文件明明就躺在 07_成片 里。这不是缺前置，是断点续跑只认"跑过的"、
+        不认"已经在的"。文件系统才是真相来源，所以这里按 out_glob 回填。
+        """
+        for st in self.cfg.get("steps", []):
+            var = st.get("set_var")
+            if not var or var in self.ctx or not st.get("out_glob"):
+                continue
+            miss = set()
+            out = render(st["out_glob"], self.ctx, miss)
+            if out and not miss:
+                hit = newest(out)
+                if hit:
+                    self.ctx[var] = hit
+
     def run(self, start=None, end=None):
         steps = self.cfg.get("steps", [])
         ids = [s["id"] for s in steps]
@@ -366,6 +406,7 @@ class Pipeline:
             sys.exit(f"✗ --to {end} 不在步骤里（可选 {'/'.join(ids)}）")
         i0 = ids.index(start) if start else 0
         i1 = ids.index(end) + 1 if end else len(steps)
+        self.seed_from_disk()
 
         p = self.log["plan"]
         print(f"{self.e['name']} · {self.set}   档位 {self.tier} "
@@ -375,7 +416,7 @@ class Pipeline:
               f"  单段上限 {p['maxlen']} 帧  格数 {p['grid']}")
         if self.ctx.get("pad_head"):
             print(f"  音频留白 前 {self.ctx['pad_head']}s / 后 {self.ctx['pad_tail']}s"
-                  f"  配乐 {self.ctx['bgm_gain']} dB")
+                  f"  配乐比人声低 {self.ctx['bgm_offset']} LU")
         if not self.script_txt:
             print("  ⚠ 没找到文案 txt —— tts/srt 两步会失败")
 

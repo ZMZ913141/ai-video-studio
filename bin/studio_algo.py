@@ -140,13 +140,20 @@ def audio_pads(sec):
     return round(head, 3), round(tail, 3)
 
 
-def bgm_gain(sec):
-    """配乐相对人声的垫底增益（dB）。片子越长配乐越往后退，避免听久了压人声。"""
-    g = -6.0
+def bgm_offset(sec):
+    """配乐要比人声**低多少 LU**（不是绝对增益）。
+
+    2026-10-28 晚改：原来是固定 -6 dB 的绝对增益，前提是「配乐响度都差不多」，
+    而实际素材从 -12 到 -24 LUFS 都有。S05 就是 配乐 -12.3 / 人声 -27.7，
+    垫 -6 之后配乐还压人声 9 LU，用户听到的是「BGM 大声、人声小」。
+    现在只声明相对关系，绝对增益由 mix_bgm 实测两边响度后反算。
+    片子越长留的空间越大，避免听久了累。
+    """
+    g = 13.0
     if sec > 90:
-        g = -8.0
+        g = 17.0
     elif sec > 45:
-        g = -7.0
+        g = 15.0
     return g
 
 
@@ -179,7 +186,7 @@ def plan(audio_sec, mp=1.26, target_segs=None, target_seg_secs=8.0, overlap=5):
         "pad_head": head,
         "pad_tail": tail,
         "padded_sec": round(audio_sec + head + tail, 2),
-        "bgm_gain": bgm_gain(audio_sec),
+        "bgm_offset": bgm_offset(audio_sec),
     }
 
 

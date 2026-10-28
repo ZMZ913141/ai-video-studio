@@ -194,9 +194,68 @@ $V pipeline 洁斌 S05 --dry             # 只打印命令，不执行
 - 段数按目标段长（默认 8s）自适应，切点天生落在 17 的倍数上
 - 音频前后自动留白（前 ~0.28s / 后 ~0.56s，随片长浮动）——**SRT 是在留白后的音频上做的，
   所以字幕时间轴自动带上偏移，不用再挪**
-- 配乐增益随片长后退（>45s −7dB，>90s −8dB）
+- 配乐**比人声低多少 LU**（<45s：13 LU / >45s：15 / >90s：17）——
+  注意这是**相对关系**，不是固定 dB。绝对增益由 `mix_bgm.py` 实测两边响度后反算，
+  再叠一层 sidechain 鸭子压缩（人声一响配乐自动退 6~9 dB）。
+  旧写法固定 −6 dB 的前提是"所有配乐响度差不多"，S05 就翻车了：
+  配乐 −12.3 LUFS、人声 −27.7 LUFS，垫完配乐还压人声 9 LU → 用户听到"BGM 大声、人声小"。
 
 流程定义全在 `config/pipeline.json`，**改它就是改流程**，改完先 `--dry` 跑一次。
+
+---
+
+## 三之三、模型链与工作流弹性（2026-10-28 定板）
+
+H3 的模型配置**只写在档案卡**（`ip.json` 的 `video.*`），`gen_video.py` 只是读它：
+
+| 字段 | 现值（陈洁斌主号） | 说明 |
+|---|---|---|
+| `video.unet` | `Minimax-h3/minimax_h3_ref2va_pruned_int8_convrot.safetensors` | ref2va 底座 |
+| `video.clip` | `qwen3vl_32b_minimax_h3_int8_convrot.safetensors` | 与 ref2va 配套，不能配 nvfp4 |
+| `video.lora.name` | `minimax_h3/dmad_minimax_h3_4step_full_critic_comfyui.safetensors` | ⚠ 是 **dmad_** 不是 dmd_ |
+| `video.lora.strength` | `1.0` | 写 `none` 就整个跳过 LoRA 节点 |
+| `video.sage_attention` | `auto` | 节点类名是 `PathchSageAttentionKJ`（源码就拼错） |
+| `video.steps` | `8` | BasicScheduler simple / denoise 1.0 |
+
+**节点顺序必须是 `UNET → LoRA → Sage → 低显存分块 → (调度器 + 采样器)`**：
+LoRA 改权重所以紧跟 UNET；Sage 改 attention 实现；低显存分块必须在最外层，
+否则它切出来的 attention 会被 Sage 覆盖，分块白挂、显存照样爆。
+**调度器和采样器必须吃同一个 model 引用**，只给采样器挂补丁 = 补丁不生效。
+
+### 换人 / 换背景 / 换台词（用户要的方向）
+
+这条链本质是「参考图 + 锁定音频 + 时间轴」驱动，所以三种业务都是改参数不是改代码：
+
+| 业务 | 改哪里 | 不用动代码 |
+|---|---|---|
+| 换台词 | `05_文案/<套次>/*.txt` 改完重跑 `tts → srt → video` | ✓ |
+| 换背景 | 换 `02_素材真值/` 的静帧（`ip.json` 的 `visual.still`） | ✓ |
+| 换人 | 换静帧，或在 `video.graph_overrides` 里把 84 号节点的 `lora_name` 换成 `minimax_h3_head_swap_v1.0_r32` | ✓ |
+
+`video.graph_overrides` 是给后续新工作流留的口子：`{"节点id": {"输入名": 值}}`
+会直接合并进提交给 ComfyUI 的 graph。引擎不认识具体业务，只负责合并。
+节点 id：`82`UNET `84`LoRA `85`Sage `83`低显存 `9`调度器 `30`采样器 `47`分辨率。
+
+---
+
+## 三之四、这四个坑都真踩过（别再花同样的时间）
+
+1. **长任务被"挂起"而不是"卡死"**：跑超过前台超时的命令，外层会把整个进程组挂起，
+   子进程（ffmpeg / python）全部停在 `STAT=T`（`WCHN=do_signal_stop`），
+   CPU 0%、没有任何报错 —— 看起来像死锁，其实是进程被 SIGTSTP 按了暂停键。
+   **判据：`ps -o stat` 是 `T` 就 kill -CONT 再 kill，别去查 I/O。**
+   对策：媒体类长命令（出片/混音/验收抽帧）**一开始就用后台方式启动**；
+   脚本里仍然要加 `-nostdin`（非交互环境下 ffmpeg 读 stdin 本来就没意义，
+   加了少一类隐患）。
+2. **`DRY=0` 也会干跑**：`os.environ.get("DRY")` 对字符串 `"0"` 是真值 →
+   只打印提示词、不出片、还返回 0（看着像成功）。判据已统一成
+   `not in ("", "0", "false", "off", "no")`。
+3. **失败步骤会留 0 字节空壳**：ffmpeg 失败前先建输出文件，下一轮断点续跑
+   看到"文件在"就跳过，然后拿空壳去烧字幕。现在 `newest()` 忽略 0 字节，
+   失败时还会清掉本步时间窗内生成的半成品。
+4. **`--from` 断点续跑只认"跑过的"，不认"已经在的"**：从 `mix` 接手时前面的
+   `graded` 变量没人赋值 → 报"模板变量未解析"。现在启动时按 `out_glob` 回填
+   （文件系统才是真相来源）。
 
 ---
 
