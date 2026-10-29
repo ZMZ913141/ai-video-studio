@@ -74,6 +74,12 @@ python3 bin/vstudio.py llm ...          # 不，文案走 studio_ai
 
 - 出来的是**样稿**，先看味道；满意了再点「采用」落盘到 `05_文案/<套次>/`。
 - 已有文案**不会被覆盖**：批量重跑时如果这套已经有稿子且没给新选题，就沿用。
+- **落盘的文件名固定是 `<套次号>_字幕文本.txt`**（如 `M01_字幕文本.txt`）：
+  目录名带标题（`05_文案/M01_老王的第一条…/`）是给人看的，**文件名只带套次号是给脚本看的**
+  —— `batch.py` / `gen_tts.py` 都按这个格式找稿子。名字写歪了，批量出片会一片空白且不报错。
+- **客户的稿子默认不出本机**。客户 IP 的 `card.json` 里 `policy.allow_cloud_llm=false`，
+  点「写文案」会被拦（这是对的）。三条出路：改卡里那个开关、临时加
+  `STUDIO_ALLOW_CLOUD=1`、或等本地模型接进路由。真客户别图省事改开关。
 
 ---
 
@@ -226,12 +232,49 @@ python3 bin/vstudio.py batch 王总财经 --topics "甲;乙" --stop-on-error  # 
 
 ---
 
-## 10. 文件去哪了
+## 10. 前端按钮自测（改完前端必做）
+
+**静态扫 HTML 没用**：看板里绝大多数按钮是 `app.js` 动态生成的，
+扫源码只能看到 16 个冰山一角。真点一遍才知道点了会不会有反应。
+
+工具在 `.cache/uiprobe/`（已 gitignore）：
+
+| 脚本 | 干什么 |
+|---|---|
+| `domprobe.js` | 首屏全部按钮真点一遍（干净状态，最快） |
+| `deep.js` | 切 tab × 每个 IP × 每个套次，逐个上下文重扫 |
+| `loop.js` | 完整闭环：写文案 → 等 AI → 「写进这套片子」→ 验证落盘 |
+| `create.js` / `newset.js` | 走前端表单建档 / 建套次 |
+
+跑法（另开一个终端起看板，用 `--force` 绕开「已有一个实例」守卫）：
+
+```bash
+python3 bin/ui_server.py --port 8798 --force &
+NODE_PATH=/home/qmr/.workbuddy/binaries/node/workspace/node_modules \
+  node .cache/uiprobe/deep.js http://127.0.0.1:8798
+```
+
+判定分四档：`api-ok`（点了调了接口）/ `reacted`（界面变了）/ `silent`（毫无反应，**要查**）/
+`js-error`（抛异常，**要查**）。
+
+**坑（都是实测踩的）**：
+- 本沙箱里 **Chromium 一访问看板就崩**（`ERR_INSUFFICIENT_RESOURCES`），
+  headless_shell 也被 SIGKILL → **用 jsdom，别用真浏览器**。
+- jsdom 里 `fetch` 要**真转发到后端**，不能用 mock：mock 返回空对象，
+  前端拿到 `undefined` 直接崩，测不出真问题。
+- 点按钮前**重新从文档里找元素**（按 id）：前端点完常重建 DOM，
+  拿旧引用 click 会打在孤儿节点上 → 假的「毫无反应」。
+- **每个上下文之间要重新加载页面**，否则前一个上下文点坏了状态，后面全是假阳性。
+- 危险按钮（停止/重置/删除）**不要点**。
+
+---
+
+## 11. 文件去哪了
 
 ```
 /cfu/ai视频档案库/<IP名>/
   01_人设与规范/   02_素材真值/   03_生产脚本/   04_验收工具/
-  05_文案/<套次>/<套次>_字幕文本.txt
+  05_文案/<套次>/<套次号>_字幕文本.txt     # 文件名只带套次号（脚本按这个找）
   05_文案/<套次>/prompts.json       # 中文分镜（人在画面板上改的就是它）
   05_文案/<套次>/prompts.en.json    # 它的英文转写（--to-en 产出，出片只认这份）
   06_音频/<套次>/<套次>_音频_定板_Ns.mp3
@@ -244,10 +287,13 @@ python3 bin/vstudio.py batch 王总财经 --topics "甲;乙" --stop-on-error  # 
 
 - `card.json` 与 `ip.json` **不重复**：卡管业务/习惯/红线，ip.json 管技术真值。改参数只改一处。
 - 引擎改动（bin/ config/）**不动档案**；改某个 IP 的脚本副本**不动引擎**。
+- **字体不在档案里**：装在系统 `~/.local/share/fonts/`，所有 IP 共用系统的，
+  不存副本目录（2026-10-29 实测 libass 不给 fontsdir 走 fontconfig，
+  输出与给字体目录逐字节一致，内存还少一半）。
 
 ---
 
-## 11. 与 RUNBOOK 的关系
+## 12. 与 RUNBOOK 的关系
 
 - **本手册（OPERATIONS.md）**：操作清单，照着点/敲。
 - **RUNBOOK.md**：设计原理、护栏为什么这样设、每段脚本在干什么、怎么加新 IP/新模型、排障的底层逻辑。

@@ -413,6 +413,21 @@ def write_script(ip, setname="", topic="", tone="", prefer=None, length="standar
                           prefer=prefer, temperature=0.8)
         ln = [str(x).strip() for x in (d.get("lines") or []) if str(x).strip()]
         sc = str(d.get("script") or "").strip()
+        # ★ 模型有时把 script 字段填成 **list 的 repr**（"['第一句', '第二句']"），
+        #   那不是正文，是 Python 打印出来的数据结构。
+        #   实测（2026-10-29 老王 M01）：模型这么返过一次 → 稿子原样落盘，
+        #   文件里全是引号和方括号，TTS 会照着念这些符号。
+        #   这里认出来就改用 lines 拼正文 —— lines 才是逐句的那份。
+        if sc.startswith("[") and sc.endswith("]"):
+            try:
+                import ast
+                parsed = ast.literal_eval(sc)
+                if isinstance(parsed, (list, tuple)):
+                    fixed = "\n".join(str(x).strip() for x in parsed if str(x).strip())
+                    if fixed:
+                        sc = fixed
+            except Exception:
+                pass
         if not sc and ln:
             sc = "\n".join(ln)
         if not sc:
@@ -463,6 +478,28 @@ def write_script(ip, setname="", topic="", tone="", prefer=None, length="standar
             lines.append(final_landing)
         landing_ok = True
 
+    # ★ 落点重复要清掉。
+    #   实测（2026-10-29 老王 M01）：模型把落点句在正文里写了两遍
+    #   （一次在倒数第二句，一次在结尾），lines 和 script 都重复。
+    #   观众会连着听两遍同一句「这锅汤我请你尝」—— 听起来像口播事故。
+    #   规则：落点只在**最后一句**留一份，前面出现的同款删掉。
+    if final_landing:
+        key = final_landing.replace(" ", "")
+        # 按行去重：只保留最后一次出现
+        keep = []
+        for ln in lines:
+            if ln.replace(" ", "") == key:
+                continue          # 先全删，最后再补一份到末尾
+            keep.append(ln)
+        if not keep or keep[-1].replace(" ", "") != key:
+            keep.append(final_landing)
+        lines = keep
+        # script 用 lines 重拼，保证正文与逐行一致（否则 script 里仍可能残留重复）
+        script = "\n".join(lines)
+        # 落点必须在**最后一句**，不是「正文里随便哪出现过」。
+        # 出现在中间 = 观众听完还有一截废话才轮到底点 = 等于没落点。
+        landing_ok = bool(lines) and lines[-1].replace(" ", "") == key
+
     chars = len(re.sub(r"\s", "", script))
     checks = {
         "chars": chars,
@@ -511,15 +548,10 @@ def save_script(result, ip, setname):
     ★ 目标非空就先进废品站式的备份（.bak.<时间>），绝不静默覆盖 ——
       这是别人可能已经改过的稿子。
     """
-    from vstudio import resolve_ip
+    from vstudio import resolve_ip, script_text_path
     import datetime as _dt
     e = resolve_ip(ip)
-    base = os.path.join(e["path"], "05_文案")
-    cand = [x for x in sorted(os.listdir(base)) if x.startswith(setname)] if os.path.isdir(base) else []
-    folder = os.path.join(base, cand[0]) if cand else os.path.join(base, setname)
-    os.makedirs(folder, exist_ok=True)
-    name = (cand[0] if cand else setname) + "_字幕文本.txt"
-    path = os.path.join(folder, name)
+    path = script_text_path(e["path"], setname)
     bak = None
     if os.path.exists(path) and open(path, encoding="utf-8").read().strip():
         bak = path + ".bak." + _dt.datetime.now().strftime("%Y%m%d_%H%M%S")

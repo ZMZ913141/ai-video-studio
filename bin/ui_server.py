@@ -1173,7 +1173,7 @@ class Handler(BaseHTTPRequestHandler):
             if name == "cmdline":
                 return self._api_cmdline(body or {})
             if name == "fonts":
-                return self._api_fonts()
+                return self._api_fonts(get)
             if name == "defaults":
                 return self._api_defaults(get)
             if name == "reset":
@@ -1660,6 +1660,9 @@ class Handler(BaseHTTPRequestHandler):
             "prompts-gen":   f"python3 bin/vstudio.py prompts {ip} {setname} --gen",
             "prompts-opt":   f"python3 bin/vstudio.py prompts {ip} {setname} --optimize",
             "prompts-show":  f"python3 bin/vstudio.py prompts {ip} {setname} --show",
+            # ★ prompts-en 之前漏在这里 → 前端一点就是「未知命令模板」。
+            #   build_exec 认它，cmdline 表不认它 —— 两张表各写各的就会漏。
+            "prompts-en":    f"python3 bin/vstudio.py prompts {ip} {setname} --to-en",
             "guard":         f"python3 bin/vstudio.py guard {ip}",
             "sync":          f"python3 bin/vstudio.py scripts-sync {ip}",
             "algo":          f"python3 bin/vstudio.py algo {ip} {setname}",
@@ -1676,68 +1679,73 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"cmdline":
                 f"python3 bin/vstudio.py pipeline {ip} {setname} --tier fast --dry"})
         if kind not in table:
+            # ★ 别再手写第二张表了：prompts-en 就是这么漏的
+            #   （build_exec 认它、cmdline 表不认 → 前端一点报「未知命令模板」）。
+            #   这里从 build_exec 反推一条能用的命令行，保证两边不会各说各话。
+            try:
+                argv, label, _tier, _ = build_exec({"kind": kind, "ip": ip, "set": setname})
+                if argv:
+                    return self._json({"cmdline": " ".join(argv),
+                                       "note": "这条命令由执行器推导（不在手写表里）"})
+            except Exception as e:
+                # 透出真实原因，别只说「未知命令模板」——那等于让人猜
+                return self._bad(f"这个动作不能拼成命令行：{e}")
             return self._bad("未知命令模板")
         return self._json({"cmdline": table[kind]})
 
     # ---------- 字体 ----------
-    def _api_fonts(self):
-        """两种字体要分清，混了就出废片：
-        ① 系统里装了 3000+ 个中文字体，**浏览器能预览**（前端直接用 CSS 渲染）；
-        ② 真正能烧进字幕的只有共用目录 `<档案库>/_共用/字体_字幕标题/` 里那几个 ——
-           libass 的 fontsdir 给大目录会吃爆内存（沙箱 4G 上限），
-           给空目录又会静默回退 Noto，字形全错还不报错。
+    def _api_fonts(self, get):
+        """「浏览器能看」和「真能烧进片子」是两件事，但 2026-10-29 实测后
+        这道界线变了：字体装进系统（~/.local/share/fonts/ 并注册进 fontconfig）后，
+        libass 不给 fontsdir 直接走 fontconfig 就能拿到**同一个字体文件**。
 
-        ★ 字体是全库共用的，不按 IP 分。以前每个 IP 各存一份 39MB，
-          50 个客户就是 2GB，改一次字体要改 50 处 —— 这跟「一个参数只存一处」是同一个道理。
+        实测（.cache/fonttest，三种烧法输出逐帧比对）：
+          给 <档案库>/_共用/字体_字幕标题/ → 119MB 内存，输出与下面这行逐字节一致
+          不给 fontsdir，走系统 fontconfig →  68MB 内存，输出逐字节一致 ✓
+          给系统字体目录（3005 个）         → 5.1GB 内存（爆）✗
+
+        所以**不再维护任何字体副本目录**。字体是系统级资产：
+          - 「可烧录」= 这个家族名在系统里能被 fontconfig 解析到真实字体文件
+          - 解析不到 → libass 会静默换成别的字体，字形全错还不报错
+            → burn_ass.py 烧之前会拦下来（check_fonts）
         """
-        fams, burn_files = [], {}
-        burn_dir = os.path.join(ARCHIVE, "_共用", "字体_字幕标题")
-        if os.path.isdir(burn_dir):
-            for fn in sorted(os.listdir(burn_dir)):
-                if fn.lower().endswith((".ttf", ".otf", ".ttc")):
-                    burn_files[fn] = os.path.join(burn_dir, fn)
+        fams, resolvable = [], set()
         try:
             r = subprocess.run(["fc-list", ":lang=zh", "family"],
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, timeout=15)
             seen = set()
             for line in r.stdout.splitlines():
                 for part in line.split(","):
                     p = part.strip()
-                    # libass/fontconfig 认的是第一个族名，其余是别名
+                    # family 字段是「别名逗号分隔」：第 1 位是家族名，
+                    # 第 3/4 位是**具体字重名**（阿里巴巴普惠体 2.0 75 SemiBold）。
+                    # libass 要的正是具体字重名（给家族名只会拿到默认字重，字形是错的），
+                    # 所以这里**全收**，不能只收第 1 位。
                     if p and not p.startswith(("Alibaba", "Noto Sans", "Source Han")) and p not in seen:
                         seen.add(p)
                         fams.append(p)
-                        break
         except Exception:
             pass
-        # 把烧录字体文件的族名查出来，标到列表上
-        # fc-scan 一个文件常返回 4 个名字：家族英文名、家族中文名、具体英文名、具体中文名。
-        # libass 必须拿**具体字重名**（"阿里巴巴普惠体 2.0 95 ExtraBold"），
-        # 给家族名只会得到默认字重 —— 看着能跑，字形是错的。取最后一个。
-        burn_fams = set()
-        for fn, fp in burn_files.items():
-            try:
-                rr = subprocess.run(["fc-scan", "--format", "%{family}\n", fp],
-                                    capture_output=True, text=True, timeout=8)
-                names = [x.strip() for x in (rr.stdout or "").split(",") if x.strip()]
-                if names:
-                    burn_fams.add(names[-1])
-            except Exception:
-                pass
-        items = [{"family": f, "burnable": f in burn_fams} for f in sorted(fams)]
-        for f in sorted(burn_fams):
-            if f not in fams:
-                items.append({"family": f, "burnable": True})
+        # 哪些名字「系统真的认得」= fc-list 里出现过的 family 别名。
+        # ⚠ 别用「每个家族起一次 fc-match」——那是 150+ 个进程，实测要 9 秒，
+        #   页面加载会卡住甚至把浏览器拖崩（2026-10-29 实测）。
+        # 一次 fc-list 就够：family 字段的第 4 位正是「具体字重名」
+        #   （阿里巴巴普惠体 2.0 75 SemiBold），libass 要的正是这个名字。
+        resolvable = set(fams)
+        items = [{"family": f, "burnable": f in resolvable} for f in sorted(fams)]
         cur = ""
-        root = ip_root("陈洁斌主号")
+        ipname = get("ip") or "陈洁斌主号"
+        root = ip_root(ipname)
         if root and os.path.exists(os.path.join(root, "ip.json")):
-            cur = (load_json(os.path.join(root, "ip.json")).get("subtitle") or {}).get("font", "")
+            sub = load_json(os.path.join(root, "ip.json")).get("subtitle") or {}
+            cur = sub.get("font_cue") or sub.get("font") or ""
         return self._json({
             "fonts": items, "current": cur,
-            "burn_dir": (list(burn_files.values())[0].rsplit("/", 1)[0] if burn_files else ""),
-            "burn_files": sorted(burn_files),
-            "note": "标「可烧录」的才是真能进字幕的字体；其余只是浏览器预览，"
-                    "要用于出片得先把字体文件放进精简目录（别一次塞几百个）。",
+            "burn_dir": "",
+            "burn_files": [],
+            "note": "标「可烧录」= 系统里真能解析到这个字体（烧进片子不会静默换字体）。"
+                    "字体装在系统里 ~/.local/share/fonts/，所有 IP 共用系统的，不存副本。"
+                    "系统里没有的字体：装进系统或换一个已有的家族名。",
         })
 
     # ---------- 恢复默认 ----------
@@ -1871,12 +1879,10 @@ class Handler(BaseHTTPRequestHandler):
         if not root or not setname:
             return self._bad("缺少 IP 或套次")
         base = os.path.join(root, "05_文案")
-        cand = [x for x in (os.listdir(base) if os.path.isdir(base) else [])
-                if x.startswith(setname)]
-        folder = os.path.join(base, cand[0]) if cand else os.path.join(base, setname)
-        os.makedirs(folder, exist_ok=True)
-        name = (cand[0] if cand else setname) + "_字幕文本.txt"
-        path = os.path.join(folder, name)
+        # ★ 文件名与读稿方统一：只带套次号（M01_字幕文本.txt），目录名才带标题。
+        #   两边各写各的 → 批量出片找不到稿子（2026-10-29 实测踩过）。
+        from vstudio import script_text_path
+        path = script_text_path(root, setname)
         bak = None
         if os.path.exists(path):
             try:

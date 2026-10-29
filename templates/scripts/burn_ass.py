@@ -7,28 +7,31 @@
 1. `flatpak run` 在本沙箱必死（xdg-dbus-proxy 握手失败），所以直接调 app 里的二进制。
 2. 必须用 runtime 的 ld.so 显式加载（`--library-path`），且 `LD_LIBRARY_PATH`
    只能通过 `env` 给目标进程，否则宿主的 bash/head 会被 GLIBC 2.43 的库带崩。
-3. **字体必须显式给 `fontsdir`**，而且只能给装了几个字体的精简目录。
-   - 不给 fontsdir：libass 走 fontconfig，找不到我们的字体 → 静默回退 Noto（字形全错）
-   - 给 1497 个字体的目录：内存爆掉（沙箱 4GB 上限）→
+3. **字体走系统 fontconfig**（不传 `fontsdir`）：
+   - 不给 fontsdir：libass 自己查 fontconfig → 系统装了就能找到（实测与给字体目录逐字节一致）
+   - 给大目录（3000+ 字体）：内存爆到 5.1GB（沙箱 4GB 上限）→
      `Resource temporarily unavailable` / `Failed initializing scaling graph`
-   所以字体目录里只放 7 个必需字体。
+   - 给空目录：静默回退 Noto（字形全错还不报错）
+   → 所以**不给 fontsdir**，但**烧之前必须验字体真的在系统里**（见 `check_fonts`）。
 
-★ 字体是**整个档案库共用**的，不跟 IP 走
-=========================================
-同一个工作室出片，字幕字体是「工作室的资产」，不是「某个客户的资产」。
-放在每个 IP 里各存一份 39MB 的副本，50 个客户就是 50 份 2GB，
-而且改一次字体要改 50 处 —— 迟早有一处漏了，出来一支字形不对的片子还不报错。
+★ 字体是**系统级资产**，不是某个客户、也不是「全库共用目录」的资产
+==========================================================
+2026-10-29 实测（.cache/fonttest）：
+  A 给 <档案库>/_共用/字体_字幕标题/  → 119MB 内存，输出与 B 逐字节一致
+  B 不给 fontsdir，走系统 fontconfig   →  68MB 内存，输出与 A 逐字节一致 ✓
+  C 给系统字体目录（3005 个）           → 5.1GB 内存（爆）✗
+  D 不存在的字体名                      → 静默回退，字形不同（这就是「字形全错」的真相）
+结论：字体已装进 ~/.local/share/fonts/ 并注册进 fontconfig，**不需要再存一份副本**。
+字体名在 ip.json 的 subtitle.font_cue / font_cue_b / font_title，
+换字体 = 改 ip.json 里的名字（系统里没装就先装进系统），不用碰任何目录。
 
-查找顺序（第一个存在的就用）：
-  1. 环境变量 `SUB_FONTS_DIR`（临时试验/单条片子走别的字体时给）
-  2. `<档案库>/_共用/字体_字幕标题/`   ← 正常情况都是这个
-  3. `<IP>/02_素材真值/字体_字幕标题/`  ← 老档案的遗留位置，留着不报错
-  4. 都没有 → **直接报错停下**，不退到系统字体目录
-     （系统里装了 3000+ 字，libass 吃不下，退过去只会得到一支字形全错的片子）
+查找顺序：
+  1. 环境变量 `SUB_FONTS_DIR`（临时试验/单条片子走别的字体时给；给了就用它当 fontsdir）
+  2. 不给 → 走系统 fontconfig（正常情况都是这个）
 
 用法:
   burn_ass.py <输入mp4> <字幕ass> <输出mp4> [--crf 18] [--preset slow]
-  burn_ass.py <输入mp4> <字幕ass> <输出mp4> --preview 12.5 /tmp/p.png   # 抽单帧预览
+  burn_ass.py <输入mp4> <字幕ass> <输出mp4> --preview 12.5 /tmp/t.png   # 抽单帧预览
 """
 import os
 import subprocess
@@ -43,23 +46,85 @@ FFMPEG = f"{APP}/bin/ffmpeg"
 HERE = os.path.dirname(os.path.abspath(__file__))
 FONT_SUBDIR = "字体_字幕标题"
 
+# SUB_FONTS_DIR：临时试验/单条片子换字体时用。给了就当 fontsdir 给 libass。
+# 不给 = 走系统 fontconfig（正常情况）。
+OVERRIDE_DIR = os.environ.get("SUB_FONTS_DIR") or ""
+
+
+def fc_match(family):
+    """问 fontconfig 这个家族名能不能解析到真实字体文件。解析不到就返回空。"""
+    try:
+        r = subprocess.run(["fc-match", "-f", "%{file}\n", family],
+                           capture_output=True, text=True, timeout=10)
+        out = (r.stdout or "").strip().splitlines()
+        return out[0] if out else ""
+    except Exception:
+        return ""
+
+
+def ass_font_names(ass_path):
+    """从 ASS 的 Style 行里抠出所有 Fontname（去重、保持顺序）。"""
+    names, seen = [], set()
+    try:
+        with open(ass_path, encoding="utf-8-sig", errors="ignore") as f:
+            for line in f:
+                s = line.strip()
+                if not s.lower().startswith("style:"):
+                    continue
+                parts = s.split(",")
+                if len(parts) < 2:
+                    continue
+                nm = parts[1].strip()
+                if nm and nm not in seen:
+                    seen.add(nm)
+                    names.append(nm)
+    except Exception:
+        pass
+    return names
+
+
+def check_fonts(ass_path):
+    """烧之前验字体：ASS 里每个字体名都必须在系统里真的能解析到。
+
+    为什么非要有这道：字体名解析不到时 libass **不报错**，静默换成默认字体，
+    片子照出、字形全错 —— 这类废片最难查（要一帧帧比对才发现）。
+    宁可在这里停下，也不要交一支字形不对的片子出去。
+    """
+    bad = []
+    for nm in ass_font_names(ass_path):
+        path = fc_match(nm)
+        if not path:
+            bad.append((nm, "系统里没有这个字体家族"))
+            continue
+        # fc-match 找不到时会给一个「随便哪个都行」的结果（通常 DejaVu/Noto）。
+        # 认不出来时它返回的 family 不含我们要的字 → 用文件名反查确认。
+        try:
+            base = os.path.basename(path)
+            r = subprocess.run(["fc-scan", "-f", "%{family}\n", path],
+                               capture_output=True, text=True, timeout=10)
+            fams = [x.strip() for x in (r.stdout or "").split(",") if x.strip()]
+            # 有些家族名的全名在 style 里，但 fc-scan 只报部分名 → 用「包含」判断
+            if not any(nm in f or f in nm for f in fams) and nm not in fams:
+                bad.append((nm, f"解析到了 {base}，但不是这个字体"))
+        except Exception:
+            pass
+    return bad
+
 
 def find_fonts_dir():
-    """按文档里的顺序找字体目录；找不到就抛错，绝不静默换字体。"""
-    cands = [os.environ.get("SUB_FONTS_DIR") or "",
-             # <档案库>/_共用/字体_字幕标题 —— HERE 是 <IP>/03_生产脚本
-             os.path.normpath(os.path.join(HERE, "..", "..", "_共用", FONT_SUBDIR)),
-             os.path.normpath(os.path.join(HERE, "..", "02_素材真值", FONT_SUBDIR))]
-    for d in cands:
-        if d and os.path.isdir(d) and any(
-                f.lower().endswith((".ttf", ".otf", ".ttc")) for f in os.listdir(d)):
-            return d
-    raise SystemExit(
-        "找不到字幕字体目录。查过：\n  " + "\n  ".join(x for x in cands if x) +
-        "\n\n字体是全库共用的，应该在 <档案库>/_共用/字体_字幕标题/ 里。\n"
-        "临时换字体用环境变量 SUB_FONTS_DIR=/某目录。\n"
-        "⚠ 不要指到系统字体目录（3000+ 个字体，libass 会把内存吃爆，"
-        "而且它只会静默回退 Noto —— 片子看起来正常，字形全错。）")
+    """返回要传给 libass 的 fontsdir；空串 = 走系统 fontconfig。
+
+    2026-10-29 实测：不给 fontsdir 的输出与给精简字体目录**逐字节一致**，
+    内存还少一半（68MB vs 119MB）。而给系统字体目录（3000+ 个）会吃到 5.1GB。
+    所以默认不给 fontsdir，字体装在系统里就行。
+    """
+    if OVERRIDE_DIR:
+        if not os.path.isdir(OVERRIDE_DIR):
+            raise SystemExit(
+                f"SUB_FONTS_DIR 指向的目录不存在：{OVERRIDE_DIR}\n"
+                "（不给这个环境变量就是走系统 fontconfig，正常情况不用设）")
+        return OVERRIDE_DIR
+    return ""
 
 
 FONTS = find_fonts_dir()
@@ -85,7 +150,9 @@ def vf_for(ass, pre=None):
     白字（1.0）会被压到 0.83、描边一起变浅，字幕对比度全毁。
     正确顺序 = 先修画面 → 再烧字。
     """
-    v = f"subtitles='{escape_path(ass)}':fontsdir='{escape_path(FONTS)}'"
+    v = f"subtitles='{escape_path(ass)}'"
+    if FONTS:
+        v += f":fontsdir='{escape_path(FONTS)}'"
     return f"{pre},{v}" if pre else v
 
 
@@ -125,12 +192,30 @@ def main():
         pre = f"curves=all='{c}'"
     if "--preview" in sys.argv:
         i = sys.argv.index("--preview")
+        bad = check_fonts(ass)
+        if bad:
+            print("✗ 字幕里有字体在系统里解析不到：", file=sys.stderr)
+            for nm, why in bad:
+                print(f"    {nm} —— {why}", file=sys.stderr)
+            sys.exit(1)
         preview(src, ass, sys.argv[i + 1], sys.argv[i + 2], pre)
         print("预览:", sys.argv[i + 2])
         return
     crf = int(sys.argv[sys.argv.index("--crf") + 1]) if "--crf" in sys.argv else 18
     preset = sys.argv[sys.argv.index("--preset") + 1] if "--preset" in sys.argv else "slow"
-    print("字体目录:", FONTS)
+    print("字体来源:", FONTS if FONTS else "系统 fontconfig")
+    # ★ 先验字体再烧：解析不到时 libass 不报错，会静默换成别的字体，
+    #   片子照出但字形全错 —— 宁可现在停下。
+    bad = check_fonts(ass)
+    if bad:
+        print("✗ 字幕里有字体在系统里解析不到：", file=sys.stderr)
+        for nm, why in bad:
+            print(f"    {nm} —— {why}", file=sys.stderr)
+        print("\n装进系统即可（字体不是某个客户的东西，是系统的）：\n"
+              "  cp 字体.ttf ~/.local/share/fonts/ && fc-cache -f\n"
+              "或者换个系统里已有的字体名（改 ip.json 的 subtitle.font_*）。",
+              file=sys.stderr)
+        sys.exit(1)
     if pre:
         print("同步曝光校正:", pre)
     print("烧录中…", src, "→", dst)

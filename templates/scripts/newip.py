@@ -63,7 +63,10 @@ TREE = {
     "07_成片":       None,
     "08_过程":       None,
 }
-# 字体不再每 IP 建一份：全库共用 <档案库>/_共用/字体_字幕标题/（见 burn_ass.py 文件头）
+# 字体不再每 IP 建一份，也不建「全库共用」目录：
+# 字体装在系统里（~/.local/share/fonts/），libass 直接走 fontconfig 就能拿到
+# （2026-10-29 实测：不给 fontsdir 的输出与给字体目录逐字节一致，内存还少一半）。
+# 换字体 = 改 ip.json 的 subtitle.font_* 名字，见 burn_ass.py 文件头。
 SUB = {}
 
 BASE_TEMPLATE = {

@@ -126,7 +126,9 @@ def prepare_script(ip, setname, topic, script_path, tone=""):
                 if f.endswith(".txt") and not f.startswith("job")] if os.path.isdir(d05) else []
 
     if script_path:
-        dst = os.path.join(d05, f"{setname.split('_')[0]}_字幕文本.txt")
+        # ★ 走共享函数，跟写稿方（ui_server / studio_ai）用同一个命名规则。
+        #   两边各写各的 → 批量出片找不到稿子（2026-10-29 实测踩过）。
+        dst = V.script_text_path(V.resolve_ip(ip)["path"], setname)
         if os.path.abspath(script_path) != os.path.abspath(dst):
             with open(script_path, encoding="utf-8") as f:
                 txt = f.read()

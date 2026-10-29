@@ -131,6 +131,25 @@ def list_sets(ip_root):
     return out
 
 
+def script_text_path(ip_root, setname):
+    """一套片子的**稿子文件**路径（05_文案/<套次目录>/<套次号>_字幕文本.txt）。
+
+    ★ 这里必须是唯一真源。
+    2026-10-29 实测踩过的坑：写稿的（ui_server / studio_ai）曾用
+    `<目录全名>_字幕文本.txt`（M01_老王的第一条…_字幕文本.txt），
+    而读稿的（batch.py / gen_tts.py）按 `<套次号>_字幕文本.txt` 找。
+    两边各写各的 → 批量出片找不到稿子 → 一片空白，而且不报错。
+    所以：**目录名带标题给人看，文件名只带套次号给脚本看**。
+    """
+    base = os.path.join(ip_root, "05_文案")
+    cand = [x for x in (os.listdir(base) if os.path.isdir(base) else [])
+            if x.startswith(setname)]
+    folder = os.path.join(base, cand[0]) if cand else os.path.join(base, setname)
+    os.makedirs(folder, exist_ok=True)
+    name = setname.split("_")[0] + "_字幕文本.txt"
+    return os.path.join(folder, name)
+
+
 def set_dirs(ip_root, setname):
     """一套片子横跨的目录（05~08 同名）"""
     d = opus_dirs(ip_root)
