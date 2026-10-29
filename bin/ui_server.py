@@ -764,6 +764,14 @@ def build_exec(b, want_result=False):
         return (argv, ("生成提示词 " if kind == "prompts-gen" else "优化提示词 ") + setname,
                 1 if b.get("dry") else 2, False)
 
+    if kind == "prompts-en":
+        need_set()
+        argv = ["bin/vstudio.py", "prompts", ip, setname, "--to-en"]
+        if b.get("force"):
+            argv.append("--force")
+        # 这一趟要调 LLM（要花钱、要几十秒），所以给二次确认，别让人手滑点出去。
+        return argv, f"提示词译成英文 {setname}", 2, False
+
     if kind == "prompts-set":
         need_set()
         try:
@@ -1291,7 +1299,35 @@ class Handler(BaseHTTPRequestHandler):
         checked = self._guard_segments(root, data)
         return {"exists": True, "dir": d, "set": full, "source": src,
                 "data": data, "guard": checked,
-                "wired": self._prompts_wired()}
+                "wired": self._prompts_wired(),
+                "en": self._prompts_en_status(d, data)}
+
+    @staticmethod
+    def _prompts_en_status(d, cn_data):
+        """这套到底译没译、译的那版跟当前中文稿还对不对得上。
+
+        ★ 必须在界面上说清楚：从这儿到出片中间隔着一层**英文转写**，
+          没译 = 改了这份稿子画面不动（不是 bug，是没走到那一步）；
+          译了但中文又改过 = 出片用的是**旧英文**（gen_video 会报警但照样出）。
+        """
+        import hashlib
+        ef = os.path.join(d, "prompts.en.json")
+        if not os.path.exists(ef):
+            return {"exists": False, "why": "还没译，改这份稿子不影响出片画面"}
+        try:
+            en = load_json(ef)
+        except Exception as ex:
+            return {"exists": True, "error": str(ex)}
+        core = [{"camera": s.get("camera", ""), "expression": s.get("expression", ""),
+                 "i": s.get("i"), "motion": s.get("motion", "")}
+                for s in (cn_data.get("segments") or [])]
+        want = hashlib.md5(json.dumps(core, ensure_ascii=False, sort_keys=True)
+                           .encode("utf-8")).hexdigest()
+        got = en.get("source_hash")
+        return {"exists": True, "stale": bool(got) and got != want,
+                "updated": en.get("updated", ""),
+                "provider": en.get("provider", ""),
+                "segments": len(en.get("segments") or [])}
 
     @staticmethod
     def _prompts_wired():
@@ -1304,15 +1340,24 @@ class Handler(BaseHTTPRequestHandler):
         try:
             cfg = load_json(os.path.join(ROOT, "config", "pipeline.json"))
             st = next((s for s in cfg.get("steps", []) if s.get("id") == "video"), {})
-            on = bool(st.get("reads_prompts"))
+            # "conditional" = 2026-10-29 接通之后的形态：有 prompts.en.json 才参与出片。
+            raw = st.get("reads_prompts", False)
+            on = bool(raw)          # False / "conditional"→True / True
+            mode = "conditional" if str(raw) == "conditional" else ("on" if raw else "off")
         except Exception:
-            on = False
+            on, mode = False, "off"
         return {
             "on": on,
-            "what": "gen_video.py 的英文骨架模板 + ip.json 的 video.prompt_vars",
+            "mode": mode,
+            "what": "gen_video.py 的英文骨架模板 + ip.json 的 video.prompt_vars"
+                    if mode == "off" else "存在 prompts.en.json 时，按段覆盖默认的表情与手势描述",
             "why": "骨架是 H3 的受理格式（subject_definitions / summary / clean_plate 这些节），"
                    "名词来自 ip.json；而这份稿子是中文分镜，中文混进英文骨架会被模型当成"
-                   "「该上屏的字」——S04 就这么烧过一版字幕。",
+                   "「该上屏的字」——S04 就这么烧过一版字幕。"
+                   if mode != "conditional" else
+                   "中文不能直接进英文骨架（会被烧成字幕），所以要先译成 prompts.en.json；"
+                   "出片时那份英文才真正进提示词。没译就还是走骨架默认值。",
+            "howto": "vstudio prompts <IP> <套次> --to-en" if mode == "conditional" else "",
         }
 
     @staticmethod

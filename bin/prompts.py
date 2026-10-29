@@ -20,9 +20,11 @@ prompts —— 提示词工作台（引擎侧）
   prompts.py <IP> <套次> --optimize              AI 在现有基础上优化（旧版进 history）
   prompts.py <IP> <套次> --set 3 --text "..."    手动微调第 3 段
   prompts.py <IP> <套次> --gen --dry             只打印，不落盘
+  prompts.py <IP> <套次> --to-en                 译成 prompts.en.json（出片才认这份）
 """
 import argparse
 import glob
+import hashlib
 import json
 import os
 import re
@@ -254,6 +256,144 @@ def write_prompts(ip_root, setname, data, source):
     return True, [], path
 
 
+# ---------------- 英文转写（提示词闭环） ----------------
+# 为什么要多这一层英文转写：
+#   出片提示词的**骨架是英文**（H3 的受理格式），而 05_文案/<套次>/prompts.json
+#   工作台产出的是**中文分镜**。以前这两边互不相通 —— 人在界面里把提示词改得再好，
+#   出片时一句都用不上（gen_video.py 根本不读它），界面还假装那是成片依据。
+#
+#   ⚠ 直接把中文塞进骨架是**不行**的（2026-10-27 S04 实测）：
+#     不在 <d> 标记里的中文会被模型当成「画面上该出现的字」，全片烧出字幕。
+#     所以必须在中间加一层「中文 → 英文」的转写，并且**转写结果必须不含一个汉字**。
+#
+#   这一层落成 prompts.en.json：gen_video.py 只在它存在时才采纳。
+#   没有它就走老路（ip.json 的 prompt_vars），行为跟以前逐字节一致。
+TR_SYSTEM = """你是给视频生成模型写画面提示词的英文译者。
+
+任务：把中文分镜描述译成英文短句。
+
+硬约束（违反即作废）：
+1. 输出必须是纯英文，**一个中文字符都不能有**（汉字会被模型当成画面上要烧的字幕）。
+2. 只能用**正向描述**，禁止 no/not/never/without/avoid 这类否定词。
+   中文里的「不要皱眉」要译成正面说法，例如 His brows rest level and relaxed.
+3. 只写**画面上能看见的事实**：眉、眼、嘴的状态，手势幅度，身体动作。
+   不写抽象评价（「专业」「亲和」要落成具体的脸部和手部状态）。
+4. 不写任何像字幕/标题/logo 的内容，不出现引号和换行。
+5. 每句用英文句号结尾，单句不超过 30 个词。
+
+输出 JSON（不要解释、不要 markdown 代码块）：
+{"segments":[{"i":1,"expression_en":"His brows rest ...","perf_en":"His right hand ..."}]}
+"""
+
+
+def en_path(ip_root, setname):
+    return os.path.join(V.set_dirs(ip_root, setname)["05"], "prompts.en.json")
+
+
+def source_hash(data):
+    """中文源文件指纹：人改过稿子就要重译，没改过就别浪费 LLM 调用。"""
+    core = [{"i": s.get("i"), "expression": s.get("expression", ""),
+             "motion": s.get("motion", ""), "camera": s.get("camera", "")}
+            for s in (data.get("segments") or [])]
+    raw = json.dumps(core, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def do_to_en(e, setname, force=False, as_json=False):
+    """把 prompts.json 的中文分镜译成 prompts.en.json（出片才认这份）。"""
+    data, p = load_prompts(e["path"], setname)
+    if not data:
+        sys.exit(f"✗ 没有提示词文件：{p}"
+                 f"\n  先生成：vstudio prompts {e['name']} {setname} --gen")
+    segs = data.get("segments") or []
+    if not segs:
+        sys.exit("✗ prompts.json 里没有 segments")
+
+    out = en_path(e["path"], setname)
+    h = source_hash(data)
+    if os.path.exists(out) and not force:
+        try:
+            old = json.load(open(out, encoding="utf-8"))
+        except Exception:
+            old = {}
+        if old.get("source_hash") == h:
+            if as_json:
+                print(json.dumps({"ok": True, "fresh": True, "path": out}))
+            else:
+                print(f"✓ prompts.en.json 已是最新（跟当前中文稿同源）：{out}")
+                print("  改了中文稿请重跑本命令；要强制重译加 --force")
+            return True
+
+    payload = [{"i": s.get("i"),
+                "expression": s.get("expression", ""),
+                "motion": s.get("motion", ""),
+                "camera": s.get("camera", "")} for s in segs]
+    user = ("下面是一支竖屏口播视频各段的中文分镜（expression/motion/camera）。\n"
+            "逐段译成英文：\n"
+            "  expression_en = 这一段的眉/眼/嘴状态（照 expression 译，1 句）\n"
+            "  perf_en = 这一段的手势与身体动作（照 motion 译，1 句；"
+            "如果他只是自然端坐没有动作，就写 His hands rest still and low near his lap.）\n"
+            "camera 不用译出，只用来理解语境。\n\n"
+            + json.dumps(payload, ensure_ascii=False))
+
+    try:
+        d, prov = llm_json(user, system=TR_SYSTEM)
+    except Exception as ex:
+        sys.exit(f"✗ LLM 转写失败：{ex}"
+                 f"\n  看路由状态：vstudio llm status")
+
+    got = {int(x.get("i")): x for x in (d.get("segments") or [])
+           if str(x.get("i", "")).lstrip("-").isdigit()}
+    result, issues = [], []
+    for s in segs:
+        i = s.get("i")
+        g = got.get(i) or {}
+        row = {"i": i}
+        for tag, target in (("expression_en", "expression_en"), ("perf_en", "perf_en")):
+            v = str(g.get(target, "") or "").strip().strip('"').strip("'")
+            cjk = re.findall(r"[\u4e00-\u9fff]", v)
+            if cjk:
+                issues.append(f"段{i} {tag} 里混进了中文：{''.join(cjk)[:30]}")
+                continue
+            if v and not v.endswith("."):
+                v += "."
+            row[tag] = v
+        if not row.get("expression_en"):
+            issues.append(f"段{i} 没译出 expression_en")
+        if not row.get("perf_en"):
+            issues.append(f"段{i} 没译出 perf_en")
+        result.append(row)
+
+    if issues:
+        # ★ 绝不写半成品：留着旧的比写一份缺段的强 —— 缺段会导致那段悄悄退回默认值，
+        #   出片照出，但人以为自己改的那版生效了，这是最难查的一类假片。
+        print("✗ 这一批没有落盘：")
+        for x in issues:
+            print(f"   - {x}")
+        print(f"\n  重跑一次即可（LLM 有随机性）：vstudio prompts {e['name']} {setname} --to-en --force")
+        return False
+
+    doc = {"_schema": "prompts-en/1.0",
+           "_why": "出片提示词骨架是英文；中文表进不去（会被烧成字幕）。这份是prompts.json的英文转写，gen_video.py 只在它存在时采纳。",
+           "ip": e["name"], "set": setname,
+           "source_hash": h,
+           "provider": prov,
+           "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+           "segments": result}
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+
+    if as_json:
+        print(json.dumps({"ok": True, "fresh": False, "path": out,
+                          "segments": len(result), "provider": prov}))
+    else:
+        print(f"✓ 已写出 {out}（{len(result)} 段，路由 {prov}）")
+        for r in result:
+            print(f"  [{r['i']}] {r['expression_en']} {r['perf_en']}")
+    return True
+
+
 # ---------------- 命令 ----------------
 def cmd_show(e, setname, as_json):
     data, path = load_prompts(e["path"], setname)
@@ -403,6 +543,10 @@ def main(argv=None):
     ap.add_argument("--text", help="与 --set 同用的提示词文本")
     ap.add_argument("--dry", action="store_true")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--to-en", dest="to_en", action="store_true",
+                    help="把中文分镜译成 prompts.en.json（★出片只认这份英文）")
+    ap.add_argument("--force", action="store_true",
+                    help="与 --to-en 同用：不管中文稿有没有变都重译一次")
     a = ap.parse_args(argv)
 
     e = V.resolve_ip(a.ip)
@@ -417,6 +561,10 @@ def main(argv=None):
         if not a.seg:
             sys.exit("--text 需要和 --set N 一起用")
         do_set(e, a.set, a.seg, a.text, a.json)
+    elif a.to_en:
+        ok = do_to_en(e, a.set, force=a.force, as_json=a.json)
+        if not ok:
+            sys.exit(1)
     elif a.gen or a.optimize:
         do_gen(e, a.set, optimize=a.optimize, dry=a.dry, as_json=a.json)
     else:

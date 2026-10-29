@@ -481,6 +481,24 @@ def cmd_cards(a):
             print(f"        别名：{'/'.join(r['aliases'])}")
 
 
+def _find_newip():
+    """找 newip.py：优先引擎真源 templates/scripts/，退回旧行为（扫现有 IP 的副本）。
+
+    2026-10-29：newip.py 以前只有 IP 档案里有（陈洁斌主号那份），
+    引擎的 `new-ip` / `card-new` 反而依赖某一个客户的私人副本——
+    那个 IP 一删或那份副本一改走样，接新客户就整个跑不了。
+    现已收回引擎真源；这里保留旧扫描顺序做兜底，行为不变，只是先问自家人。
+    """
+    can = os.path.join(ROOT, "templates", "scripts", "newip.py")
+    if os.path.exists(can):
+        return can
+    for x in load_registry().get("ips", []):
+        p = os.path.join(x["path"], "03_生产脚本", "newip.py")
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def cmd_card_new(a):
     """建档：建目录树（复用 newip.py）+ 生成 card.json"""
     try:                      # 已建档就拒绝，没建档 resolve_ip 会抛 SystemExit——忽略即可
@@ -489,14 +507,9 @@ def cmd_card_new(a):
             die(f"「{a.name}」已建档：{e['path']}（要重建加 --force）")
     except SystemExit:
         pass
-    script = None
-    for x in load_registry().get("ips", []):
-        p = os.path.join(x["path"], "03_生产脚本", "newip.py")
-        if os.path.exists(p):
-            script = p
-            break
+    script = _find_newip()
     if not script:
-        die("找不到 newip.py")
+        die("找不到 newip.py（引擎真源 templates/scripts/ 或现有 IP 的 03_生产脚本 下）")
     cmd = [sys.executable, script, "--name", a.name, "--parent", PROFILES]
     for flag, val in (("--tag", a.tag), ("--space", a.space), ("--aliases", a.aliases)):
         if val:
@@ -609,14 +622,9 @@ def cmd_guard(a):
 def cmd_new_ip(a):
     if not a.name:
         die("需要 --name")
-    script = None
-    for e in load_registry().get("ips", []):
-        p = os.path.join(e["path"], "03_生产脚本", "newip.py")
-        if os.path.exists(p):
-            script = p
-            break
+    script = _find_newip()
     if not script:
-        die("找不到 newip.py（现有 IP 的 03_生产脚本 下）")
+        die("找不到 newip.py（引擎真源 templates/scripts/ 或现有 IP 的 03_生产脚本 下）")
     cmd = [sys.executable, script, "--name", a.name, "--parent", a.parent]
     for flag, val in (("--tag", a.tag), ("--space", a.space), ("--aliases", a.aliases)):
         if val:
@@ -775,9 +783,9 @@ def cmd_prompts(a):
     """提示词工作台 —— 转发给 bin/prompts.py"""
     import prompts
     argv = [a.ip, a.set]
-    for k in ("show", "gen", "optimize", "dry", "json"):
+    for k in ("show", "gen", "optimize", "dry", "json", "to_en", "force"):
         if getattr(a, k, False):
-            argv.append("--" + k)
+            argv.append("--" + k.replace("_", "-"))
     if a.seg is not None:
         argv += ["--set", str(a.seg)]
     if a.text:
@@ -1109,6 +1117,10 @@ def main():
     p.add_argument("--set", dest="seg", type=int, help="手动改第 N 段")
     p.add_argument("--text", help="与 --set 同用的提示词")
     p.add_argument("--dry", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--to-en", dest="to_en", action="store_true",
+                   help="把中文分镜译成 prompts.en.json（★出片只认这份英文）")
+    p.add_argument("--force", action="store_true", help="与 --to-en 同用：强制重译")
     p.set_defaults(func=cmd_prompts)
 
     p = sub.add_parser("algo", help="自适应参数预览（帧数/段数/留白）")

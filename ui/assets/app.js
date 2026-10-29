@@ -601,11 +601,47 @@ function renderPrompts() {
 
   // ★ 先说清楚这份稿子到底进不进片。不说的话，人改完稿子去重跑视频，
   //   十几分钟 GPU 花完、画面一点没变，还以为是自己写错了。
-  const warn = (p.wired && !p.wired.on) ? `<div class="warnbox" style="margin-bottom:10px">
+  //
+  //   2026-10-29 起这条路是「接通但要多一步」：中文分镜 → prompts.en.json → 出片。
+  //   所以界面必须区分三种状态，而不是一句「不进片」糊过去：
+  //     ① 没译     → 改了不影响画面，但要给出「译成英文」这条唯一的出路
+  //     ② 译了但中文又改过 → 出片用的是**旧英文**（最难查的假片）
+  //     ③ 同源     → 才是真的通了
+  const w = p.wired || {};
+  const en = p.en || {};
+  let warn = '';
+  if (w.mode === 'conditional') {
+    if (!en.exists) {
+      warn = `<div class="warnbox" style="margin-bottom:10px">
+        <b>这份稿子还没译成英文，所以现在改它不影响画面。</b>
+        出片提示词的骨架是英文 ${ico('alert')}：中文不能直塞进去 ——
+        不在说话标记里的中文会被模型当成「该上屏的字」（S04 就这么烧过一版字幕）。
+        <div class="rowbtns" style="margin-top:8px">
+          <button class="btn primary" data-exe="prompts-en">译成 prompts.en.json</button>
+        </div>
+        <div class="hint" style="margin-top:6px">译完再回来改这里的文字，出片才认。</div>
+      </div>`;
+    } else if (en.stale) {
+      warn = `<div class="warnbox bad" style="margin-bottom:10px">
+        <b>中文稿改过，英文那版没跟上。</b>
+        现在出片用的是<b>旧的那版英文分镜</b> —— 画面不会反映你刚改的内容。
+        <div class="rowbtns" style="margin-top:8px">
+          <button class="btn primary" data-exe="prompts-en-force">按现在的中文稿重新译</button>
+        </div>
+      </div>`;
+    } else {
+      warn = `<div class="okbox" style="margin-bottom:10px">
+        ✓ 英文分镜已就绪（${en.segments} 段 · ${esc(en.updated || '')}${en.provider ? ' · 路由 ' + esc(en.provider) : ''}）：
+        这里的每段表情与手势，出片时会按段覆盖默认的 english 描述。
+      </div>`;
+    }
+  } else if (w.on === false) {
+    warn = `<div class="warnbox" style="margin-bottom:10px">
       <b>这份分镜稿目前不进片。</b>出片用的是 ${esc(p.wired.what)}。
       所以改这里的文字<b>不会改变画面</b>；想看新画面要用「换一个种子」重跑，或者改 ip.json 里描述画面的那几项。
       <div class="hint" style="margin-top:6px">为什么不能直接接：${esc(p.wired.why)}</div>
-    </div>` : '';
+    </div>`;
+  }
 
   const gp = state.cfg?.pipeline?.global_prompt?.enabled
     ? `<div class="pseg"><div class="hd">${ico('shield')} 全局通用片段
@@ -688,6 +724,7 @@ async function renderCmd() {
     ['pipeline-std', '正式出片（std 档）', 'play', 1],
     ['prompts-gen', 'AI 生成提示词', 'plus', 0],
     ['prompts-opt', 'AI 优化提示词', 'refresh', 0],
+    ['prompts-en', '提示词译成英文（出片才认这份）', 'note', 0],
     ['prompts-show', '查看当前提示词', 'eye', -1],
   ];
   const rows = await Promise.all(kinds.map(async ([k, label, ic, canExec]) => {
@@ -1874,9 +1911,16 @@ function bind() {
         'pipeline-std': { kind: 'pipeline', tier: 'std' },
         'prompts-gen': { kind: 'prompts-gen' },
         'prompts-opt': { kind: 'prompts-opt' },
+        // 中文分镜 → prompts.en.json：通了这一步，这份稿子才真的能出到画面上
+        'prompts-en': { kind: 'prompts-en' },
+        'prompts-en-force': { kind: 'prompts-en', force: true },
       };
       if (map[kind]) {
-        return void await startExec({ ...map[kind], ip: state.ip, set: state.setId });
+        return void await startExec({ ...map[kind], ip: state.ip, set: state.setId },
+          // 译完把状态条刷一遍：不然还得手动刷新才知道自己现在已经「同源」了
+          kind.startsWith('prompts-en')
+            ? { then: async d => { if (d.state === 'done') { await loadPrompts(); renderPrompts(); } } }
+            : undefined);
       }
       return;
     }

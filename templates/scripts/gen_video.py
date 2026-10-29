@@ -1318,8 +1318,102 @@ if _custom:
         print(f"  ⚠ ip.json 的 video.prompt_vars 里有不认识的名字：{unknown}（已忽略）")
 
 
+# ★★ 2026-10-29：提示词闭环 —— 让工作台里改的稿子真的能出到片子上
+#
+# 以前这条链是断的：prompts.json（05_文案/<套次>/，中文分镜）gen_video.py **根本不读**，
+#   出片提示词只由上面的英文骨架 + ip.json 的 prompt_vars 拼成。
+#   人在界面里把第 3 段改成什么样，出片都一模一样 —— 界面还假装那是依据。
+#
+# ⚠ 为什么不直接把中文分镜塞进骨架（2026-10-27 S04 实测，这条是硬约束）：
+#   不在 <d> 标记里的中文会被模型当成「画面上该出现的字」，全片烧出字幕，
+#   且低分辨率试片看不出来。所以中间必须有 prompts.en.json 这层英文转写，
+#   并且这里再查一遍：**任何一个汉字都不许进提示词**。
+#
+# 采纳条件只有一个：PROMPTS_EN 指到的文件存在（vstudio prompts <IP> <套> --to-en 产出）。
+#   没有它就完全走老路 —— 跟改之前逐字节一致，不会出现「不知道为什么变了」。
+def _load_seg_en():
+    p = (os.environ.get("PROMPTS_EN") or "").strip()
+    if not p or not os.path.exists(p):
+        return {}
+    try:
+        d = json.loads(open(p, encoding="utf-8").read())
+    except Exception as ex:
+        sys.exit(f"✗ prompts.en.json 读不了：{p}\n  → {ex}")
+    out = {}
+    for s in d.get("segments") or []:
+        try:
+            i = int(s.get("i"))
+        except (TypeError, ValueError):
+            continue
+        row = {}
+        for k in ("expression_en", "perf_en"):
+            v = str(s.get(k) or "").strip()
+            if not v:
+                continue
+            cjk = re.findall(r"[\u4e00-\u9fff]", v)
+            if cjk:
+                # 宁可不出片也不出「烧了字幕的片」——那玩意交出去是要挨骂的
+                sys.exit(f"✗ prompts.en.json 第 {i} 段的 {k} 里混进了中文：{''.join(cjk)[:30]}\n"
+                         f"  中文进提示词会被模型当成上屏字幕（S04 实测），已在出片前拦停。\n"
+                         f"  修：删掉 {p} 重跑 vstudio prompts <IP> <套次> --to-en --force")
+            row[k] = v
+        if row:
+            out[i] = row
+    if out:
+        print(f"  提示词闭环：采纳 {os.path.basename(p)} 的 {len(out)} 段英文分镜")
+        _warn_stale(p, d)
+    return out
+
+
+def _cn_src_hash(path):
+    """跟 bin/prompts.py 的 source_hash 同一套算法：中文源 required 字段的 md5。
+
+    ⚠ 这里刻意重复了那边的算法（两边改一处另一边就判不准）。
+      宁可重复也不引入依赖：gen_video.py 必须能在只有 ip.json 的机器上独立跑。
+    """
+    try:
+        cn = json.loads(open(path, encoding="utf-8").read())
+    except Exception:
+        return None
+    core = [{"camera": s.get("camera", ""), "expression": s.get("expression", ""),
+             "i": s.get("i"), "motion": s.get("motion", "")}
+            for s in (cn.get("segments") or [])]
+    import hashlib
+    return hashlib.md5(
+        json.dumps(core, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _warn_stale(en_path_, en_doc):
+    """英文稿跟当前中文稿对不上时报警 —— 这是最难查的一类假片。
+
+    场景：人在工作台改了一段中文，忘了 --to-en，出片照出，
+          画面用的是旧分镜，而人以为自己改的那版生效了。
+    """
+    cn_path = os.path.join(os.path.dirname(en_path_), "prompts.json")
+    if not os.path.exists(cn_path):
+        return
+    now = _cn_src_hash(cn_path)
+    old = en_doc.get("source_hash")
+    if not now or not old or now == old:
+        return
+    print("  ⚠⚠ 提示词闭环：prompts.en.json 跟当前中文稿不同源 ——"
+          "出片会用**旧的那版英文分镜**")
+    print(f"     中文稿改过没重译。修：vstudio prompts <IP> <套次> --to-en --force")
+    print(f"     （英文稿记的源指纹 {str(old)[:8]}… vs 当前中文稿 {now[:8]}…）")
+
+
+SEG_EN = _load_seg_en()
+
+
 def build_prompt(i, segs, cues, audio_sec):
     start, end = segs[i]
+    # 本段若有英文分镜（prompts.en.json），就用它覆盖默认的表情/手势描述。
+    # 没有 en 时 pv 就是 PV 本身 —— 走的是改之前那条完全相同的路。
+    en = SEG_EN.get(i) or {}
+    pv = dict(PV) if en else PV
+    if en:
+        pv["expression"] = en.get("expression_en") or PV["expression"]
+        pv["seg_perf"] = en.get("perf_en") or ""
     t0, t1 = start / FPS, end / FPS
     ov = segs[i - 1][1] - start if i else 0
     new_lo, new_hi = t0 + ov / FPS, t1
@@ -1476,7 +1570,14 @@ def build_prompt(i, segs, cues, audio_sec):
         "lines beside his nose soft and uncreased. "
         if i >= 3 else ""
     )
-    act = opening + "".join(acts) + (
+    # perf 是本段的**手势/动作**从句，来自 prompts.en.json。
+    # 位置：紧接着 opening（坐姿与呼吸），在第一个 <d> 说话标记之前 ——
+    #   模型先知道「人怎么坐着」，再知道「手在做什么」，最后才对口型讲台词。
+    # 没有 prompts.en.json 时它是空串，拼出来跟以前一字不差。
+    perf = pv.get("seg_perf") or ""
+    if perf and not perf.endswith(" "):
+        perf += " "
+    act = opening + perf + "".join(acts) + (
         "Between phrases his head makes small natural tilts with the rhythm of his speech, his shoulders stay "
         "settled and his hands return to rest after each gesture. " + calm_expr +
         "He is the only person in the room."
@@ -1516,7 +1617,7 @@ def build_prompt(i, segs, cues, audio_sec):
     )
     # ★ 变量统一在这里替换（不在各处拼的时候替换），好处是拼装逻辑保持纯拼接、
     #   一眼能看出最终结构，改业务不用在一个个 f-string 里找。
-    return Template(subj + summ + ret + det + snd + mus).safe_substitute(PV)
+    return Template(subj + summ + ret + det + snd + mus).safe_substitute(pv)
 
 
 def timeline(segs, cues, audio_sec, total_sec):

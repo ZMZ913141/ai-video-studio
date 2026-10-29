@@ -185,7 +185,14 @@ def main():
     pid = res["prompt_id"]
     print("prompt_id", pid, flush=True)
     r = poll(pid)
-    st = (r or {}).get("status", {})
+    if r is None:
+        # 轮询等到超时也没拿到这条任务的状态。ComfyUI 收下了 prompt（所以前面打出了
+        # prompt_id），但一直没执行完 —— 几乎都是 GPU 推理起不来：CUDA 不可用 / 对应节点
+        # 缺模型 / ComfyUI 中途崩了。这条信息以前只打「失败: {}」，完全看不出原因。
+        print("失败: ComfyUI 在 1800s 内没返回这条任务的状态——多半是 GPU 推理没跑起来"
+              "（CUDA 不可用 / TTS 节点缺模型 / ComfyUI 中途崩了）。去看 ComfyUI 控制台。")
+        sys.exit(1)
+    st = r.get("status", {})
     if st.get("status_str") != "success":
         err = ""
         for m in st.get("messages", []):

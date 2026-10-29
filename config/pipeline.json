@@ -119,11 +119,13 @@
         "OVERLAP": "{overlap}",
         "PILOT": "{pilot}",
         "DRY": "{dry}",
-        "SEED": "{seed}"
+        "SEED": "{seed}",
+        "PROMPTS_EN": "{dir05}/prompts.en.json"
       },
       "_move_note": "gen_video.py 把产物写在自己的 03_生产脚本 目录里（历史如此）。编排器负责把它归位到 07_成片/<套次>/，否则断点续跑永远看不到它。",
-      "_prompts_note": "★ reads_prompts=false 是**引擎事实**，不是配置项：出片提示词由 gen_video.py 的英文骨架模板 + ip.json 的 video.prompt_vars 拼成，05_文案/<套次>/prompts.json（提示词工作台产出的中文分镜稿）目前**不参与**出片。界面据此显示警示条，别让人以为改了稿子就该重跑。真接上了再改这里。",
-      "reads_prompts": false,
+      "_prompts_note": "★ 2026-10-29 提示词闭环接通了，但有一层硬约束必须先说清楚：出片骨架是**英文**，中文分镜不能直塞（2026-10-27 S04 实测：不在 <d> 标记里的中文会被模型当成画面上要烧的字，全片出字幕，低分辨率试片还看不出来）。所以中间多一层 prompts.en.json —— 由 `vstudio prompts <IP> <套次> --to-en` 把中文分镜译成英文产出。PROMPTS_EN 指向它，文件不存在就完全走老路（骨架 + ip.json 的 prompt_vars），逐字节等同接通之前。这一步**不是自动跑的**：它会调 LLM，且译文要人过一眼，所以留在工作台里手动触发。",
+      "_prompts_stale_note": "改了中文稿忘了重译 → gen_video.py 会打印「英文稿与当前中文稿不同源」的警告并继续（不中断交付），画面用的是旧英文分镜。这类「以为改了其实没改」是最难查的假片，看到那条警告就去 --to-en --force。",
+      "reads_prompts": "conditional",
       "move_from": "{scripts}/{jid}_raw_*.mp4",
       "move_to": "{dir07}",
       "out_glob": "{dir07}/{jid}_raw_*.mp4",
