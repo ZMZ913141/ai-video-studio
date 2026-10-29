@@ -1600,6 +1600,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_learn_add(body or {})
             if name == "learn-list":
                 return self._api_learn_list(get)
+            if name == "learn-promote":
+                return self._api_learn_promote(body or {})
+            if name == "learn-apply":
+                return self._api_learn_apply(body or {})
             if name == "bgm-library":
                 return self._api_bgm_library(get)
             if name == "dialogue":
@@ -3455,6 +3459,80 @@ class Handler(BaseHTTPRequestHandler):
             return self._bad(str(ex))
         return self._json({"rows": rows, "habits": hab, "kinds": list(learning.KINDS)})
 
+    def _api_learn_promote(self, body):
+        """把攒下的返工记录交给模型归纳 → 出一份习惯**建议草案**。
+
+        ★ 只出建议，不写 card.json。让人看过再点采纳（_api_learn_apply）。
+          子进程跑：归纳要调 LLM，十几秒，直接 import 会把界面堵住。
+        """
+        ip = (body.get("ip") or "").strip()
+        if not ip:
+            return self._bad("缺少 IP")
+        force = bool(body.get("force"))
+        prefer = (body.get("prefer") or "").strip() or None
+        import subprocess
+        cmd = [sys.executable, os.path.join(BIN_DIR, "learning.py"),
+               "promote", ip, "--json"]
+        if force:
+            cmd.append("--force")
+        if prefer:
+            cmd += ["--prefer", prefer]
+        env = dict(os.environ)
+        env["STUDIO_HOME"] = ROOT
+        try:
+            cp = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True,
+                                text=True, timeout=180)
+        except subprocess.TimeoutExpired:
+            return self._json({"error": "归纳超时了（180s），稍后再试"}, 504)
+        out = (cp.stdout or "").strip()
+        # --json 走单行；万一子进程先打了日志行，退而取最后一个 JSON 对象
+        doc = None
+        try:
+            doc = json.loads(out)
+        except Exception:
+            for line in reversed(out.splitlines()):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        doc = json.loads(line)
+                        break
+                    except Exception:
+                        continue
+        if not isinstance(doc, dict):
+            doc = None
+        if cp.returncode != 0 and not doc:
+            return self._json({"error": (cp.stderr or out or "exit %d" % cp.returncode)[:400]}, 502)
+        if not isinstance(doc, dict):
+            return self._json({"error": "没读到归纳结果：" + out[:200]}, 502)
+        return self._json(doc)
+
+    def _api_learn_apply(self, body):
+        """采纳建议 → 写进 card.json 的 habits。第二层动作：必须二次确认 + 备份 + changelog。"""
+        ip = (body.get("ip") or "").strip()
+        items = body.get("items") or []
+        if not ip:
+            return self._bad("缺少 IP")
+        if not isinstance(items, list) or not [x for x in items if str(x).strip()]:
+            return self._bad("没有选中任何一条建议")
+        if not body.get("confirm"):
+            return self._json({"error": "采纳习惯会改档案卡真值，需要二次确认",
+                               "need_confirm": True,
+                               "message": "将写入 %d 条习惯到 %s 的 card.json"
+                                          % (len(items), ip)}, 428)
+        root = ip_root(ip)
+        if not root:
+            return self._bad("不认识的 IP：" + ip)
+        try:
+            import learning
+            n, bak = learning.apply(ip, items)
+        except Exception as ex:
+            return self._bad(str(ex))
+        cp = os.path.join(root, "card.json")
+        append_changelog("ip", ip, cp, "card.habits(学习闭环采纳)",
+                         None, "、".join(str(x) for x in items), actor="ui-learning")
+        return self._json({"ok": True, "added": n, "backup": bak,
+                           "path": cp, "message": "已采纳 %d 条进 card.json 的 habits" % n})
+
     def _api_bgm_library(self, get):
         """配乐库：这个 IP 已经攒下来多少首、都是哪来的。
 
@@ -3788,9 +3866,72 @@ class Handler(BaseHTTPRequestHandler):
         ip = (body or {}).get("ip") or get("ip")
         text = (body or {}).get("text") or ""
         history = (body or {}).get("history") or []
+        refs = (body or {}).get("refs") or []
+        pending = (body or {}).get("pending_actions") or []
+        setname = (body or {}).get("set") or ""
 
         if not text.strip():
             return self._bad("没说什么，先说点需求吧")
+
+        # ---- 确认闭环 ----
+        # ★ 以前这里不存「等确认」的动作：用户说「确认」时模型重新拆一遍意图，
+        #   很可能拆成别的东西（或又返回一轮 await_confirm），确认就落空了。
+        #   现在前端把上一轮 await_confirm 的动作原样回传，这里直接执行，不再问模型。
+        CONFIRM_WORDS = ("确认", "确定", "直接改", "立即执行", "就这么办", "马上", "执行吧", "同意")
+        CANCEL_WORDS = ("算了", "取消", "不要了", "别改了", "撤销", "先不改")
+        # 只认「纯确认」的短句。要是「确认，另外把字号改大」这种混合句，
+        # 走下面的 LLM 分支（会带上待确认摘要），别把后半句需求吞掉。
+        is_confirm = any(k in text for k in CONFIRM_WORDS) and len(text.strip()) <= 12
+        is_cancel = any(k in text for k in CANCEL_WORDS) and len(text.strip()) <= 12
+        if pending and is_cancel:
+            return self._json({"ok": True, "reply": "好，那几项先不动，已经取消。", "actions": []})
+        if pending and is_confirm:
+            results, parts = [], []
+            for a in pending:
+                p = dict(a.get("params") or {})
+                if not p.get("set") and setname:
+                    p["set"] = setname
+                ok, msg, data = self._exec_dialogue_action(ip, a.get("action"), p)
+                # ★ msg 有时是 dict（run_status / run_jobs 直接回 JSON），
+                #   以前直接拿去拼字符串 → TypeError → 整个确认请求 500。
+                #   读类结果也别整坨 JSON 刷进对话，说一句「已查到」就行。
+                msg_s = str(msg or a.get("explanation") or a.get("action") or "")
+                is_read = str(a.get("action") or "").startswith(("read_", "run_"))
+                if is_read and ok:
+                    msg_s = "已查到" + ("（" + str(a.get("explanation") or "") + "）"
+                                    if a.get("explanation") else "")
+                elif len(msg_s) > 120:
+                    msg_s = msg_s[:120] + "…"
+                results.append({"action": a.get("action"),
+                                "status": "done" if ok else "error",
+                                "params": p, "message": msg_s, "data": data})
+                parts.append(("✔ " if ok else "✗ ") + msg_s)
+            return self._json({"ok": True, "reply": " ".join(parts).strip(), "actions": results})
+
+        # ---- @ 引用素材的上下文 ----
+        root = ip_root(ip) if ip else None
+        full = (self._full_set(ip, setname) or setname) if (root and setname) else ""
+        seg_of = {}
+        if full:
+            mp = os.path.join(root, "05_文案", full, "materials.json")
+            if os.path.isfile(mp):
+                md = load_json(mp) or {}
+                for key in ("segments", "seg_videos"):
+                    for k, ids in (md.get(key) or {}).items():
+                        for x in (ids if isinstance(ids, list) else [ids]):
+                            seg_of.setdefault(str(x), set()).add(str(k))
+        refs_txt = ""
+        if refs:
+            lines = ["【用户本次 @ 引用的素材】"]
+            for r in refs[:8]:
+                r = r if isinstance(r, dict) else {}
+                mid = str(r.get("id") or "")
+                where = seg_of.get(mid) or seg_of.get(mid.replace("ip:", ""))
+                tail = ("，当前用于段 " + "、".join(sorted(where))) if where else "，当前未指定到任何段"
+                lines.append("- %s（%s，id=%s%s）%s" % (
+                    r.get("name") or mid, r.get("kind") or "素材", mid, tail,
+                    ("：" + str(r.get("desc"))) if r.get("desc") else ""))
+            refs_txt = "\n".join(lines) + "\n"
 
         # 把意图拆成结构化动作（走付费池，sensitive=True）
         import studio_ai
@@ -3815,19 +3956,32 @@ class Handler(BaseHTTPRequestHandler):
 - read_script: 读某套稿子。params: {ip, set}
 - write_script: 写某套稿子。params: {ip, set, text}
 - trial_cfg: 改试片配置（定帧/样片可选+模式）。params: {ip, mode, enabled_still, enabled_sample}
+- read_materials: 读本套素材清单（有哪些图/视频、每段用哪张）。params: {ip, set}
+- assign_material: 把某素材指定给某一段。params: {ip, set, seg(段号), material_id, kind}  kind ∈ image/video
+- answer: 只是回答问题、给建议、解释，不改任何东西。params: {text}  text 就是你要对用户说的话
 - unknown: 无法理解或超出能力。params: {}
 
 规则：
 1. 先识别用户提到的 IP（按名字/别名，如「老王」「陈洁斌」「主号」），没提到就设 confirm_needed=true 并让用户说明。
-2. 涉及写操作（write_* / add_* / new_card / set_stage / trial_cfg）必须 confirm_needed=true，
+2. 涉及写操作（write_* / add_* / new_card / set_stage / trial_cfg / assign_material）必须 confirm_needed=true，
    在 reply 里先说明白将改什么，等用户说「直接改/立即执行/确认」后再执行。
-   读操作（read_* / run_* / run_jobs）直接执行，confirm_needed=false。
+   读操作（read_* / run_* / run_jobs / read_materials）和 answer 直接执行，confirm_needed=false。
 3. 用户说「学习/记住/习惯/红线/需求」→ 写入档案卡的 habits/redlines/needs。
    用户说「字号/音色/静帧/技术参数」→ 写入 ip.json。
    用户说「人设/规范/圣经」→ 写入 01_人设与规范/。
    用户说「这套/M01/套次/稿子/字幕」→ 操作成片层（05_文案/07_成片）。
-4. 返回 JSON：{"actions": [{"action","params","confirm_needed","explanation"}], "reply": "对用户的自然语言回复"}
-   reply 要口语化、简短，像人说话。
+4. ★ 用户 @ 了素材时：上面【用户本次 @ 引用的素材】会告诉你它是谁、现在用在哪一段。
+   - 问「这张适合放哪 / 这段用哪张 / 为什么没用上」→ 用 answer 直接回答，讲清理由，
+     不要擅自改动；想建议改就说「要的话我可以把它放到第 N 段」。
+   - 明确说「放到第 N 段 / 这段换成这张」→ 用 assign_material（写操作，等确认）。
+   - 素材 id 用引用里给的 id，套次用上下文里的套次号，不要自己编。
+5. ★ 用户只是聊天、问问题、问现状、要建议时，一律用 answer，不要硬凑一个动作去改东西。
+   answer 的 text 要直接、口语化、简短，像人说话，不要写「我将为您…」这种官腔。
+6. ★ 若上面给了【上一轮等你确认、还没执行的动作】，而用户这句在确认它：
+   把那些动作**原样**放进 actions（action 和 params 都照抄，别重新编），
+   confirm_needed 设 false，就会直接执行。用户同时提了新需求，再另加对应动作。
+7. 返回 JSON：{"actions": [{"action","params","confirm_needed","explanation"}], "reply": "对用户的自然语言回复"}
+   reply 要口语化、简短；有 answer 动作时 reply 可以简短带过，正文在 answer.text 里。
 """
 
         # 把对话历史压进 user 侧，给模型上下文
@@ -3835,7 +3989,14 @@ class Handler(BaseHTTPRequestHandler):
         for h in history[-6:]:
             role = "用户" if h.get("role") == "user" else "助手"
             hist_txt += f"{role}：{h.get('content','')}\n"
-        user_msg = f"最近对话：\n{hist_txt}\n当前用户说：{text}\n当前选中 IP：{ip or '（未选）'}"
+        pending_txt = ""
+        if pending:
+            pending_txt = "【上一轮等你确认、还没执行的动作】\n" + "\n".join(
+                "- %s：%s（params=%s）" % (a.get("action"), a.get("explanation") or "",
+                                          json.dumps(a.get("params") or {}, ensure_ascii=False))
+                for a in pending[:6]) + "\n"
+        user_msg = (f"{refs_txt}{pending_txt}最近对话：\n{hist_txt}\n当前用户说：{text}\n"
+                    f"当前选中 IP：{ip or '（未选）'}\n当前套次：{full or '（未选）'}")
 
         try:
             parsed, provider = studio_ai.chat_json(system, user_msg,
@@ -3870,7 +4031,7 @@ class Handler(BaseHTTPRequestHandler):
             is_write = action in (
                 "write_card", "add_habit", "add_redline", "add_need",
                 "write_ip", "write_persona", "new_card", "set_stage",
-                "write_script", "trial_cfg",
+                "write_script", "trial_cfg", "assign_material",
             )
             need_confirm = is_write and cn and not any(
                 k in text for k in ("直接改", "立即执行", "确认", "马上", "就这么办")
@@ -3879,17 +4040,39 @@ class Handler(BaseHTTPRequestHandler):
             if need_confirm:
                 any_confirm = True
                 reply_parts.append(f"⏸ {expl or action} —— 需要您确认后才改。")
+                params_out = dict(params)
+                # 待确认动作回传执行时也要套次号，缺了会执行不了
+                if action in ("assign_material", "write_script", "set_stage") \
+                        and not params_out.get("set") and full:
+                    params_out["set"] = full
                 results.append({"action": action, "status": "await_confirm",
-                                "params": params, "explanation": expl})
+                                "params": params_out, "explanation": expl})
                 continue
 
+            # answer 是「只回答不改动」，正文直接并进 reply，别再往下走执行器
+            if action == "answer":
+                ans = str(params.get("text") or "").strip()
+                if ans:
+                    reply_parts.append(ans)
+                    results.append({"action": "answer", "status": "answered",
+                                    "message": ans[:80]})
+                continue
+
+            # 素材类动作要套次号；模型常漏给，这里从当前上下文补上
+            if action in ("assign_material", "read_materials") and not params.get("set") and full:
+                params = dict(params); params["set"] = full
+
             ok, msg, data = self._exec_dialogue_action(ip, action, params)
+            # 读类动作 msg 可能是整份 JSON，别把一坨塞进气泡
+            msg_s = str(msg or expl or action or "")
+            if len(msg_s) > 120:
+                msg_s = msg_s[:120] + "…"
             results.append({"action": action, "status": "done" if ok else "error",
-                            "params": params, "message": msg, "data": data})
+                            "params": params, "message": msg_s, "data": data})
             if ok:
-                reply_parts.append(f"✔ {msg or expl or action}")
+                reply_parts.append(f"✔ {msg_s}")
             else:
-                reply_parts.append(f"✗ {msg or action} 失败")
+                reply_parts.append(f"✗ {msg_s} 失败")
 
         final_reply = parsed.get("reply", "")
         if reply_parts:
@@ -3952,6 +4135,65 @@ class Handler(BaseHTTPRequestHandler):
                     return False, f"这套还没有稿子：{setname}", None
                 with open(p, encoding="utf-8") as f:
                     return True, f"稿子「{setname}」已读", {"text": f.read()}
+
+            if action == "read_materials":
+                setname = params.get("set") or ""
+                full = self._full_set(ip, setname) or setname
+                if not full:
+                    return False, "先说哪一套（set）", None
+                mp = os.path.join(root, "05_文案", full, "materials.json")
+                if not os.path.isfile(mp):
+                    return False, f"这套还没建素材清单：{full}", None
+                return True, f"素材清单「{full}」已读", {"path": mp, "doc": load_json(mp)}
+
+            if action == "assign_material":
+                setname = params.get("set") or ""
+                full = self._full_set(ip, setname) or setname
+                if not full:
+                    return False, "先说哪一套（set）", None
+                mp = os.path.join(root, "05_文案", full, "materials.json")
+                doc = load_json(mp) or {}
+                seg = str(params.get("seg") or "").strip()
+                mid = str(params.get("material_id") or "").strip()
+                kind = str(params.get("kind") or "image").strip().lower()
+                if not seg.isdigit():
+                    return False, "段号得是数字（比如 2）", None
+                if not mid:
+                    return False, "没说用哪个素材", None
+                if kind == "image":
+                    known = {"img"} | {str(x.get("id")) for x in (doc.get("images") or [])
+                                       if isinstance(x, dict)}
+                    field, cap = "segments", 9
+                elif kind == "video":
+                    known = {str(x.get("id")) for x in (doc.get("videos") or [])
+                             if isinstance(x, dict)}
+                    field, cap = "seg_videos", self.MAX_REF_VIDEOS
+                else:
+                    return False, "kind 只能是 image 或 video", None
+                if mid not in known:
+                    return False, f"清单里没有这个素材：{mid}（已登记：{sorted(known)}）", None
+                arr = list((doc.get(field) or {}).get(seg) or [])
+                if mid not in arr:
+                    arr.append(mid)
+                if len(arr) > cap:
+                    return False, f"第 {seg} 段会挂 {len(arr)} 个，超过 H3 上限 {cap}", None
+                # 合计参考文件上限（图 + 视频 + 配音 1）
+                total = len(doc.get("images") or []) + len(doc.get("videos") or []) + 1
+                if total > self.MAX_REF_TOTAL:
+                    return False, f"参考文件合计 {total} 个，超过上限 {self.MAX_REF_TOTAL}", None
+                # ★ 只改这一个字段，不整份替换 —— _ai 的分配理由天然保住
+                old = (doc.get(field) or {}).get(seg)
+                doc.setdefault(field, {})[seg] = arr
+                bak = mp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                if os.path.isfile(mp):
+                    shutil.copy2(mp, bak)
+                tmp = mp + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(doc, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, mp)
+                append_changelog("ip", ip, mp, f"materials.{field}.{seg}(对话)",
+                                 str(old), str(arr), actor="dialogue")
+                return True, f"已把 {mid} 指定到第 {seg} 段", None
 
             # ---------- 写类 ----------
             if action == "write_card":

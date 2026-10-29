@@ -912,7 +912,8 @@ input[type="range"]::-moz-range-thumb {
   color:var(--tx-2); background:var(--glass-2); white-space:nowrap; }
 
 /* ---------- 总沟通对话区 ---------- */
-.dlg-wrap { display:flex; flex-direction:column; gap:8px; height:calc(100% - 120px); overflow:auto; padding:8px 0; }
+#dialogueBox { display:flex; flex-direction:column; }
+.dlg-wrap { display:flex; flex-direction:column; gap:8px; flex:1 1 auto; min-height:120px; overflow:auto; padding:8px 0; }
 .dlg-sys { font-size:11px; color:var(--tx-3); text-align:center; padding:8px; background:var(--glass-2); border-radius:8px; }
 .dlg-msg { display:flex; flex-direction:column; gap:3px; max-width:88%; animation: dlgIn .25s ease; }
 .dlg-mine { align-self:flex-end; }
@@ -925,9 +926,46 @@ input[type="range"]::-moz-range-thumb {
 .dlg-act-ok { border-color:var(--ok); color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent); }
 .dlg-act-wait { border-color:var(--warn); color:var(--warn); background:color-mix(in srgb, var(--warn) 12%, transparent); }
 .dlg-act-bad { border-color:var(--err); color:var(--err); background:color-mix(in srgb, var(--err) 12%, transparent); }
-.dlg-input { display:flex; gap:6px; margin-top:8px; padding-top:8px; border-top:1px solid var(--stroke); }
-.dlg-input input { flex:1; min-width:0; }
+.dlg-input { display:flex; gap:6px; margin-top:8px; padding-top:8px; border-top:1px solid var(--stroke); align-items:flex-end; }
+.dlg-input textarea { flex:1; min-width:0; resize:vertical; min-height:52px; max-height:140px;
+  line-height:1.5; font-family:var(--font-sans); font-size:12.5px; }
+.dlg-input .btn { flex:0 0 auto; height:52px; }
 .dlg-hint { font-size:11px; color:var(--tx-3); margin-top:6px; }
+
+/* 学习条：踩过的坑 → 提炼 → 采纳。放对话区顶部，不单独占一个面板 */
+.dlg-learn { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  padding:6px 9px; margin-bottom:6px; border:1px solid var(--stroke);
+  border-radius:8px; background:var(--glass-2); font-size:11px; }
+.dlg-learn.ready { border-color:var(--warn); background:color-mix(in srgb, var(--warn) 9%, transparent); }
+.dlg-learn .ln-txt { flex:1; min-width:150px; color:var(--tx-2); }
+.dlg-learn.ready .ln-txt { color:var(--warn); }
+.dlg-sug { flex:0 0 100%; display:none; margin-top:4px; padding-top:6px;
+  border-top:1px dashed var(--stroke); flex-direction:column; gap:5px; }
+.dlg-sug.show { display:flex; }
+.dlg-sug .sg-row { display:flex; align-items:flex-start; gap:6px; font-size:11.5px;
+  color:var(--tx-1); line-height:1.5; }
+.dlg-sug .sg-row input { margin-top:3px; accent-color:var(--accent); }
+.dlg-sug .sg-why { color:var(--tx-3); font-size:11px; }
+
+/* @ 引用：已选素材 chips + 输入时的候选下拉 */
+.dlg-refs { display:flex; gap:5px; flex-wrap:wrap; margin-top:6px; }
+.dlg-refs:empty { display:none; }
+.dlg-chip { display:inline-flex; align-items:center; gap:4px; padding:2px 8px;
+  border-radius:999px; font-size:11px; border:1px solid var(--accent);
+  color:var(--accent); background:var(--accent-soft); }
+.dlg-chip b { font-weight:500; }
+.dlg-chip .cx { cursor:pointer; opacity:.7; }
+.dlg-chip .cx:hover { opacity:1; }
+.dlg-at { display:none; margin-top:6px; border:1px solid var(--stroke);
+  border-radius:8px; background:var(--glass-2); max-height:190px; overflow:auto; }
+.dlg-at.show { display:block; }
+.dlg-at .at-row { padding:6px 10px; font-size:12px; cursor:pointer; display:flex;
+  gap:8px; align-items:center; border-bottom:1px solid var(--stroke); }
+.dlg-at .at-row:last-child { border-bottom:none; }
+.dlg-at .at-row:hover, .dlg-at .at-row.on { background:var(--accent-soft); }
+.dlg-at .at-kind { font-size:10px; padding:1px 6px; border-radius:999px;
+  border:1px solid var(--stroke); color:var(--tx-3); flex:0 0 auto; }
+.dlg-at .at-empty { padding:8px 10px; font-size:11px; color:var(--tx-3); }
 
 @keyframes dlgIn {
   from { opacity:0; transform:translateY(6px); }

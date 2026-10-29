@@ -235,12 +235,15 @@
           <svg class="caret"><use href="#i-chev"/></svg>
         </div>
         <div class="panel-body"><div class="inner" id="dialogueBox">
+          <div class="dlg-learn" id="dlgLearn"></div>
           <div class="dlg-wrap" id="dlgMessages"></div>
+          <div class="dlg-refs" id="dlgRefs"></div>
           <div class="dlg-input">
-            <input id="dlgInput" type="text" placeholder="比如：把老王的音色改成温和一点 / 给陈洁斌加条红线：不许出现同行品牌 / 新建一个客户档案卡" autocomplete="off">
+            <textarea id="dlgInput" rows="2" placeholder="像跟我说话一样提需求。输入 @ 可以引用本套素材（图 / 参考视频），例如：@门店 这张放到第 2 段" autocomplete="off"></textarea>
             <button class="btn sm primary" id="dlgSend"><svg><use href="#i-send"/></svg> 发送</button>
           </div>
-          <div class="dlg-hint" id="dlgHint">一次说一件事最准；涉及改动我会先说「将做什么」，等你确认再执行。</div>
+          <div class="dlg-at" id="dlgAt"></div>
+          <div class="dlg-hint" id="dlgHint">可以连着说多轮；我会记住前面聊过什么。涉及改动先说「将做什么」，等你确认再执行。</div>
         </div></div>
       </section>
 

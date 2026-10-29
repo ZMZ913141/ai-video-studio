@@ -254,7 +254,25 @@ const state = {
   // 定帧素材的取法：ai=中文→AI写英文 / polish=润色现有英文 / pick=引用已有素材
   stillMode: 'ai', stillWho: '', stillScene: '', stillPromptEn: '', stillAssets: [],
   dialogue: [],
+  // 对话区：按 IP 存的多轮历史、待确认动作、@ 引用
+  dlgRefs: [], dlgPending: [], dlgCandidates: [], dlgAtSel: 0, dlgLearn: null,
 };
+
+/* 对话按 IP 存在**内存**里：切客户不串台、切回来还在，但刷新页面仍清空。
+   ★ 刻意不写 localStorage —— 对话里常有客户的原话、稿子、人设，
+     落本地持久化（哪怕是浏览器里）就是多留一份明文。这条安全设计别改。
+   多轮靠的是「同一会话内把最近历史传给后端」，不靠持久化。 */
+const dlgByIp = {};
+function loadDialogue(ip) {
+  const cached = dlgByIp[ip];
+  state.dialogue = cached && Array.isArray(cached.messages) ? cached.messages.slice() : [];
+  state.dlgPending = cached && Array.isArray(cached.pending) ? cached.pending.slice() : [];
+  state.dlgRefs = [];
+}
+function saveDialogue() {
+  if (!state.ip) return;
+  dlgByIp[state.ip] = { messages: state.dialogue.slice(-40), pending: state.dlgPending };
+}
 
 /* ---------- 布局记忆 ---------- */
 const LS = 'vstudio.ui.v1';
@@ -469,6 +487,9 @@ async function selectIP(name) {
   state.ip = name;
   state.ipRoot = (state.ips.find(i => i.name === name) || {}).path;
   state.setId = null; state.setPath = null; state.job = null;
+  // 换客户＝换一段对话。先把上一个 IP 的存好，再把这个 IP 的读回来，别串台。
+  loadDialogue(name);
+  state.dlgLearn = null;
   $('#btnGuard').disabled = false;
   await Promise.all([loadJobs(), loadCard(), loadIpCfg(), loadFonts(),
                      (async () => { state.cfg = await api('config'); })()]);
@@ -498,6 +519,8 @@ async function loadIpCfg() {
 async function selectSet(id) {
   state.setId = id || null;
   state.setPath = null; state.prompts = null; state.algo = null; state.guard = null;
+  // 换套次要丢掉上一套的 @ 候选，不然会引用到别套的素材
+  state.dlgCandidates = []; state.dlgRefs = [];
   renderTree(); renderHero();
   // ★ 即使没套次，人设/试片/对话面板也要能渲染（它们内部会检查 state.ip）
   //   以前 id 为空时直接 return，renderPersona()/renderTrial()/renderDialogue() 全被跳过，
@@ -2024,14 +2047,17 @@ async function saveTrialCfg() {
 }
 
 /* ---------- 总沟通对话区 ----------
-   ★ 用自然语言说需求，后端把意图拆成可执行动作（改档案卡/技术真值/人设/阶段/试片），
-     先说「将做什么」，等你确认再执行。每一处写都记入 changelog。
-   ★ 对话历史只存在当前页面会话里，刷新就清——涉密内容不落本地持久化。 */
+   ★ 用自然语言说需求，后端把意图拆成可执行动作（改档案卡/技术真值/人设/阶段/试片/
+     素材分配），也能就引用的素材直接回答。先说「将做什么」，等你确认再执行。
+   ★ 多轮靠「最近历史传给后端」+「等确认的动作原样存下来回传」，不靠持久化。
+   ★ 对话只在当前页面会话内按 IP 缓存，刷新就清——涉密内容绝不落本地持久化。 */
 
 function renderDialogue() {
   const box = $('#dlgMessages');
+  if (!box) return;
   if (!state.ip) {
     box.innerHTML = '<div class="dlg-sys">先在左栏选一个 IP，再跟我说需求。</div>';
+    const el = $('#dlgLearn'); if (el) el.innerHTML = '';
     return;
   }
   box.innerHTML = state.dialogue.map(m => {
@@ -2042,23 +2068,159 @@ function renderDialogue() {
       content += `<div class="dlg-actions">
         ${m.actions.map(a => {
           if (a.status === 'await_confirm') {
-            return `<span class="dlg-act dlg-act-wait">⏸ ${a.explanation || a.action}（等确认）</span>`;
+            return `<span class="dlg-act dlg-act-wait">⏸ ${esc(a.explanation || a.action)}（等确认）</span>`;
           }
           if (a.status === 'done') {
-            return `<span class="dlg-act dlg-act-ok">✔ ${a.message || a.action}</span>`;
+            return `<span class="dlg-act dlg-act-ok">✔ ${esc(a.message || a.action)}</span>`;
           }
-          return `<span class="dlg-act dlg-act-bad">✗ ${a.message || a.action}</span>`;
+          if (a.status === 'answered') {
+            return `<span class="dlg-act">💬 已回答</span>`;
+          }
+          return `<span class="dlg-act dlg-act-bad">✗ ${esc(a.message || a.action)}</span>`;
         }).join('')}
       </div>`;
     }
     return `<div class="${cls}">${content}</div>`;
-  }).join('');
+  }).join('') || '<div class="dlg-sys">跟我说需求就行。输入 @ 可以引用本套素材。</div>';
   box.scrollTop = box.scrollHeight;
+  renderDlgRefs();
+  renderLearnStrip();
 }
 
 function appendMessage(role, content, actions) {
   state.dialogue.push({ role, content, actions, at: new Date().toLocaleString() });
   renderDialogue();
+  saveDialogue();
+}
+
+/* ---------- 学习条：踩过的坑 → 提炼 → 采纳 ----------
+   闭环的「提炼」和「采纳」两半都在这儿。提炼只出建议，采纳才写真值。 */
+async function renderLearnStrip() {
+  const el = $('#dlgLearn');
+  if (!el) return;
+  if (!state.ip) { el.innerHTML = ''; return; }
+  const d = await api('learn-list?ip=' + encodeURIComponent(state.ip)).catch(() => null);
+  state.dlgLearn = d;
+  if (!d || d.error) { el.innerHTML = ''; return; }
+  const h = d.habits || {};
+  const total = h.total || 0, nnew = h.new_since || 0, thr = h.threshold || 3;
+  const sug = h.suggest || {};
+  const adopted = sug.adopted || [];
+  const items = (sug.habits || []).filter(x => !adopted.includes(x));
+  let cls = 'dlg-learn', txt;
+  if (items.length) { cls += ' ready'; txt = `有 ${items.length} 条习惯建议等你采纳`; }
+  else if (h.can_promote) { cls += ' ready'; txt = `攒了 ${nnew} 条新返工教训，可以提炼成习惯了`; }
+  else txt = `踩过的坑：${total} 条返工记录（再记 ${Math.max(0, thr - nnew)} 条就能提炼）`;
+  el.className = cls;
+  el.innerHTML = `<span class="ln-txt">${ico('spark')} ${esc(txt)}</span>
+    <button class="btn xs" id="btnLearnPromote">${ico('spark')} 提炼成习惯</button>
+    <div class="dlg-sug" id="dlgSug"></div>`;
+  $('#btnLearnPromote').onclick = promoteLearn;
+  if (items.length) {
+    const sb = $('#dlgSug');
+    sb.classList.add('show');
+    sb.innerHTML = items.map(x => `<label class="sg-row">
+        <input type="checkbox" class="sg-chk" value="${esc(x)}" checked>${esc(x)}</label>`).join('')
+      + (sug.reason ? `<div class="sg-why">归纳依据：${esc(sug.reason)}</div>` : '')
+      + `<div style="display:flex;gap:6px;margin-top:4px;align-items:center;flex-wrap:wrap">
+           <button class="btn xs primary" id="btnLearnApply">${ico('save')} 采纳选中</button>
+           <span class="hint">采纳＝写进 card.json 习惯，会二次确认并留 changelog</span></div>`;
+    $('#btnLearnApply').onclick = applyLearn;
+  }
+}
+
+async function promoteLearn() {
+  const btn = $('#btnLearnPromote');
+  const h = (state.dlgLearn && state.dlgLearn.habits) || {};
+  await busyBtn(btn, '归纳中…', async () => {
+    const r = await api('learn-promote',
+      { body: { ip: state.ip, force: !h.can_promote } });
+    if (r.error) { toast('没提炼成', r.error, 'err'); return; }
+    if (!r.ok) { toast(r.reason || '暂时提炼不了', '', 'info'); return; }
+    toast('归纳完成', `${(r.habits || []).length} 条建议，看过再采纳`, 'ok');
+    await renderLearnStrip();
+  });
+}
+
+async function applyLearn() {
+  const items = [...document.querySelectorAll('.sg-chk:checked')].map(x => x.value);
+  if (!items.length) return toast('先勾一条建议', '', 'err');
+  const ok = await confirmBox('采纳这几条习惯？',
+    `<p>将写进 <b>${esc(state.ip)}</b> 的 card.json（业务真值），以后出稿 AI 会照着做：</p>
+     <ul style="margin:8px 0 0 18px">${items.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+     <p class="hint" style="margin-top:8px">改前自动备份，改动记进 changelog。</p>`, '采纳');
+  if (!ok) return;
+  const r = await api('learn-apply', { body: { ip: state.ip, items, confirm: 1 } });
+  if (r.error) return toast('没采纳成', r.error, 'err');
+  toast('已采纳', r.message || '', 'ok');
+  await renderLearnStrip();
+}
+
+/* ---------- @ 素材引用 ---------- */
+async function loadDlgCandidates() {
+  state.dlgCandidates = [];
+  if (!state.ip || !state.setId) return;
+  const d = await api('set-materials?ip=' + encodeURIComponent(state.ip)
+    + '&set=' + encodeURIComponent(state.setId)).catch(() => null);
+  if (!d || d.error) return;
+  const mats = d.materials || {};
+  (mats.images || []).forEach(x => state.dlgCandidates.push({
+    id: x.id, name: x.name || x.id, kind: '图', file: x.file,
+    desc: (x.desc && x.desc.summary) || x.note || '' }));
+  (mats.videos || []).forEach(x => state.dlgCandidates.push({
+    id: x.id, name: x.id + '（参考视频）', kind: '视频', file: x.file,
+    desc: x.note || '' }));
+  (d.ip_images || []).forEach(x => state.dlgCandidates.push({
+    id: 'ip:' + x.rel, name: x.name, kind: 'IP图', file: x.rel, desc: '' }));
+}
+
+function dlgAtQuery() {
+  const ta = $('#dlgInput');
+  if (!ta) return null;
+  const pos = ta.selectionStart;
+  const m = ta.value.slice(0, pos).match(/@([^\s@\[\]]*)$/);
+  return m ? { q: m[1], start: pos - m[0].length } : null;
+}
+
+async function updateDlgAt() {
+  const box = $('#dlgAt');
+  if (!box) return;
+  const hit = dlgAtQuery();
+  if (!hit) { box.classList.remove('show'); return; }
+  if (!state.dlgCandidates.length) await loadDlgCandidates();
+  const q = (hit.q || '').toLowerCase();
+  const list = state.dlgCandidates.filter(c =>
+    !q || (c.name || '').toLowerCase().includes(q) || (c.id || '').toLowerCase().includes(q));
+  if (state.dlgAtSel >= list.length) state.dlgAtSel = 0;
+  box.innerHTML = list.length
+    ? list.map((c, i) => `<div class="at-row ${i === state.dlgAtSel ? 'on' : ''}" data-at="${i}">
+        <span class="at-kind">${esc(c.kind)}</span><span>${esc(c.name)}</span>
+        <span class="hint">${esc(c.desc || '')}</span></div>`).join('')
+    : '<div class="at-empty">没有匹配的素材。先去「本套素材」上传几张，或换个词。</div>';
+  box.classList.add('show');
+  box._list = list; box._hit = hit;
+}
+
+function pickDlgAt(i) {
+  const box = $('#dlgAt');
+  const list = box && box._list || [], hit = box && box._hit;
+  if (!hit || !list[i]) return;
+  const c = list[i], ta = $('#dlgInput');
+  const insert = '@[' + c.name + ']';
+  ta.value = ta.value.slice(0, hit.start) + insert + ' ' + ta.value.slice(ta.selectionStart);
+  const np = hit.start + insert.length + 1;
+  ta.setSelectionRange(np, np); ta.focus();
+  if (!state.dlgRefs.some(r => r.id === c.id)) state.dlgRefs.push(c);
+  box.classList.remove('show');
+  renderDlgRefs();
+}
+
+function renderDlgRefs() {
+  const el = $('#dlgRefs');
+  if (!el) return;
+  el.innerHTML = state.dlgRefs.map((r, i) =>
+    `<span class="dlg-chip"><b>${esc(r.kind)}</b> ${esc(r.name)}
+      <span class="cx" data-ri="${i}" title="取消引用">×</span></span>`).join('');
 }
 
 async function sendDialogue() {
@@ -2066,23 +2228,36 @@ async function sendDialogue() {
   const text = (input.value || '').trim();
   if (!text || !state.ip) return;
   input.value = '';
+  const at = $('#dlgAt'); if (at) at.classList.remove('show');
   appendMessage('user', text);
+  const refs = state.dlgRefs.map(r => ({ id: r.id, name: r.name, kind: r.kind,
+                                         file: r.file, desc: r.desc }));
+  state.dlgRefs = []; renderDlgRefs();
+  const pending = state.dlgPending || [];
   $('#dlgSend').disabled = true;
-  $('#dlgHint').textContent = '正在理解…';
+  $('#dlgHint').textContent = pending.length ? '正在执行你确认的动作…' : '正在理解…';
   try {
     const r = await api('dialogue', {
-      body: { ip: state.ip, text, history: state.dialogue.slice(-10) },
+      body: { ip: state.ip, set: state.setId, text, refs,
+              pending_actions: pending, history: state.dialogue.slice(-10) },
     });
     if (r.error) {
       appendMessage('assistant', `抱歉，出了点问题：${r.error}`);
     } else {
       appendMessage('assistant', r.reply || '收到了。', r.actions || []);
+      // ★ 把「等确认」的动作原样存下来。以前不存，用户说「确认」时
+      //   模型重新拆一遍意图，很可能拆成别的 —— 确认就落空了。
+      state.dlgPending = (r.actions || []).filter(a => a.status === 'await_confirm');
+      saveDialogue();
     }
   } catch (ex) {
     appendMessage('assistant', `发送失败：${ex}`);
   }
   $('#dlgSend').disabled = false;
-  $('#dlgHint').textContent = '一次说一件事最准；涉及改动我会先说「将做什么」，等你确认再执行。';
+  const pn = (state.dlgPending || []).length;
+  $('#dlgHint').textContent = pn
+    ? `有 ${pn} 项等你确认 —— 说「确认 / 直接改」就执行，「算了」取消。想同时提新需求，分两句说更稳。`
+    : '可以连着说多轮；输入 @ 引用素材。涉及改动先说「将做什么」，等你确认再执行。';
 }
 
 /* ---------- 人设与规范 ----------
@@ -3431,7 +3606,21 @@ function bind() {
     }
   });
   $('#dlgInput').addEventListener('keydown', e => {
+    const at = $('#dlgAt');
+    const atOpen = at && at.classList.contains('show');
+    if (atOpen) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); state.dlgAtSel++; return void updateDlgAt(); }
+      if (e.key === 'ArrowUp') { e.preventDefault(); state.dlgAtSel = Math.max(0, state.dlgAtSel - 1); return void updateDlgAt(); }
+      if (e.key === 'Enter') { e.preventDefault(); return void pickDlgAt(state.dlgAtSel); }
+      if (e.key === 'Escape') { at.classList.remove('show'); return; }
+    }
+    // textarea：Enter 发送，Shift+Enter 换行
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendDialogue(); }
+  });
+  $('#dlgInput').addEventListener('input', () => { state.dlgAtSel = 0; updateDlgAt(); });
+  $('#dlgAt').addEventListener('click', e => {
+    const row = e.target.closest('[data-at]');
+    if (row) pickDlgAt(Number(row.dataset.at));
   });
 
   // 顶栏
@@ -3570,6 +3759,8 @@ function bind() {
     }
     // ---- 总沟通对话区 ----
     if (e.target.closest('#dlgSend')) return void sendDialogue();
+    const ri = e.target.closest('[data-ri]');
+    if (ri) { state.dlgRefs.splice(Number(ri.dataset.ri), 1); renderDlgRefs(); return; }
     if (e.target.closest('#btnDialogueClear')) {
       // ★ 以前是「一点就清」：没有确认、没有提示、也找不回来。
       //   小白手一抖点上去，前面聊了十几轮的需求上下文全没了。
@@ -3584,7 +3775,8 @@ function bind() {
          如果只是想把地方腾出来，用这块面板右上角的折叠就行，不用清空。</p>`,
         '清空');
       if (!ok) return;
-      state.dialogue = []; renderDialogue(); toast(`已清空 ${n} 条对话`); return;
+      state.dialogue = []; state.dlgPending = []; state.dlgRefs = [];
+      renderDialogue(); saveDialogue(); toast(`已清空 ${n} 条对话`); return;
     }
   });
 }
