@@ -1581,16 +1581,48 @@ async function renderAudio() {
   // 配音候选：跟着套次走
   let ttsBlock = '<div class="empty">先左播选一套片子 —— 配音是跟着某套走的</div>';
   if (state.setId) {
+    // ★ 配音念的就是这份 txt。以前声音面板只摆音色指令，稿子在隔壁需求台，
+    //   人切过来看到空白就以为「文案被刷新 / 不知道放哪了」—— 其实一直在同一个
+    //   文件里。这里直接读 script-text（和 gen_tts 完全同一个真源），点跑之前先摆出来。
+    const sc = await api('script-text?ip=' + encodeURIComponent(state.ip) +
+                         '&set=' + encodeURIComponent(state.setId)).catch(() => ({}));
+    state.ttsScript = sc;
+    const hasScript = !!sc.exists;
+    const scriptCard = hasScript ? `
+      <div class="tts-script">
+        <div class="ts-head">
+          <b>${ico('text')} 这套要念的文案</b>
+          <div class="ts-meta">
+            <span class="chip">${sc.chars || 0} 字 ≈ ${sc.est_secs || 0} 秒</span>
+            ${sc.mtime ? `<span class="chip">改于 ${esc(sc.mtime)}</span>` : ''}
+          </div>
+        </div>
+        <pre class="ts-body clip" id="ttsScriptBody">${esc(sc.text || '')}</pre>
+        <div class="ts-foot">
+          <button class="btn sm ghost" id="btnTtsScriptMore">展开全文</button>
+          <button class="btn sm" id="btnTtsGoEdit">${ico('note')} 去改文案</button>
+          <span class="hint">配音念的就是这份，跟需求台「本套文案」是同一个文件</span>
+        </div>
+      </div>` : `
+      <div class="tts-script empty">
+        <div class="ts-head"><b>${ico('alert')} 这套还没有文案</b></div>
+        <div class="hint" style="line-height:1.6">配音要念的稿子还空着。先去需求台写一句、或点「按角色写爆款文案」让 AI 起一稿 ——
+          没稿子就配音，出来是空的，白发一次显卡。</div>
+        <div class="ts-foot"><button class="btn sm primary" id="btnTtsGoEdit">${ico('note')} 去写文案</button></div>
+      </div>`;
     const d = await api('audio-list?ip=' + encodeURIComponent(state.ip) +
                         '&set=' + encodeURIComponent(state.setId)).catch(() => null);
     const items = (d && d.items) || [];
     $('#audioSub').textContent = items.length ? `${items.length} 条配音候选` : '还没配音';
     ttsBlock = `
-      <div class="hint" style="margin-bottom:6px">改了语气或换了稿子之后，点「只重做配音」重抽 ——
-        不必整套片子重出一遍。</div>
+      ${scriptCard}
+      <div class="tts-runscope">改了语气或换了稿子就重抽配音。两个按钮<b>区别只在「跑到哪」</b>：
+        <br>· <b>只重做配音</b>：跑到「留白」就停，不重出画面 —— 几十秒，不烧显卡出图，最常用。
+        <br>· <b>后面全重做</b>：从配音一路重出画面、字幕到验收 —— 要烧十几分钟显卡，
+          稿子/画面都变了才用它。</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-        <button class="btn sm primary" id="btnTtsRedoAudio">${ico('play')} 只重做配音（不重出画面）</button>
-        <button class="btn sm" id="btnTtsRedoAll">${ico('play')} 从配音开始，后面全重做</button>
+        <button class="btn sm primary" id="btnTtsRedoAudio">${ico('play')} 只重做配音</button>
+        <button class="btn sm" id="btnTtsRedoAll">${ico('play')} 从配音起，后面全重做</button>
       </div>
       <textarea id="ttsInstr" class="brief-area" style="min-height:56px"
         placeholder="例：用热情友好、有活力的语气，亲切自然，带笑容">${esc(tts.instruction || '')}</textarea>
@@ -2474,6 +2506,10 @@ async function renderBrief() {
     toast('文案已存', `${rr.chars || 0} 字` + (rr.backup ? ' · 原稿已备份' : '')
       + ((rr.stale_backup || []).length ? ` · 旧稿改名 ${rr.stale_backup.length} 份` : ''), 'ok');
     await renderBrief();
+    // ★ 联通性：文案改了，隔壁声音面板「这套要念的文案」也要跟着变。
+    //   两个面板同在「创作」组但各自渲染，不刷这里就会停留在旧稿 ——
+    //   人正是从这一步切过去，才误以为「文案被刷新 / 找不到了」。
+    await renderAudio();
   };
   $('#btnScriptPrompts').onclick = () => genPrompts('prompts-gen');
 }
@@ -3155,11 +3191,16 @@ function showBatch() {
         </select></label>
     </div>
     <label class="field" style="margin-top:6px"><span>选题（每行一条，逐条 AI 写文案 + 出片）</span>
-      <textarea id="bTopics" class="brief-area" style="min-height:120px"
+      <textarea id="bTopics" class="brief-area" style="min-height:100px"
         placeholder="为什么我不用真人出镜&#10;一条片子到底多少钱&#10;AI 分身会不会显得假"></textarea>
-      <span class="hint">套次号不写就按这个 IP 现有最大编号往后顺排（S05 之后即 S06）。</span></label>
-    <label class="field" style="margin-top:6px"><span>套次号（可选，逗号分隔，数量须与选题一致）</span>
-      <input id="bSets" placeholder="留空 = 自动顺排；要写就和上面行数对齐"></label>
+      <span class="hint"><b>留空也行</b> —— 在下面填个数字，让 AI 按人设自动出题、逐条写文案出片。
+        套次号不写就按这个 IP 现有最大编号往后顺排（S05 之后即 S06）。</span></label>
+    <div class="form-grid" style="margin-top:6px">
+      <label class="field"><span>要几条（选题留空时用）</span>
+        <input id="bCount" type="number" min="1" max="20" placeholder="例如 5 —— 留空且上面没填选题就用它"></label>
+      <label class="field"><span>套次号（可选，逗号分隔，数量须与选题一致）</span>
+        <input id="bSets" placeholder="留空 = 自动顺排；要写就和上面行数对齐"></label>
+    </div>
     <div class="chk-row" style="margin:12px 0 4px">
       <label class="chk"><input type="checkbox" id="bDry"> ${ico('eye')} 先看计划（只算要出哪些，不真烧 GPU）</label>
       <label class="chk"><input type="checkbox" id="bStop"> ${ico('alert')} 某条失败就停（默认继续跑剩下的）</label>
@@ -3174,17 +3215,24 @@ function showBatch() {
   $('#bGo').onclick = () => {
     const ip = ($('#bIp').value || '').trim();
     const topics = ($('#bTopics').value || '').split('\n').map(t => t.trim()).filter(Boolean);
+    const count = parseInt(($('#bCount').value || '').trim(), 10) || 0;
     if (!ip) return toast('先选个 IP', '', 'err');
-    if (!topics.length) return toast('至少写一条选题', '每行一条', 'err');
+    // ★ 两条路二选一：手填选题，或留空填「要几条」让 AI 自动出题。
+    //   都空就拦住，别提交一个空队列让人干等。
+    if (!topics.length && !count)
+      return toast('选题和「要几条」都没填', '要么写选题（每行一条），要么填数字让 AI 自动出题', 'err');
+    if (!topics.length && (count < 1 || count > 20))
+      return toast('「要几条」填 1–20', '一次别贪多，会连着烧几小时 GPU', 'err');
     const sets = ($('#bSets').value || '').split(',').map(s => s.trim()).filter(Boolean);
-    if (sets.length && sets.length !== topics.length)
+    if (topics.length && sets.length && sets.length !== topics.length)
       return toast('套次号数量对不上', `选题 ${topics.length} 条，套次号 ${sets.length} 个`, 'err');
     const payload = {
       kind: 'batch', ip, topics: topics.join(';'),
       tier: ($('#bTier').value || '').trim(),
       dry: $('#bDry').checked, stop_on_error: $('#bStop').checked,
     };
-    if (sets.length) payload.sets = sets.join(',');
+    if (!topics.length) payload.count = count;   // 留空 → 数字填空这条路
+    else if (sets.length) payload.sets = sets.join(',');
     closeModal();
     startExec(payload);
   };
@@ -3724,9 +3772,36 @@ function bind() {
     if (e.target.closest('#btnBgmProbe'))
       return void busyBtn(e.target.closest('button'), '生成 12 秒…', probeBgm);
     if (e.target.closest('#btnTtsInstrSave')) return void saveTtsInstr();
+    if (e.target.closest('#btnTtsScriptMore')) {
+      const body = $('#ttsScriptBody');
+      if (body) {
+        const clipped = body.classList.toggle('clip');
+        const b = e.target.closest('#btnTtsScriptMore');
+        if (b) b.textContent = clipped ? '展开全文' : '收起';
+      }
+      return;
+    }
+    if (e.target.closest('#btnTtsGoEdit')) {
+      // 需求台和声音面板同在「创作」组，切组后滚到文案输入处。
+      openMidTab('create');
+      const st = $('#scriptText');
+      if (st) { st.scrollIntoView({ behavior: 'smooth', block: 'center' }); st.focus({ preventScroll: true }); }
+      return;
+    }
     if (e.target.closest('#btnTtsRedoAudio') || e.target.closest('#btnTtsRedoAll')) {
       const only = !!e.target.closest('#btnTtsRedoAudio');
       if (!state.setId) return void toast('先选一套片子', '', 'err');
+      // ★ 跑之前先确认「有稿子可念」。没文案就配音 = 空片白烧 GPU。
+      //   实时再查一次（人可能刚在需求台存了还没刷新声音面板）。
+      const sc = await api('script-text?ip=' + encodeURIComponent(state.ip) +
+                           '&set=' + encodeURIComponent(state.setId)).catch(() => ({}));
+      if (!sc.exists) {
+        toast('这套还没有文案', '先去需求台写一句，或让 AI 起一稿，再回来配音', 'err');
+        openMidTab('create');
+        const st = $('#scriptText');
+        if (st) st.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
       await saveTtsInstr(true);          // 「改了没生效」的头号成因：改了不存就重抽
       return void startExec({ kind: 'tts-redo', ip: state.ip, set: state.setId, only_audio: only });
     }

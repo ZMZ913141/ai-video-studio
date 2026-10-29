@@ -1013,6 +1013,32 @@ input[type="range"]::-moz-range-thumb {
   margin-top:5px; padding-top:5px; padding-left:8px;
   border-top:1px dashed var(--stroke);
 }
+
+/* ---------- 声音面板：这套要念的文案预览（2026-10-30） ----------
+   配音前先让人看到「机器到底要念哪份稿」。以前声音面板只摆音色指令，
+   文案在隔壁需求台，切过来就以为稿子丢了 —— 其实一直在同一个 txt 里。 */
+.tts-script {
+  border:1px solid var(--stroke); border-radius:var(--r-sm);
+  background:var(--glass-2); padding:9px 10px; margin-bottom:10px;
+}
+.tts-script.empty { border-color:var(--warn);
+  background:color-mix(in srgb, var(--warn) 8%, transparent); }
+.tts-script .ts-head { display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-bottom:6px; }
+.tts-script .ts-head b { font-size:11.5px; color:var(--tx-1); }
+.tts-script .ts-meta { display:flex; gap:6px; flex-wrap:wrap; }
+.tts-script .ts-meta .chip { font-size:10px; }
+.tts-script .ts-body {
+  font-size:12px; line-height:1.7; color:var(--tx-1);
+  white-space:pre-wrap; word-break:break-word;
+  max-height:130px; overflow:auto; margin:0;
+  padding:7px 9px; border-radius:6px; background:var(--bg-2);
+  border:1px solid var(--stroke);
+}
+.tts-script .ts-body.clip { max-height:64px; overflow:hidden; }
+.tts-script .ts-foot { display:flex; gap:8px; align-items:center; margin-top:7px; flex-wrap:wrap; }
+.tts-script .ts-foot .hint { flex:1; min-width:120px; }
+.tts-runscope { font-size:11px; color:var(--tx-2); line-height:1.6; margin:2px 0 8px; }
+.tts-runscope b { color:var(--tx-1); }
 /* 参考视频清单行：id + 用途下拉 + 起始秒 + 备注 */
 .mat-vid {
   display:flex; align-items:center; gap:6px; flex-wrap:wrap;

@@ -923,7 +923,7 @@ def cmd_batch(a):
     if getattr(a, "ip", ""):
         argv.append(a.ip)
     for k, flag in (("queue", "--queue"), ("topics", "--topics"),
-                    ("sets", "--sets"), ("tier", "--tier"),
+                    ("count", "--count"), ("sets", "--sets"), ("tier", "--tier"),
                     ("start", "--from"), ("end", "--to")):
         v = getattr(a, k, "")
         if v:
@@ -1253,6 +1253,7 @@ def main():
     p.add_argument("ip", nargs="?", default="")
     p.add_argument("--queue", help="队列文件（JSON），格式见 bin/batch.py 顶部")
     p.add_argument("--topics", default="", help="快捷方式：分号分隔的选题 '甲;乙;丙'")
+    p.add_argument("--count", type=int, default=0, help="选题留空时：AI 按人设自动出 N 条选题（1-20），逐条写文案+出片")
     p.add_argument("--sets", default="", help="配 --topics 用，逗号分隔的套次名")
     p.add_argument("--tier", default="")
     p.add_argument("--from", dest="start", default="")

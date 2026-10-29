@@ -869,14 +869,29 @@ def build_exec(b, want_result=False):
     if kind == "batch":
         # 批量：不需要先有套次（编号会顺排），但必须有 IP —— 片子总归是某个人的。
         # 选题一行一条，前端拼成 '甲;乙;丙' 传进来。
+        # ★ 选题可以留空，改填「要几条」(count) —— 让 AI 按人设自动出 N 条，
+        #   逐条写文案+出片。两条路都为空就拦住，别提交一个空队列白等。
         # ★ tier 给 2：这是「一口气烧几十分钟 GPU」的动作，必须二次确认。
         topics = [t.strip() for t in (b.get("topics") or "").split(";") if t.strip()]
-        if not topics:
-            raise ValueError("一条选题都没有（每行一条）")
-        argv = ["bin/vstudio.py", "batch", ip, "--topics", ";".join(topics)]
-        sets = [s.strip() for s in (b.get("sets") or "").split(",") if s.strip()]
-        if sets:
-            argv += ["--sets", ",".join(sets)]
+        count = b.get("count") or 0
+        try:
+            count = int(count)
+        except Exception:
+            count = 0
+        if not topics and not count:
+            raise ValueError("选题和「要几条」都没填：要么写选题（每行一条），要么填数字让 AI 自动出题")
+        if topics:
+            # 手填了选题就以选题为准，count 忽略（两条路不混着来）。
+            mode = f"{len(topics)} 条选题"
+            argv = ["bin/vstudio.py", "batch", ip, "--topics", ";".join(topics)]
+            sets = [s.strip() for s in (b.get("sets") or "").split(",") if s.strip()]
+            if sets:
+                argv += ["--sets", ",".join(sets)]
+        else:
+            if not 1 <= count <= 20:
+                raise ValueError("「要几条」填 1–20 之间（一次别贪多，会连着烧几小时 GPU）")
+            mode = f"AI 自动出 {count} 条"
+            argv = ["bin/vstudio.py", "batch", ip, "--count", str(count)]
         tier = (b.get("tier") or "").strip()
         if tier:
             if tier not in ("fast", "pilot", "std", "high"):
@@ -886,7 +901,7 @@ def build_exec(b, want_result=False):
             argv.append("--dry")
         if b.get("stop_on_error"):
             argv.append("--stop-on-error")
-        return (argv, f"批量出片 {ip} · {len(topics)} 条"
+        return (argv, f"批量出片 {ip} · {mode}"
                       + ("（先看计划）" if b.get("dry") else ""),
                 1 if b.get("dry") else 2, False)
 
@@ -2095,8 +2110,10 @@ class Handler(BaseHTTPRequestHandler):
             # ★ 别再手写第二张表了：prompts-en 就是这么漏的
             #   （build_exec 认它、cmdline 表不认 → 前端一点报「未知命令模板」）。
             #   这里从 build_exec 反推一条能用的命令行，保证两边不会各说各话。
+            #   ★ 要把整个 body 透传，别只挑 kind/ip/set —— 批量这类动作还带着
+            #     topics/count/dry，漏了就会拼出「选题和数量都没填」的空命令。
             try:
-                argv, label, _tier, _ = build_exec({"kind": kind, "ip": ip, "set": setname})
+                argv, label, _tier, _ = build_exec(dict(body))
                 if argv:
                     return self._json({"cmdline": " ".join(argv),
                                        "note": "这条命令由执行器推导（不在手写表里）"})

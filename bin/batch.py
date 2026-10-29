@@ -104,6 +104,43 @@ def build_items_from_topics(root, tag, topics, sets, title_from_topic=True):
     return out
 
 
+def build_items_from_ai(ip, n):
+    """--count N 的自动出题路径：让 AI 按人设出 N 条选题，转成 items。
+
+    ★ 人设材料为空、或客户卡不许上云时，studio_ai 会直接拒绝 —— 这里把
+      拒绝原样说清楚，绝不退回到「瞎编 N 条」。瞎编出来的选题拿去批量出片，
+      会一口气烧掉几小时 GPU，比不做更糟。
+    """
+    if not 1 <= int(n) <= 20:
+        raise SystemExit("✗ 「要几条」填 1–20 之间（一次别贪多，会连着烧几小时 GPU）")
+    n = int(n)
+    cmd = [PY, os.path.join(HERE, "studio_ai.py"), "topics", ip,
+           "-n", str(n), "--json"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        tail = [x for x in (r.stderr or r.stdout or "").strip().splitlines() if x.strip()]
+        raise SystemExit("✗ 自动出题失败：" + (tail[-1][:220] if tail else "无输出"))
+    try:
+        d = json.loads(r.stdout)
+    except Exception:
+        raise SystemExit("✗ 自动出题返回的不是 JSON：" + (r.stdout or "")[:200])
+    topics = d.get("topics") or []
+    items = []
+    for t in topics:
+        title = (t.get("title") or "").strip()
+        if title:
+            items.append({"topic": title, "set": "", "_auto_no": True})
+    if not items:
+        extra = ""
+        if d.get("dropped"):
+            extra = f"（{len(d['dropped'])} 条被红线拦下）"
+        raise SystemExit("✗ AI 没出出选题来" + extra +
+                         "：" + (d.get("note") or "人设材料可能为空，或全被拦了"))
+    print(f"  AI 自动出题 {len(items)} 条（通道 {d.get('provider') or '?'}，"
+          f"人设 {d.get('persona_chars') or 0} 字）")
+    return items
+
+
 # ---------------- 单条 ----------------
 def ensure_job(e, setname):
     """建套次目录 + job.json。跟 vstudio job-new 走同一批函数，不复制一套逻辑。"""
@@ -205,6 +242,8 @@ def main(argv=None):
     ap.add_argument("--queue", help="队列文件（JSON），格式见 bin/batch.py 顶部")
     ap.add_argument("--topics", default="",
                     help="快捷方式：分号分隔的选题，'甲;乙;丙'")
+    ap.add_argument("--count", type=int, default=0,
+                    help="选题留空时用：让 AI 按人设自动出 N 条选题（1-20），逐条写文案+出片")
     ap.add_argument("--sets", default="",
                     help="配 --topics 用，逗号分隔的套次名；不给就顺排编号")
     ap.add_argument("--tier", default="", help="档位 fast/pilot/std/high（队列里可逐条覆盖）")
@@ -240,8 +279,17 @@ def main(argv=None):
         cli_sets = [s for s in a.sets.split(",") if s.strip()] if a.sets else []
         items = [{"topic": t.strip(), "set": (cli_sets[i] if i < len(cli_sets) else "")}
                  for i, t in enumerate(a.topics.split(";")) if t.strip()]
+    elif a.count:
+        # ★ 选题留空、只给个数字：让 AI 按人设自动出 N 条，逐条写文案+出片。
+        #   dry 时也出题（不烧 GPU，只是想先看清楚「要出哪几条」）。
+        if not a.ip:
+            raise SystemExit("✗ 用 --count 自动出题必须给 IP")
+        ip = a.ip
+        raw = {}
+        defaults = {}
+        items = build_items_from_ai(ip, a.count)
     else:
-        raise SystemExit("✗ 要么 --queue 队列文件，要么 --topics '甲;乙;丙'")
+        raise SystemExit("✗ 要么 --queue 队列文件，要么 --topics '甲;乙;丙'，要么 --count N 自动出题")
 
     if not ip:
         raise SystemExit("✗ 没有 IP：队列文件里写 ip，或者命令行上给")
