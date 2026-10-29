@@ -1224,6 +1224,18 @@ async function designVoice() {
      从 1 编号 —— 所以出片提示词骨架一个字都不用改。规范见
      docs/H3时间轴与分段素材规范.md（从插件源码提取的，不是猜的）。 */
 
+/* 参考视频的三种用法（H3 插件源码里的 referenceMode，一个字都不能改）
+   选错档的后果很具体，所以选项上直接写后果，不写术语：
+     edit     可编辑参考 —— 只借场面/运镜，不锁原人物 → 换人 / 换服装 / 换风格
+     guide    固定 Guide —— 重叠区硬锁原视频 → 续写 / 保持运动（会把原人物一起锁住）
+     boundary 仅固定边界 —— 只锁首尾帧，中间自由发挥 */
+const VID_USES = [
+  ['edit', '可编辑参考（换人 / 换服装 / 换风格）'],
+  ['guide', '固定参考（续写、保持原人物）'],
+  ['boundary', '只锁首尾帧'],
+];
+const VID_USE_CN = { edit: '可编辑', guide: '固定', boundary: '锁首尾' };
+
 async function renderMaterials() {
   const box = $('#matBox');
   if (!box) return;
@@ -1245,6 +1257,9 @@ async function renderMaterials() {
   const segs = d.segments || [];
   const files = d.items || [];
   const ipImgs = d.ip_images || [];
+  const vids = d.videos || [];
+  const vsegMap = d.seg_videos || {};
+  const vidFiles = d.vid_files || [];
   const sub = $('#matSub');
   if (sub) sub.textContent = mine.length ? `本套 ${mine.length} 张` : '还没建清单';
 
@@ -1265,21 +1280,47 @@ async function renderMaterials() {
   const aiAt = (mats._ai && mats._ai.at) || '';
   const aiNotes = (mats._ai && mats._ai.notes) || [];
 
-  const segRows = segs.length ? segs.map(s => {
+  const segRows = segs.length ? segs.map((s, si) => {
     const cur = segMap[String(s.i)] || [];
     const opts = [['img', '起始静帧']].concat(mine.map(x => [x.id, x.id]));
     const why = aiWhy[String(s.i)] || '';
+    const vcur = vsegMap[String(s.i)] || [];
+    // 「同上一段」：客户的素材是有连贯性的 —— 同一个场景经常连着好几段。
+    // 让人一段段重复勾是最烦的，给个一键沿用。
+    const same = si > 0 ? `<button class="btn xs" data-same="${esc(String(s.i))}"
+      title="把上一段的图/视频选择复制过来">↑ 同上一段</button>` : '';
     return `<div class="mat-seg">
       <div class="ms-head"><b>段 ${esc(String(s.i))}</b>
         <span class="hint">${esc(String(s.t0))}–${esc(String(s.t1))}s</span>
-        <span class="hint" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.line || '')}</span></div>
+        <span class="hint" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.line || '')}</span>
+        ${same}</div>
       <div class="ms-body">${opts.map(([v, l], k) => `
         <label class="chk"><input type="checkbox" data-seg="${esc(String(s.i))}" value="${esc(v)}"
           ${(cur.includes(v) || (!cur.length && k === 0)) ? 'checked' : ''}>
           ${k === 0 ? esc(l) : `Picture ${k + 1} · ${esc(l)}`}</label>`).join('')}</div>
+      ${vids.length ? `<div class="ms-body ms-vid">${vids.map(v => `
+        <label class="chk"><input type="checkbox" data-vseg="${esc(String(s.i))}" value="${esc(v.id)}"
+          ${vcur.includes(v.id) ? 'checked' : ''}>
+          参考视频 ${esc(v.id)}<span class="hint">·${VID_USE_CN[v.use] || v.use}</span></label>`).join('')}</div>` : ''}
       ${why ? `<div class="mat-why">${ico('spark')} ${esc(why)}</div>` : ''}
     </div>`;
   }).join('') : '<div class="empty">这套还没有分镜（prompts.json）。先出提示词，再来分配素材。</div>';
+
+  // 参考视频清单：用途 + 从第几秒开始取，都是「这条视频自己的属性」，
+  // 不是某段的属性 —— 所以摆在这里，段里面只勾「用不用」。
+  const vidRows = vids.length ? vids.map(v => `
+    <div class="mat-vid">
+      <span class="mn" title="${esc(v.file)}">${esc(v.id)}</span>
+      <select class="inp" data-vuse="${esc(v.id)}" title="这段参考视频怎么用">
+        ${VID_USES.map(([k, cn]) => `<option value="${k}" ${v.use === k ? 'selected' : ''}>${cn}</option>`).join('')}
+      </select>
+      <span class="hint">从第</span>
+      <input class="inp" type="number" min="0" step="0.5" style="width:64px"
+        data-vtrim="${esc(v.id)}" value="${Number(v.trimStart || 0)}" title="只取这段视频的第 N 秒之后">
+      <span class="hint">秒开始取</span>
+      <input class="inp" style="flex:1;min-width:120px" data-vnote="${esc(v.id)}"
+        value="${esc(v.note || '')}" placeholder="备注：这段要拿来干什么">
+    </div>`).join('') : '';
 
   box.innerHTML = `
     <div class="hint" style="margin-bottom:8px">
@@ -1289,10 +1330,12 @@ async function renderMaterials() {
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
       <input type="file" id="matFile" accept="image/*" multiple style="display:none">
+      <input type="file" id="matVidFile" accept="video/*" multiple style="display:none">
       <button class="btn sm primary" id="btnMatAI">${ico('spark')} AI 自动分配</button>
-      <button class="btn sm" id="btnMatUpload">${ico('plus')} 上传素材</button>
+      <button class="btn sm" id="btnMatUpload">${ico('plus')} 上传图片</button>
+      <button class="btn sm" id="btnMatVidUpload">${ico('plus')} 上传参考视频</button>
       <button class="btn sm" id="btnMatRefresh">${ico('refresh')} 刷新</button>
-      <span class="hint" id="matUpSub">${files.length ? files.length + ' 张' : ''}${aiAt ? ' · AI 上次分配于 ' + esc(aiAt) : ''}</span>
+      <span class="hint" id="matUpSub">${files.length ? files.length + ' 张图' : ''}${vidFiles.length ? ' · ' + vidFiles.length + ' 段视频' : ''}${aiAt ? ' · AI 上次分配于 ' + esc(aiAt) : ''}</span>
     </div>
     ${aiNotes.length ? `<div class="mat-notes">${aiNotes.map(n => '· ' + esc(n)).join('<br>')}</div>` : ''}
 
@@ -1308,7 +1351,16 @@ async function renderMaterials() {
         <span class="hint">已有的图别重传一遍 —— 直接引用，改的是指针不是文件</span>
       </div>` : ''}
 
-    <div class="sec-title" style="margin-top:14px">每段用哪张</div>
+    ${(vidFiles.length || vids.length) ? `<div class="sec-title" style="margin-top:14px">参考视频（${vids.length} 段已登记）</div>
+      <div class="hint" style="margin-bottom:6px">
+        客户给一段别人拍的视频，想「照这个场面换成他自己」→ 用途选
+        <b>可编辑参考</b>，再把<b>他自己的静帧</b>勾到那段上。
+        想原样接着往下演 → 选 <b>固定参考</b>（注意：这个会把原视频里的人一起锁住）。
+        每段最多 3 段、视频参考总时长别超 15 秒。
+      </div>
+      ${vidRows || '<div class="empty">目录里有视频文件但还没登记 —— 点上面「上传参考视频」再走一遍入库。</div>'}` : ''}
+
+    <div class="sec-title" style="margin-top:14px">每段用哪张（图 / 视频）</div>
     ${segRows}
 
     <div style="display:flex;gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
@@ -1324,7 +1376,33 @@ async function renderMaterials() {
       const k = cb.dataset.seg;
       (segdoc[k] = segdoc[k] || []).push(cb.value);
     });
-    return { set: d.set, images: mine, segments: segdoc };
+    const vsegdoc = {};
+    box.querySelectorAll('input[data-vseg]').forEach(cb => {
+      if (!cb.checked) return;
+      const k = cb.dataset.vseg;
+      (vsegdoc[k] = vsegdoc[k] || []).push(cb.value);
+    });
+    // 用途 / 起点 / 备注是视频自己的属性，跟着一起存 —— 单独开一个保存按钮
+    // 只会让人忘了存，然后出片时对着不对的画面发呆。
+    const vlist = vids.map(v => {
+      const u = box.querySelector('[data-vuse="' + v.id + '"]');
+      const t = box.querySelector('[data-vtrim="' + v.id + '"]');
+      const n = box.querySelector('[data-vnote="' + v.id + '"]');
+      return { id: v.id, file: v.file,
+               use: (u && u.value) || v.use || 'edit',
+               trimStart: parseFloat((t && t.value) || 0) || 0,
+               note: (n && n.value) || '' };
+    });
+    return { set: d.set, images: mine, segments: segdoc,
+             videos: vlist, seg_videos: vsegdoc };
+  };
+
+  const saveMat = async (doc, okMsg) => {
+    const r = await api('materials-save',
+      { body: { ip: state.ip, set: state.setId, materials: doc } });
+    if (r.error) { toast('没存成：' + r.error, '', 'err'); return false; }
+    if (okMsg) toast(okMsg, '', 'ok');
+    return true;
   };
 
   $('#btnMatRefresh').onclick = () => renderMaterials();
@@ -1340,27 +1418,90 @@ async function renderMaterials() {
       toast(`已分配 ${n} 段${tag}`);
       await renderMaterials();
     });
-  $('#btnMatUpload').onclick = () => $('#matFile').click();
-  $('#matFile').onchange = async e => {
-    const list = [...(e.target.files || [])];
-    e.target.value = '';
-    if (!list.length) return;
+  // 图片和视频走同一条路：暂存 → 凭条 → 入库。唯一区别是提示文案和时长提醒。
+  const installUpload = async (list, kind) => {
     const tip = $('#matUpSub');
     if (tip) tip.textContent = '正在上传…';
     const fd = new FormData();
     for (const f of list) fd.append('file', f);
     try {
       const up = await apiForm('material-upload', fd);
-      if (up.error) { if (tip) tip.textContent = '没传上去：' + up.error; return; }
+      if (up.error) {
+        if (tip) tip.textContent = '没传上去：' + up.error;
+        toast('没传上去', up.error, 'err');
+        return;
+      }
       const r2 = await api('set-materials-install',
         { body: { ip: state.ip, set: state.setId, uid: up.uid } });
-      if (r2.error) { if (tip) tip.textContent = '入库失败：' + r2.error; return; }
-      toast('素材已入库', `${(r2.moved || []).length} 张进 02_素材真值/${esc(d.set.split('_')[0])}/`, 'ok');
+      if (r2.error) {
+        if (tip) tip.textContent = '入库失败：' + r2.error;
+        toast('入库失败', r2.error, 'err');
+        return;
+      }
+      const n = (r2.moved || []).length;
+      // 入库 ≠ 用上。不说这一句，人会以为传完就完事了，结果出片还是只有起始静帧那一张。
+      toast(`${kind}已入库`, `${n} 个进 02_素材真值/${esc(d.set.split('_')[0])}/`
+        + ` —— 下一步点「AI 自动分配」，或在下面自己勾`, 'ok');
       await renderMaterials();
     } catch (ex) {
       if (tip) tip.textContent = '上传失败：' + ex.message;
     }
   };
+  $('#btnMatUpload').onclick = () => $('#matFile').click();
+  $('#matFile').onchange = async e => {
+    const list = [...(e.target.files || [])];
+    e.target.value = '';
+    if (list.length) await installUpload(list, '图片');
+  };
+  $('#btnMatVidUpload').onclick = () => $('#matVidFile').click();
+  $('#matVidFile').onchange = async e => {
+    const list = [...(e.target.files || [])];
+    e.target.value = '';
+    if (!list.length) return;
+    // ★ 时长只能在浏览器里量：这台机器的 ffprobe 是坏的（见 MEMORY），
+    //   而 15 秒是 H3 的硬上限 —— 超了它是静默截断，人会以为自己那段生效了。
+    const dur = await Promise.all(list.map(f => new Promise(res => {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      v.onloadedmetadata = () => res({ name: f.name, d: v.duration || 0 });
+      v.onerror = () => res({ name: f.name, d: 0 });
+      v.src = URL.createObjectURL(f);
+    })));
+    const bad = dur.filter(x => x.d > 15.5);
+    if (bad.length) {
+      const ok = await confirmBox(
+        '有视频超过 15 秒',
+        `H3 的参考视频总时长上限是 15 秒，超出的部分会被<b>静默丢掉</b>——不报错，`
+        + `你只会看到画面跟你给的不一样。<br><br>超长的是：`
+        + bad.map(x => `${esc(x.name)}（${x.d.toFixed(1)}s）`).join('、')
+        + `<br><br>继续入库也行，但请在下面用「从第 N 秒开始取」把它压到 15 秒内。`);
+      if (!ok) return;
+    }
+    await installUpload(list, '参考视频');
+  };
+
+  // 同上一段：客户素材是有连贯性的，同一个场景常常连着好几段。
+  box.querySelectorAll('[data-same]').forEach(btn => btn.onclick = async () => {
+    const i = btn.dataset.same;
+    const prev = String(Number(i) - 1);
+    segs.forEach(s => {
+      if (String(s.i) !== i) return;
+      const from = segMap[prev] || [];
+      box.querySelectorAll(`input[data-seg="${i}"]`).forEach(cb => {
+        cb.checked = from.includes(cb.value) || (!from.length && cb.value === 'img');
+      });
+      const vfrom = vsegMap[prev] || [];
+      box.querySelectorAll(`input[data-vseg="${i}"]`).forEach(cb => {
+        cb.checked = vfrom.includes(cb.value);
+      });
+    });
+    if (await saveMat(collect(), `段 ${i} 已沿用段 ${prev}`)) await renderMaterials();
+  });
+  // 用途 / 起点改完立刻存：这类小改动最容易「改了忘了存」。
+  box.querySelectorAll('[data-vuse]').forEach(sel => sel.onchange =
+    () => saveMat(collect(), '用途已存'));
+  box.querySelectorAll('[data-vtrim]').forEach(inp => inp.onchange =
+    () => saveMat(collect(), '起点已存'));
   const refIp = $('#btnMatRefIp');
   if (refIp) refIp.onclick = async () => {
     const sel = $('#matIpsel');

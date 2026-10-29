@@ -81,6 +81,9 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 # 音色参考：只收纯音频。视频里虽然也有音轨，但这里要的是「拿来就能当参考音」的东西，
 # 混进 mp4 会让后面 TTS 预处理多一层不确定性。
 AUDIO_EXT = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".opus"}
+# 参考视频（H3 videoClips）：跟 gen_video.py 里的 VID_EXT 保持一致，
+# 两处必须同一套——界面放过去、出片那边不认，是最冤的一种失败。
+VIDEO_EXT = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 
 # ---------- 写操作白名单 ----------
 #   tier2=True 的命令必须带 confirm=1 才放行，且自动记 changelog
@@ -2719,10 +2722,11 @@ class Handler(BaseHTTPRequestHandler):
             ext = os.path.splitext(raw_name)[1].lower()
             mime = str(f.get("mime") or "")
             kind = ("image" if mime.startswith("image/") or ext in IMAGE_EXT else
-                    "audio" if mime.startswith("audio/") or ext in AUDIO_EXT else "")
+                    "audio" if mime.startswith("audio/") or ext in AUDIO_EXT else
+                    "video" if mime.startswith("video/") or ext in VIDEO_EXT else "")
             data = f.get("data") or b""
             if not kind:
-                rejected.append({"name": raw_name, "why": "既不是图片也不是音频"})
+                rejected.append({"name": raw_name, "why": "不是图片 / 音频 / 视频"})
                 continue
             if not data:
                 rejected.append({"name": raw_name, "why": "空文件"})
@@ -3070,6 +3074,14 @@ class Handler(BaseHTTPRequestHandler):
     # 格式与限制见 docs/H3时间轴与分段素材规范.md（从插件源码提取的，不是猜的）。
 
     SET_MAT_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+    SET_MAT_VID_EXT = VIDEO_EXT
+
+    # H3 源码常量（不是网页抄的），界面要照着拦 —— 让插件静默丢弃更糟：
+    # 人会以为「我选了三段参考视频」，实际只生效了一两段。
+    MAX_REF_VIDEOS = 3        # 每段最多 3 段参考视频
+    MAX_REF_VIDEO_SECS = 15.0  # 视频参考总时长上限
+    MAX_REF_TOTAL = 12        # 图 + 视频 + 音频合计最多 12 个
+    VID_USES = ("edit", "guide", "boundary")
 
     def _set_dir(self, root, full):
         """套次素材目录。用套次号（S06）而不是全名 —— 全名带标题，改标题就丢素材。"""
@@ -3088,14 +3100,21 @@ class Handler(BaseHTTPRequestHandler):
         full = self._full_set(ip, setname) or setname
 
         mdir = self._set_dir(root, full)
-        items = []
+        items, vid_files = [], []
         if os.path.isdir(mdir):
             for n in sorted(os.listdir(mdir)):
                 p = os.path.join(mdir, n)
-                if os.path.isfile(p) and os.path.splitext(n)[1].lower() in self.SET_MAT_EXT:
+                if not os.path.isfile(p):
+                    continue
+                ext = os.path.splitext(n)[1].lower()
+                if ext in self.SET_MAT_EXT:
                     items.append({"name": n, "path": p, "size": os.path.getsize(p),
                                   "mtime": datetime.fromtimestamp(
                                       os.path.getmtime(p)).strftime("%m-%d %H:%M")})
+                elif ext in self.SET_MAT_VID_EXT:
+                    vid_files.append({"name": n, "path": p, "size": os.path.getsize(p),
+                                      "mtime": datetime.fromtimestamp(
+                                          os.path.getmtime(p)).strftime("%m-%d %H:%M")})
 
         doc = {}
         mp = self._materials_path(root, full)
@@ -3127,6 +3146,9 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._json({"dir": mdir, "set": full, "items": items, "materials": doc,
                            "segments": segs, "ip_images": ip_imgs,
+                           "videos": doc.get("videos") or [],
+                           "seg_videos": doc.get("seg_videos") or {},
+                           "vid_files": vid_files,
                            "exists": os.path.isfile(mp),
                            "hint": "没建 materials.json 时，整片只用 visual.still 那一张"})
 
@@ -3161,14 +3183,18 @@ class Handler(BaseHTTPRequestHandler):
                 doc = {}
         doc.setdefault("set", full)
         doc.setdefault("images", [])
+        doc.setdefault("videos", [])
         have = {str(x.get("id")) for x in doc["images"] if isinstance(x, dict)}
+        vhave = {str(x.get("id")) for x in doc["videos"] if isinstance(x, dict)}
 
         moved, skipped = [], []
         for fn in sorted(os.listdir(stage)):
             sp = os.path.join(stage, fn)
             ext = os.path.splitext(fn)[1].lower()
-            if not os.path.isfile(sp) or ext not in self.SET_MAT_EXT:
-                skipped.append({"name": fn, "why": "不是图片（这段只收图片）"})
+            is_img = ext in self.SET_MAT_EXT
+            is_vid = ext in self.SET_MAT_VID_EXT
+            if not os.path.isfile(sp) or not (is_img or is_vid):
+                skipped.append({"name": fn, "why": "不是图片也不是视频"})
                 continue
             # 去掉「01_」这个暂存序号前缀，还原一个像人起的名字
             clean = re.sub(r"^\d{2}_", "", fn)
@@ -3184,16 +3210,25 @@ class Handler(BaseHTTPRequestHandler):
             shutil.copy2(sp, dst)
             rel = os.path.join("02_素材真值", str(full).split("_")[0], clean)
             mid = re.sub(r"[^\w\u4e00-\u9fff\-]", "_", os.path.splitext(clean)[0])[:24]
+            pool = have if is_img else vhave
             base_id, n = mid, 2
-            while mid in have:
+            while mid in pool:
                 mid = f"{base_id}-{n}"
                 n += 1
-            have.add(mid)
-            doc["images"].append({"id": mid, "file": rel, "note": ""})
-            moved.append({"name": clean, "id": mid, "rel": rel})
+            pool.add(mid)
+            if is_img:
+                doc["images"].append({"id": mid, "file": rel, "note": ""})
+            else:
+                # 默认 edit（可编辑参考）：客户拿参考视频来，九成是要「照着这个
+                # 运镜/这个场面，但换成自己的人」。guide 会硬锁原人物，选错了
+                # 就变成「别人的脸在你的片子里」，所以默认给最不容易出事的那档。
+                doc["videos"].append({"id": mid, "file": rel, "use": "edit",
+                                      "trimStart": 0, "note": ""})
+            moved.append({"name": clean, "id": mid, "rel": rel,
+                          "kind": "image" if is_img else "video"})
 
         if not moved:
-            return self._bad("没有可用的图片文件")
+            return self._bad("没有可用的图片或视频文件")
 
         bak = mp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
         if os.path.isfile(mp):
@@ -3251,29 +3286,97 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in segdoc.items():
             arr = v if isinstance(v, list) else [v]
             if len(arr) > 9:
-                return self._bad(f"{k} 挂了 {len(arr)} 张图，H3 上限 9 张")
+                return self._bad(f"第 {k} 段挂了 {len(arr)} 张图，H3 上限 9 张")
             bad = [str(x) for x in arr if str(x) not in ids]
             if bad:
-                return self._bad(f"{k} 引用了不存在的素材 {bad}")
+                return self._bad(f"第 {k} 段引用了不存在的素材 {bad}")
+
+        # ---- 参考视频 ----
+        # 三条硬上限来自插件源码，不是网上抄的。这里拦住，比让插件静默丢弃好得多。
+        vids = doc.get("videos") or []
+        vids_ok = []
+        for it in vids:
+            if not isinstance(it, dict):
+                return self._bad("videos 里每一项都要是 {id, file, use}")
+            vid = str(it.get("id") or "").strip()
+            rel = str(it.get("file") or "").strip()
+            if not vid or not rel:
+                return self._bad("每段参考视频都要有 id 和 file")
+            p = rel if os.path.isabs(rel) else os.path.join(root, rel)
+            if not os.path.abspath(p).startswith(os.path.abspath(root) + os.sep):
+                return self._bad(f"参考视频不在本 IP 目录内：{rel}（禁止跨 IP 引用）")
+            if not os.path.isfile(p):
+                return self._bad(f"参考视频不存在：{rel}")
+            use = str(it.get("use") or "edit").strip().lower()
+            if use not in self.VID_USES:
+                return self._bad(f"参考视频 {vid} 的用途 {use!r} 不认识"
+                                 f"（只能 {' / '.join(self.VID_USES)}）")
+            try:
+                trim = float(it.get("trimStart") or 0)
+            except (TypeError, ValueError):
+                return self._bad(f"参考视频 {vid} 的 trimStart 不是数字")
+            if trim < 0:
+                return self._bad(f"参考视频 {vid} 的 trimStart 不能是负数")
+            vids_ok.append({"id": vid, "file": rel, "use": use,
+                            "trimStart": round(trim, 2),
+                            "note": str(it.get("note") or "")})
+        vknown = {v["id"] for v in vids_ok}
+
+        vsegdoc = doc.get("seg_videos") or {}
+        if not isinstance(vsegdoc, dict):
+            return self._bad("seg_videos 必须是对象：{\"2\": [\"视频id\"]}")
+        for k, v in vsegdoc.items():
+            arr = v if isinstance(v, list) else [v]
+            arr = [str(x) for x in arr if str(x)]
+            if len(arr) > self.MAX_REF_VIDEOS:
+                return self._bad(f"第 {k} 段挂了 {len(arr)} 段参考视频，"
+                                 f"H3 上限 {self.MAX_REF_VIDEOS} 段（超出的会被静默丢弃）")
+            bad = [x for x in arr if x not in vknown]
+            if bad:
+                return self._bad(f"第 {k} 段引用了不存在的视频 {bad}")
+
+        # 合计不超过 12 个参考文件（图 + 视频 + 音频）。音频固定 1 条（配音轨）。
+        total_ref = len(imgs) + len(vids_ok) + 1
+        if total_ref > self.MAX_REF_TOTAL:
+            return self._bad(f"参考文件合计 {total_ref} 个，超过 H3 的 "
+                             f"{self.MAX_REF_TOTAL} 个上限（图 {len(imgs)} + "
+                             f"视频 {len(vids_ok)} + 配音 1）")
 
         mp = self._materials_path(root, full)
         os.makedirs(os.path.dirname(mp), exist_ok=True)
         bak = mp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+        old_doc = {}
         if os.path.isfile(mp):
             shutil.copy2(mp, bak)
-            old = load_json(mp) or {}
-            if old.get("segments") != doc.get("segments") or old.get("images") != doc.get("images"):
+            old_doc = load_json(mp) or {}
+            old = old_doc
+            if old.get("segments") != doc.get("segments") or old.get("images") != doc.get("images") \
+                    or old.get("seg_videos") != doc.get("seg_videos"):
                 append_changelog("ip", ip, mp, "materials.save",
                                  str(old.get("segments")), str(doc.get("segments")),
                                  actor="ui-materials")
         doc["set"] = full
+        # ★ 保住 AI 打标/分配的元信息（_ai 等）：界面 collect() 只回传
+        #   images/segments/videos，不认识 _ai。以前整份替换，人手工调一次
+        #   存一下，上面那些「为什么这么分」「有 3 张没用上」的提醒就没了 ——
+        #   偏偏那正是最该留着看的东西。下划线开头的都当元信息保留。
+        for k, v in (old_doc or {}).items():
+            if k.startswith("_") and k not in doc:
+                doc[k] = v
+        # ★ 用校验过的那份写回，而不是原样透传浏览器给的：
+        #   界面可能塞进 use 拼错、trimStart 是字符串之类，出片时 gen_video
+        #   会 exit 1，到那时人早忘了自己在哪儿设的。
+        doc["videos"] = vids_ok
+        doc["seg_videos"] = {str(k): [str(x) for x in (v if isinstance(v, list) else [v]) if str(x)]
+                             for k, v in vsegdoc.items()}
         try:
             with open(mp, "w", encoding="utf-8") as f:
                 json.dump(doc, f, ensure_ascii=False, indent=2)
         except Exception as ex:
             return self._bad(f"写失败：{ex}")
         return self._json({"ok": True, "path": mp, "backup": bak,
-                           "images": len(imgs), "segments": len(segdoc)})
+                           "images": len(imgs), "segments": len(segdoc),
+                           "videos": len(vids_ok), "seg_videos": len(vsegdoc)})
 
     def _api_assets_match(self, body):
         """AI 自动分配素材：逐张看图打标 → 按文案分镜匹配到每段。
