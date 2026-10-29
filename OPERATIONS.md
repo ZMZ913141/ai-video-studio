@@ -225,6 +225,30 @@ python3 bin/vstudio.py batch 王总财经 --topics "甲;乙" --stop-on-error  # 
 | `✗ prompts.en.json 第 N 段的 … 里混进了中文` | 英文转写里混进了汉字，**出片前已拦停**（中文会被烧成上屏字幕）。删掉 `prompts.en.json`，重跑 `--to-en --force`。 |
 | `⚠⚠ prompts.en.json 跟当前中文稿不同源` | 改了中文没重译，此刻出片用的是**旧英文**（画面不反映你的改动）。照提示重译一次。 |
 | 改了代码重启看板，正在跑的出片从界面消失 | 进程还在烧 GPU，只是界面丢了引用。用 `bin/start-ui.sh --restart` 后看板会把活着的任务接回来，别重复点出片。 |
+| `✗ 可用内存 XX G < 要求 40G` | **别直接跳过护栏**（`SKIP_MEMCHECK=1`）——那正是 2026-10-27 S04 丢掉 20 分钟 GPU 时间的场景。先查是谁吃了内存，见下面「内存被占满怎么查」。 |
+
+### 内存被占满怎么查（护栏拦下来时的正确反应）
+
+护栏拦的不是「机器内存小」，是「**有进程占着不放**」。2026-10-29 实测查出的完整链条：
+
+```bash
+curl -s http://127.0.0.1:8188/queue        # ← 第一步：看 ComfyUI 队列里压着几个任务
+curl -s -X POST http://127.0.0.1:8188/interrupt   # 中断正在跑的
+curl -s -X POST http://127.0.0.1:8188/queue -H 'Content-Type: application/json' -d '{"clear":true}'
+grep MemAvailable /proc/meminfo        # 中断后内存通常立刻回来
+```
+
+**实测**：队列里卡着一个早就提交、一直没跑完的 H3 任务（UNET + Qwen3VL-32B + VAE 全套占 46G）。
+`comfy_free.py --free` 释放不了（它只清 ComfyUI 的模型缓存），因为**任务本身还在跑**。
+中断后 MemAvailable 从 11G 回到 47.5G，护栏立刻放行。
+
+判据：
+- `MemAvailable` 低 + ComfyUI 队列非空 → **队列里的任务才是元凶**，去 interrupt
+- `MemAvailable` 低 + 队列空 → 有别的进程占着（本机沙箱看不到主机进程，需要你在自己终端查 `ps aux --sort=-%mem | head`）
+- `MemAvailable` 低 + `buff/cache` 高 → 那部分可回收，不算真占
+
+> ⚠ 别看到护栏拦就加 `SKIP_MEMCHECK=1`。护栏的意义是「宁可现在停 3 秒，
+> 不要 20 分钟后被内核 SIGKILL、GPU 时间全废」。
 
 ### 清理（只用回收站，不用 rm）
 - 不要的素材/成片 → 丢 `/cfu/废品站/<日期>_<描述>/`，不要真删。
