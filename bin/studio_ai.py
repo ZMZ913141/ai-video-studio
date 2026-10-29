@@ -19,10 +19,14 @@
 需要免费池的场合（视觉验收那种截屏抽查）不在这个文件里，去 llm_router.vision。
 """
 import argparse
+import array
 import glob
 import json
+import math
+import mimetypes
 import os
 import re
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -83,6 +87,12 @@ def _read(path, limit=None):
 def _short(s, n):
     s = re.sub(r"\s+", " ", str(s or "")).strip()
     return s if len(s) <= n else s[:n] + "…"
+
+
+# ★ 文案去重的**唯一真源**在 vstudio.py（script_norm / dedupe_script）。
+#   放那边是因为落盘前那道闸（vstudio / ui_server）也要用同一份逻辑 ——
+#   两处各写一遍，迟早不一致 = 迟早有一处漏。
+from vstudio import dedupe_script, script_norm as _norm   # noqa: E402
 
 
 # ---------------------------------------------------------------- 人设材料
@@ -366,9 +376,13 @@ def write_script(ip, setname="", topic="", tone="", prefer=None, length="standar
     import ip_policy
     cloud_why = ip_policy.require_cloud(ctx["root"], ctx["name"])
 
-    # 本号的固定落点。没有就让模型拟一条并标出来 —— 不能每次临时编，
-    # 每次不一样等于没有落点，观众也记不住要他干什么。
-    landing = str(card.get("landing") or "").strip()
+    # 本号的落点。★ 分两层（2026-10-29 实测踩到）：
+    #   套次自己的 landing.md > 档案卡里的 landing。
+    #   以前只有卡里一条，落点里的货品词（「这盘雪花」「你先吃」）是**某一套的**，
+    #   写到别的套次上就前后对不上（讲汤的片子结尾说「这盘雪花」）。
+    #   逻辑在 vstudio.resolve_landing（唯一真源）。
+    from vstudio import resolve_landing
+    landing, landing_src = resolve_landing(ctx["root"], setname)
 
     brief, brief_path = _brief_text(ctx["root"], setname) if setname else ("", None)
     past = _past_scripts(ctx["root"])
@@ -391,8 +405,17 @@ def write_script(ip, setname="", topic="", tone="", prefer=None, length="standar
 # 他的说话习惯
 {chr(10).join('- ' + h for h in habits) if habits else '（没记）'}
 
-# 本号固定落点
+# 本号落点
 {landing if landing else '（还没定落点 —— 这次请你按这个客户的业务拟一条，并在 landing_new 标 true）'}
+
+★ 落点的规矩（很重要，写错整条片子就废了）：
+  - 落点的**句式骨架**照抄（比如「到店说一句「刷到你们家视频」，这__我请你尝。你先__，合口再来。」），
+    它是这个号的固定动作，观众靠它记住你。
+  - 但落点里的**货品词必须跟本条片子讲的东西对上**：
+    讲汤就写「这锅汤／你先喝」，讲肉就写「这盘雪花／你先吃」。
+    照抄别的片子的货品词 → 观众听到「这盘雪花」但全片在讲汤 → 直接划走。
+  - 落点**只写一遍**，放在最后一句。不要拆成两行后又把整块重复一次。
+  {'' if landing else ''}
 
 # 人设材料
 {ctx['persona']}
@@ -467,38 +490,15 @@ def write_script(ip, setname="", topic="", tone="", prefer=None, length="standar
     # 落点：已经有固定话术的，必须原样出现在最后；新拟的要标出来等人确认
     new_landing = str(data.get("landing") or "").strip()
     final_landing = landing or new_landing
-    landing_ok = bool(final_landing) and final_landing.replace(" ", "") in script.replace(" ", "")
 
-    # ★ 模型十次有八次只在 landing 字段里给一句，正文里就是不写（实测两次都是）。
-    #   落点是确定的一句话，不该指望模型自觉 —— 自己拼上去。
-    #   漏了落点等于整条片子白讲：观众听完了，不知道要他干什么。
-    if final_landing and not landing_ok:
-        script = script.rstrip() + "\n" + final_landing
-        if not lines or final_landing not in lines[-1]:
-            lines.append(final_landing)
-        landing_ok = True
-
-    # ★ 落点重复要清掉。
-    #   实测（2026-10-29 老王 M01）：模型把落点句在正文里写了两遍
-    #   （一次在倒数第二句，一次在结尾），lines 和 script 都重复。
-    #   观众会连着听两遍同一句「这锅汤我请你尝」—— 听起来像口播事故。
-    #   规则：落点只在**最后一句**留一份，前面出现的同款删掉。
-    if final_landing:
-        key = final_landing.replace(" ", "")
-        # 按行去重：只保留最后一次出现
-        keep = []
-        for ln in lines:
-            if ln.replace(" ", "") == key:
-                continue          # 先全删，最后再补一份到末尾
-            keep.append(ln)
-        if not keep or keep[-1].replace(" ", "") != key:
-            keep.append(final_landing)
-        lines = keep
-        # script 用 lines 重拼，保证正文与逐行一致（否则 script 里仍可能残留重复）
-        script = "\n".join(lines)
-        # 落点必须在**最后一句**，不是「正文里随便哪出现过」。
-        # 出现在中间 = 观众听完还有一截废话才轮到底点 = 等于没落点。
-        landing_ok = bool(lines) and lines[-1].replace(" ", "") == key
+    # ★ 统一交给去重函数处理（2026-10-29 重写）。
+    #   旧逻辑用「整行 == 整块落点」比较 —— 模型把落点拆成两行时一行都删不掉，
+    #   最后又追加一次 → 观众连听两遍（实测老王 M01/M02 都中招）。
+    #   新逻辑按归一化后的包含关系判定，拆行/不拆行都能认出来，
+    #   另外兜一层「尾部任意段落重复」。
+    lines, dedup_notes = dedupe_script(lines, final_landing)
+    script = "\n".join(lines)
+    landing_ok = bool(final_landing) and bool(lines) and _norm(lines[-1]) == _norm(final_landing)
 
     chars = len(re.sub(r"\s", "", script))
     checks = {
@@ -510,6 +510,8 @@ def write_script(ip, setname="", topic="", tone="", prefer=None, length="standar
         "no_redline": not redline_hit,
         "landing_ok": landing_ok,
         "landing_is_new": not landing and bool(new_landing),
+        # ★ 模型写完我们替它改过的地方，必须让人看见（不是静默改稿）。
+        "dedup_notes": dedup_notes,
     }
     problems = []
     if hit:
@@ -548,7 +550,7 @@ def save_script(result, ip, setname):
     ★ 目标非空就先进废品站式的备份（.bak.<时间>），绝不静默覆盖 ——
       这是别人可能已经改过的稿子。
     """
-    from vstudio import resolve_ip, script_text_path
+    from vstudio import resolve_ip, script_text_path, dedupe_script_text, landing_path
     import datetime as _dt
     e = resolve_ip(ip)
     path = script_text_path(e["path"], setname)
@@ -557,9 +559,31 @@ def save_script(result, ip, setname):
         bak = path + ".bak." + _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         import shutil as _sh
         _sh.copy2(path, bak)
+    # ★ 落盘前最后一道闸：重复的话进 TTS 会被念两遍。
+    #   去重逻辑在 vstudio.dedupe_script_text（唯一真源），这里只管调用。
+    text, notes = dedupe_script_text(result.get("script") or "", result.get("landing") or "")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(result["script"].rstrip() + "\n")
-    return {"path": path, "backup": bak}
+        f.write(text.rstrip() + "\n")
+    out = {"path": path, "backup": bak}
+    if notes:
+        out["dedup_notes"] = notes
+    # ★ 把这一套自己的落点存下来（05_文案/<套次>/landing.md）。
+    #   下次写同套的稿子时直接用它，货品词就不会串到别的套次去。
+    lp = landing_path(e["path"], setname)
+    land = str(result.get("landing") or "").strip()
+    if land:
+        try:
+            old = ""
+            if os.path.exists(lp):
+                with open(lp, encoding="utf-8") as f:
+                    old = f.read().strip()
+            if old != land:
+                with open(lp, "w", encoding="utf-8") as f:
+                    f.write(land.rstrip() + "\n")
+                out["landing_path"] = lp
+        except Exception:
+            pass
+    return out
 
 
 # ---------------------------------------------------------------- 建档草案
@@ -661,6 +685,686 @@ def draft_card(text, prefer=None, ip_hint=""):
     }
 
 
+# ---------------------------------------------------------------- 音色语气
+VOICE_SYSTEM = """你是 TTS 配音导演。给你一个人设，你要写一句**音色语气指令**。
+
+这条指令会直接传给 BreezeTTS2 的 VoiceDirection 节点，决定这个人怎么说话。
+它不是「角色设定」，是**给配音演员的调度令**。
+
+要求：
+1. 一句话，20-45 字。写清：什么音色 + 什么情绪 + 什么节奏 + 什么口音（如果有）。
+2. 用**正向**描述（"语速偏慢""带一点笑意"），
+   **不要用否定式**（不要写"不夸张""不喊口号""不要太快"）——
+   TTS 模型对否定句的处理不可靠，写了反而会出来。
+3. 必须能从人设里推出来。人设写"实在、利落"，就写"实在利落，语气平稳"，
+   不要凭空加"幽默""活泼"。
+4. 不要写具体语速数字（模型自己会判断），不要写音色名（如"男声""女声"）。
+5. 如果人设里写了固定 INSTR（"永不改动"那句），就照着它写，只在它基础上补充细节。
+
+返回 JSON：
+{"instruction":"这句话","rationale":"为什么这么写，30字以内",
+ "alternatives":["另外两个备选，各20-40字"]}"""
+
+
+def design_voice_instruction(ip, prefer=None):
+    """按人设 + 档案卡，设计一条音色语气指令。
+
+    ★ 为什么需要这个：
+      ip.json 的 voice.tts.instruction 是空的 → gen_tts.py 直接把空字符串
+      传给 TTS（`INSTR = os.environ.get("INSTR") or IP.get(...) or ""`），
+      **不会**自动填充，也不会报错 —— 片子照出，音色却是模型默认值，
+      跟这个号的人设对不上。
+      人设圣经里明明写着声音真值（珠珠那份就写死了「用热情友好、有活力的语气…」），
+      但那句话得有人把它变成 TTS 认识的样子。
+    """
+    ctx = ip_context(ip)
+    if not ctx["persona"].strip():
+        raise RuntimeError(
+            f"{ctx['name']} 的 01_人设与规范/ 里没有 md 材料。\n"
+            "音色语气要从人设推 —— 没有人设就只能瞎编一个中性语调，"
+            "那等于白设。\n先在界面的「人设与规范」区写一份，或用「AI 起草」。")
+    import ip_policy
+    cloud_why = ip_policy.require_cloud(ctx["root"], ctx["name"])
+    card = ctx["card"]
+    redlines = _texts(card.get("redlines"))
+    habits = _texts(card.get("habits"))
+    # 现在的音色指令（从 ip.json 真源读，别处再存一份）
+    try:
+        import json as _j
+        with open(os.path.join(ctx["root"], "ip.json"), encoding="utf-8") as f:
+            cur_instr = str((_j.load(f).get("voice") or {}).get("tts", {})
+                            .get("instruction") or "").strip()
+    except Exception:
+        cur_instr = ""
+
+    user = f"""# 这个 IP
+名字：{ctx['name']}
+类型：{card.get('type', '?')}    定位：{card.get('role', '')}
+
+# 客户的需求
+{json.dumps(card.get('needs') or {}, ensure_ascii=False, indent=1)}
+
+# 说话习惯
+{chr(10).join('- ' + h for h in habits) if habits else '（没记）'}
+
+# 红线（音色也不能碰）
+{chr(10).join('- ' + r for r in redlines) if redlines else '（没记）'}
+
+# 人设材料（重点看「声音真值」「人格设定」两节）
+{ctx['persona']}
+
+# 现在的音色指令
+{cur_instr or '（空 —— 这就是为什么要有这次设计）'}"""
+
+    data, provider = chat_json(VOICE_SYSTEM, user, max_tokens=1200,
+                                prefer=prefer, temperature=0.5)
+    ins = str(data.get("instruction") or "").strip()
+    if not ins:
+        raise RuntimeError("模型没给出音色指令")
+    # 否定式自查：TTS 对否定句处理不可靠
+    negs = [w for w in ("不要", "不能", "别", "不许", "不得", "不是") if w in ins]
+    return {
+        "ip": ctx["name"], "provider": provider,
+        "instruction": ins,
+        "rationale": _short(data.get("rationale"), 60),
+        "alternatives": [str(x).strip() for x in (data.get("alternatives") or [])][:3],
+        "has_negative": negs,
+        "cloud_policy": cloud_why,
+    }
+
+
+# ---------------------------------------------------------------- 人设圣经
+PERSONA_SYSTEM = """你是短视频工作室的「人设圣经」撰写员。
+
+客户会跟你说这个号是谁、干什么。**人设圣经是唯一真值** ——
+写脚本、写提示词、跑出片之前都要看它，不许临时改。
+
+你要写的是一份**能直接用**的人设圣经，结构固定（参考成熟 IP 的圣经，如「珠珠」那份）：
+
+# <名字> · AI-IP 人设圣经
+> 版本 v1.0 · <日期> · 用途：<平台/用途>
+> 这份文档是唯一真值。写脚本、写提示词、跑出片之前先看这里，不要临时改。
+
+## 一、一句话定位
+（不是主播，不是老师，是什么身份。只讲 X、Y、Z，讲完让人敢做/敢来。
+一句话说清「我是谁 + 我站在什么位置 + 观众能得到什么」。）
+
+## 二、账号设定
+表格：平台 / 账号名 / 简介 / 获客区域。**不写「全国」「不限地区」**，锁定具体地域。
+
+## 三、目标人群
+两到三层，优先级从高到低。每层写：是谁 + 核心痛点 + 最在意什么。
+最后点明他们共同的痛点是什么。
+
+## 四、人格设定
+性格 / 价值观 / 关系姿态（是同行、供货方、还是老师？）/ 情绪基线 /
+口头禅（3-5 条，自然带，不硬塞）/ **绝不做的姿态**（卖惨、贩卖焦虑、贬低同行、装专家）。
+
+## 五、形象真值
+脸 / 发型（逐项写死，最容易漂）/ 身形与穿搭 / 年龄感 / 场景 / 光线与机位。
+⚠ 不能用「和参考图一样」带过 —— 必须把五官和发型结构全部**肯定式**写明。
+
+## 六、声音真值
+表格：音色 / 语速 / 情绪 / 口音 / 参考音频 / TTS 配方 / 固定 INSTR。
+固定 INSTR 写「永不改动」。
+
+## 七、口播结构
+表格：时间段 / 段落 / 任务。再列规矩（用什么句式、禁什么句式、主体段不复述结尾）。
+
+## 八、内容支柱
+3-5 个系列。每个写：叫什么 / 解决什么 / 2-3 个具体选题例子 / 尺寸倾向。
+★ 这一节决定「每天发什么」—— 没有它，AI 每次出的题都会飘。
+
+## 九、钩子库
+5-10 条开场白，可直接抄。
+**结尾固定动作**（每条都一样）：写死那一句。
+
+## 十、视觉规范
+表格：横屏/竖屏的分辨率、构图、字幕字号、封面、片头、BGM。
+
+## 十一、禁止项
+分「业务禁区」和「技术禁区」两栏。技术禁区写渲染/提示词层面的坑。
+
+## 十二、每周产出自检
+5 个问题，发之前问自己。
+
+=====
+写作要求：
+1. 用**客户自己的语气**写，不要写成广告文案，不要写成模板填空。
+2. 客户没说的具体事实（数字、经历、地址）**不要编**。写不出来的写「待补」。
+3. 篇幅 1200-2000 字。结构完整比字数多重要。
+4. 用 markdown，表格用 markdown 表格。
+
+返回 JSON：
+{"persona_md":"完整正文（markdown）",
+ "questions":["还需要问客户的关键问题，最多3条"],
+ "summary":"你对这个 IP 的理解，一句话，40字以内"}"""
+
+
+def draft_persona(text, prefer=None, ip_hint=""):
+    """自然语言 → 人设圣经草案（markdown）。
+
+    ★ 为什么单独做这件事：
+      01_人设与规范/ 是空的 → AI 写稿时没东西可读 → 只能瞎编。
+      以前唯一的办法是「对话式建档」顺手带出来，但那份是粗的（两篇几百字），
+      缺了内容支柱/钩子库/禁止项这些**真正决定片子长什么样**的部分。
+      现在按成熟 IP 的圣经结构写一份完整的。
+    """
+    if not (text or "").strip():
+        raise RuntimeError("先说说这个号是谁、要做什么")
+    user = f"""客户原话：
+
+{text.strip()}
+
+{f'补充：{ip_hint}' if ip_hint.strip() else ''}"""
+    cloud_why = "用户主动提交，按新客户处理"
+    if ip_hint.strip():
+        try:
+            from vstudio import resolve_ip
+            e = resolve_ip(ip_hint)
+        except SystemExit:
+            e = None
+        if e:
+            import ip_policy
+            cloud_why = ip_policy.require_cloud(e["path"], e["name"])
+    data, provider = chat_json(PERSONA_SYSTEM, user, max_tokens=4000,
+                                prefer=prefer, temperature=0.6)
+    md = str(data.get("persona_md") or "").strip()
+    if not md:
+        raise RuntimeError("模型没给出正文，换个说法再试")
+    return {
+        "provider": provider,
+        "persona_md": md,
+        "questions": [str(q) for q in (data.get("questions") or [])][:3],
+        "summary": _short(data.get("summary"), 60),
+        "cloud_policy": cloud_why,
+    }
+
+
+# ---------------------------------------------------------------- 建档素材分析（形象卡）
+# 建档时用户会把三样东西一起丢过来：人像参考图、音色参考音频、其它介绍文字。
+# 这一段负责把它们变成能写进 01_人设与规范 的形象卡原料。
+#
+# ★ 关于「能不能识别音色」的实话：
+#   目前路由里只有文本和图片两种输入，没有「听一遍音频就说得出音色」的通道。
+#   硬要让模型描述音色，它只能编一段听起来很像的假话 —— 而后面 TTS 会照着这段
+#   假描述去克隆，等于给一个真人安上不存在的嗓音。这比不给更糟。
+#   所以这里只报仪器量得出来的数：时长 / 基频 / 语速 / 响度 / 静音占比，
+#   再让 LLM 把这些数值翻译成一句人话（见 MATERIAL_VOICE_SYSTEM）。
+#   测出来的东西不会编，编出来的东西害人。
+MATERIAL_IMAGE_SYSTEM = """你是形象设计师，负责把一张人像参考图变成**可执行的形象真值**。
+
+看图说话：只写画面上确实存在的东西。不要推测性格，不要评价好不好看。
+
+输出（没把握的写「看不出」，不许编）：
+  gender       性别呈现（男 / 女 / 看不出）
+  age          年龄段（如 30-40 岁）
+  face         脸型与五官（一句）
+  skin         肤色与皮肤质感（一句，正向说法：哑光 / 细腻 / 偏深 …）
+  hair         发型发色（一句）
+  clothes      上装着装（一句：颜色 + 类型）
+  frame        构图与机位（如 胸口以上中景、正面、轻微仰拍）
+  light        光线（如 正面柔光、左侧主光）
+  bg           背景（一句）
+  vertical     是否竖屏（true / false）
+  summary      整体气质（15 字以内）
+
+★ 全中文。禁止否定式（不许写「不油」「不老」），一律改成正向说法。
+只输出 JSON，不要 markdown 代码块。"""
+
+MATERIAL_VOICE_SYSTEM = """你是配音导演。下面是一段参考音的**客观测量值**（仪器测出来的，不是主观印象）。
+
+把它翻成两句人话：一句给 TTS 当指令，一句给人看。
+
+要求：
+1. instruction（给 TTS 的指令）：20-45 字，写清 音色 + 情绪 + 节奏。
+   ★ 正向描述，**禁止否定词**（不许写「不快」「不夸张」）—— TTS 对否定句处理不可靠，
+     写了反而会照着否定词出效果。
+2. human（给人看的）：30 字以内，说清这个声音听起来是什么样。
+3. caution：测量值里有异常（太短 / 太吵 / 静音太多）就提醒一句；没有就填空字符串。
+
+只输出 JSON：{"instruction":"…","human":"…","caution":"…"}"""
+
+MATERIAL_CARD_SYSTEM = """你是 AI 数字人 IP 的形象档案撰写人。
+
+手上有：客户/本人的一段口语介绍、若干张人像参考图的画面分析、一段参考音的客观测量。
+你要把它们合成一份**形象卡**：以后 AI 选题、写文案、生图生视频都要照着这份来。
+
+写法规矩：
+1. 只写**有依据**的内容，每条后面标来源：
+   - 【介绍】来自客户口语介绍
+   - 【图像】来自参考图的画面观察
+   - 【声音】来自参考音的客观测量
+   没有依据的一律不写，不要「合理推测」。
+2. 结构用 markdown，分这几节：形象真值 / 声音真值 / 气质与表达 / 出镜与画面 / 待确认
+3. 「待确认」必须写：把介绍里没说清、但出片必须知道的列出来（是否戴眼镜、常穿什么、
+   口音强弱、能不能露脸等）。这是下次沟通的清单。
+4. 不要写空话（「要真实可信」「要有感染力」这类一律删）。
+
+只输出 markdown 正文，不要解释。"""
+
+_IMG_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+_AUD_EXT = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".opus"}
+# 人声基频经验区间。只是参考刻度，最终以耳朵为准 —— 所以下面只报数不给结论。
+_F0_MALE = (85, 155)
+_F0_FEMALE = (165, 255)
+
+
+def _ff():
+    """ffmpeg 路径：环境变量 FFMPEG > config/pipeline.json > PATH。
+
+    统一走这一个出口 —— 各处自己找，迟早有一处找到个不能用的。
+    """
+    import shutil as _sh
+    p = os.environ.get("FFMPEG")
+    if p and os.path.exists(p):
+        return p
+    try:
+        with open(os.path.join(ROOT, "config", "pipeline.json"), encoding="utf-8") as f:
+            ff = json.load(f).get("ffmpeg")
+        if ff and os.path.exists(ff):
+            return ff
+    except Exception:
+        pass
+    return _sh.which("ffmpeg")
+
+
+def probe_image(path):
+    """读图片宽高。走 ffmpeg，不引 Pillow —— 项目保持零第三方依赖。"""
+    ff = _ff()
+    if not ff:
+        return {}
+    try:
+        p = subprocess.run([ff, "-hide_banner", "-i", path],
+                           capture_output=True, timeout=30)
+        s = p.stderr.decode("utf-8", "ignore")
+        m = re.search(r",\s*(\d{2,5})x(\d{2,5})", s)
+        return {"w": int(m.group(1)), "h": int(m.group(2))} if m else {}
+    except Exception:
+        return {}
+
+
+def _f0_median(frames, eng, peak, sr, lo=80, hi=300):
+    """逐帧自相关估基频，取浊音帧中位数（Hz）。
+
+    只算有声帧：静音段没有周期性，混进去只会把 F0 拉偏。
+    帧长 50ms、不重叠 —— 精度够判断音区，计算量又压得住（纯 Python，无 numpy）。
+    """
+    lag_lo = max(2, int(sr / hi))
+    lag_hi = min(int(sr / lo), len(frames[0]) - 2)
+    if lag_hi <= lag_lo:
+        return None
+    got = []
+    for fr, e in zip(frames, eng):
+        if e <= peak * 0.12:
+            continue
+        m = sum(fr) / len(fr)
+        d = [float(x) - m for x in fr]
+        e0 = sum(x * x for x in d)
+        if e0 <= 0:
+            continue
+        best, bl = 0.0, 0
+        for lag in range(lag_lo, lag_hi + 1):
+            s = 0.0
+            for i in range(len(d) - lag):
+                s += d[i] * d[i + lag]
+            r = s / e0
+            if r > best:
+                best, bl = r, lag
+        if best >= 0.35 and bl:
+            got.append(sr / bl)
+    if not got:
+        return None
+    got.sort()
+    return round(got[len(got) // 2], 1)
+
+
+def _syllable_rate(eng, peak, sr, fl):
+    """用能量包络的「响起来又落下去」次数估音节率（语速代理，字/秒）。
+
+    ★ 不是 ASR，给不出准确字数。这里数的是音节团，中文口语一字约一团，
+      所以这个数 ≈ 语速。够用来判断快慢，别拿它当逐字稿。
+    """
+    if not eng or peak <= 0:
+        return None
+    hi, lo = peak * 0.35, peak * 0.15
+    cnt, armed = 0, False
+    for e in eng:
+        if not armed and e > hi:
+            armed, cnt = True, cnt + 1
+        elif armed and e < lo:
+            armed = False
+    dur = len(eng) * fl / float(sr)
+    if dur < 0.5:
+        return None
+    return round(cnt / dur, 2)
+
+
+def _voice_advice(m):
+    """按测量值给提醒。只说测得出来的异常，不评价声音好不好听。"""
+    tips = []
+    d = m.get("duration")
+    if isinstance(d, (int, float)):
+        if d < 5:
+            tips.append("偏短（%.1fs），参考音建议 6-12 秒，太短克隆不稳" % d)
+        elif d > 20:
+            tips.append("偏长（%.1fs），参考音取 6-12 秒就够了，长段反而掺进杂语气" % d)
+    db = m.get("loudness_dbfs")
+    if isinstance(db, (int, float)):
+        if db < -30:
+            tips.append("整体偏轻（%.1f dBFS），先做响度归一化再当参考音" % db)
+        elif db > -12:
+            tips.append("整体偏响（%.1f dBFS），有削顶风险，先降增益" % db)
+    sr = m.get("silence_ratio")
+    if isinstance(sr, (int, float)) and sr > 0.5:
+        tips.append("静音占了 %d%%，有效语音太少，建议重录一段连贯的话" % int(sr * 100))
+    f0 = m.get("f0_hz")
+    if isinstance(f0, (int, float)):
+        if f0 < _F0_MALE[1]:
+            tips.append("基频 %.0f Hz，落在男声常见区间" % f0)
+        elif f0 > _F0_FEMALE[0]:
+            tips.append("基频 %.0f Hz，落在女声常见区间" % f0)
+        else:
+            tips.append("基频 %.0f Hz，在男女声重叠区，以耳朵为准" % f0)
+    return tips
+
+
+def probe_audio(path):
+    """测量一段参考音的客观特征。纯标准库 + ffmpeg，不需要 numpy。
+
+    返回 {"ok": True, "metrics": {...}} 或 {"ok": False, "why": "…"}
+    """
+    ff = _ff()
+    if not ff:
+        return {"ok": False, "why": "找不到 ffmpeg（设环境变量 FFMPEG，或写进 config/pipeline.json 的 ffmpeg）"}
+    if not os.path.exists(path):
+        return {"ok": False, "why": "文件不在了，重传一次"}
+
+    info = {}
+    try:
+        p = subprocess.run([ff, "-hide_banner", "-i", path],
+                           capture_output=True, timeout=30)
+        s = p.stderr.decode("utf-8", "ignore")
+        d = re.search(r"Duration: (\d+):(\d+):([\d.]+)", s)
+        if d:
+            info["duration"] = round(int(d.group(1)) * 3600
+                                     + int(d.group(2)) * 60 + float(d.group(3)), 2)
+        sr = re.search(r"(\d{3,6}) Hz", s)
+        if sr:
+            info["sample_rate"] = int(sr.group(1))
+        ch = re.search(r"Audio:.*?,\s*(mono|stereo)", s)
+        if ch:
+            info["channels"] = ch.group(1)
+    except Exception as ex:
+        return {"ok": False, "why": "读不了这个文件：%s" % ex}
+
+    try:
+        p = subprocess.run([ff, "-v", "error", "-i", path, "-t", "8",
+                            "-ar", "6000", "-ac", "1", "-f", "s16le",
+                            "-c:a", "pcm_s16le", "-"],
+                           capture_output=True, timeout=120)
+        raw = p.stdout
+    except Exception as ex:
+        return {"ok": False, "why": "解码失败：%s" % ex}
+    if len(raw) < 1200:
+        return {"ok": False, "why": "音频太短，量不出东西（参考音建议 6-12 秒）"}
+
+    smp = array.array("h")
+    smp.frombytes(raw[:len(raw) // 2 * 2])
+    sr = 6000
+    fl = int(sr * 0.05)                       # 50ms 帧
+    frames = [smp[i:i + fl] for i in range(0, max(1, len(smp) - fl), fl)]
+    if not frames:
+        return {"ok": False, "why": "音频太短"}
+
+    eng = [(sum(float(x) * x for x in fr) / len(fr)) ** 0.5 for fr in frames]
+    peak = max(eng) or 1.0
+    voiced = [e for e in eng if e > peak * 0.12]
+    silence = round(1 - len(voiced) / float(len(eng)), 3)
+    rms = sum(eng) / len(eng)
+    dbfs = round(20 * math.log10(rms / 32768.0), 1) if rms > 0 else -99.0
+
+    info.update({
+        "silence_ratio": silence,
+        "loudness_dbfs": dbfs,
+        "f0_hz": _f0_median(frames, eng, peak, sr),
+        "syllables_per_sec": _syllable_rate(eng, peak, sr, fl),
+    })
+    info["advice"] = _voice_advice(info)
+    return {"ok": True, "metrics": info}
+
+
+def _vision_json(system, image_path, question, prefer=None, max_tokens=900):
+    """走视觉通道问一张图。
+
+    ★ sensitive=True：客户人像是商业形象资产，不进第三方免费池。
+    """
+    import base64
+    load_env()
+    from llm_router import LLMRouter
+    mime = mimetypes.guess_type(image_path)[0] or "image/png"
+    with open(image_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    r = LLMRouter()
+    d = r.chat([
+        {"role": "system", "content": system},
+        {"role": "user", "content": [
+            {"type": "text", "text": question},
+            {"type": "image_url",
+             "image_url": {"url": "data:%s;base64,%s" % (mime, b64)}},
+        ]},
+    ], max_tokens=max_tokens, temperature=0.3,
+        sensitive=True, need="vision", prefer=prefer)
+    content = (d["choices"][0]["message"].get("content") or "").strip()
+    txt = content
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", txt)
+    if m:
+        txt = m.group(1)
+    m = re.search(r"\{[\s\S]*\}", txt)
+    if not m:
+        raise ValueError("模型没给 JSON：" + content[:300])
+    return json.loads(m.group(0)), d.get("_provider", "?")
+
+
+def analyze_materials(upload_dir, intro="", prefer=None):
+    """分析建档暂存的素材，产出形象卡原料。
+
+    upload_dir  .cache/uploads/<uid>/（用户刚传的图 / 音）
+    intro       界面上补的「其它介绍」文字
+
+    返回：
+      images  [{file, w, h, desc{…}}]   视觉模型看图的结果（看不了就只留尺寸）
+      audios  [{file, metrics{…}}]      仪器量出来的客观特征
+      voice_instruction / voice_human   音色指令（有音频才有）
+      image_card_md                     形象卡正文（图像 + 介绍合成）
+      notes                             给界面显示的提醒
+    """
+    if not os.path.isdir(upload_dir):
+        raise RuntimeError("暂存目录不在了，请重新上传")
+
+    out = {"provider": "?", "images": [], "audios": [], "notes": [],
+           "voice_instruction": "", "voice_human": "", "image_card_md": ""}
+
+    files = sorted(os.listdir(upload_dir))
+    imgs = [f for f in files if os.path.splitext(f)[1].lower() in _IMG_EXT]
+    auds = [f for f in files if os.path.splitext(f)[1].lower() in _AUD_EXT]
+
+    # ---- 图片：走视觉通道，逐张问 ----
+    for f in imgs[:6]:                        # 最多看 6 张，够定形象了
+        fp = os.path.join(upload_dir, f)
+        item = {"file": f, "path": fp}
+        item.update(probe_image(fp) or {})
+        try:
+            desc, prov = _vision_json(
+                MATERIAL_IMAGE_SYSTEM, fp,
+                "按系统提示里的字段描述这张人像参考图，只输出 JSON。")
+            item["desc"] = desc
+            out["provider"] = prov
+        except Exception as ex:
+            # 视觉通道不可用不该拖垮建档 —— 记一笔，让人自己补描述。
+            item["desc"] = None
+            out["notes"].append("「%s」没能看图（%s），形象描述要手填" % (f, ex))
+        out["images"].append(item)
+
+    # ---- 音频：只测物理量，不让模型听 ----
+    for f in auds[:4]:
+        fp = os.path.join(upload_dir, f)
+        r = probe_audio(fp)
+        out["audios"].append({"file": f, "path": fp,
+                              "ok": r.get("ok"), "why": r.get("why", ""),
+                              "metrics": r.get("metrics")})
+        if not r.get("ok"):
+            out["notes"].append("「%s」：%s" % (f, r.get("why")))
+
+    # ---- 有音频 → 把测量值翻成音色指令 ----
+    good = [a for a in out["audios"] if a.get("ok") and a.get("metrics")]
+    if good:
+        m = good[0]["metrics"]
+        payload = json.dumps(m, ensure_ascii=False, indent=1)
+        try:
+            d, prov = chat_json(MATERIAL_VOICE_SYSTEM,
+                                "参考音的客观测量值：\n\n" + payload + "\n\n翻成音色指令，只输出 JSON。",
+                                max_tokens=800, prefer=prefer, temperature=0.4)
+            out["voice_instruction"] = str(d.get("instruction") or "").strip()
+            out["voice_human"] = str(d.get("human") or "").strip()
+            out["provider"] = prov
+            if str(d.get("caution") or "").strip():
+                out["notes"].append(str(d["caution"]).strip())
+        except Exception as ex:
+            # 翻译失败也别丢测量值 —— 原始数值照样给出去，人能自己判断。
+            out["notes"].append("音色指令没翻出来（%s），下面是原始测量值，可照着写" % ex)
+            out["voice_human"] = "基频 %s Hz · 语速约 %s 音节/秒 · 响度 %s dBFS" % (
+                m.get("f0_hz"), m.get("syllables_per_sec"), m.get("loudness_dbfs"))
+    for t in (good[0]["metrics"].get("advice") or []) if good else []:
+        out["notes"].append(t)
+
+    # ---- 形象卡：图像观察 + 介绍文字合成 ----
+    if imgs or (intro or "").strip():
+        user = (
+            "客户/本人的口语介绍：\n" + ((intro or "").strip() or "（没写）") + "\n\n"
+            "人像参考图的画面分析：\n"
+            + json.dumps([{"file": i["file"], "w": i.get("w"), "h": i.get("h"),
+                           "desc": i.get("desc")} for i in out["images"]],
+                         ensure_ascii=False, indent=1) + "\n\n"
+            "参考音的客观测量：\n"
+            + json.dumps([{"file": a["file"], "metrics": a.get("metrics")}
+                          for a in out["audios"]], ensure_ascii=False, indent=1)
+            + "\n\n按系统提示写形象卡，只输出 markdown 正文。"
+        )
+        try:
+            md, prov = chat_text(MATERIAL_CARD_SYSTEM, user,
+                                 max_tokens=2600, prefer=prefer, temperature=0.5)
+            out["image_card_md"] = md
+            out["provider"] = prov
+        except Exception as ex:
+            out["notes"].append("形象卡没写成（%s），素材已存下，可手动补" % ex)
+    else:
+        out["notes"].append("既没传图也没写介绍，形象卡跳过")
+
+    return out
+
+
+def chat_text(system, user, max_tokens=1500, prefer=None, temperature=0.6):
+    """要一段自由文本（markdown）回来 —— 不是所有产出都适合塞进 JSON。"""
+    load_env()
+    from llm_router import LLMRouter
+    r = LLMRouter()
+    d = r.chat([{"role": "system", "content": system},
+                {"role": "user", "content": user}],
+               max_tokens=max_tokens, temperature=temperature,
+               sensitive=True,          # ← 同文件头。这行不许改。
+               prefer=prefer or None)
+    return (d["choices"][0]["message"].get("content") or "").strip(), d.get("_provider", "?")
+
+
+STILL_SYSTEM = """You write the image prompt used to generate a client's portrait for AI video.
+
+The output goes straight into a text-to-image model and becomes the first frame of a
+paid video. If it is vague, the client's face changes between videos. If anything is
+wrong, the money is wasted.
+
+HARD RULES:
+1. English only. Not one Chinese character - the model renders stray Chinese as visible
+   text burned into the picture.
+2. Positive statements only. Never use no/not/never/without/avoid. To say "no glasses",
+   write "He wears no glasses" -> WRONG; write "His face is unobstructed, his eyes clearly visible."
+   The image model does not reliably obey negation, so describe what IS there.
+3. Only things visible in a photo: face shape, hair, facial features, clothing, framing,
+   lens, lighting, background objects. Never abstract praise ("professional", "trustworthy")
+   - convert it into concrete visible detail.
+4. Never ask for text, logos, watermarks, UI, or anything written on screen.
+5. One English sentence per aspect, each ending with a period. Maximum 45 words total.
+6. Always specify: vertical 9:16 framing, photographic realism.
+7. Keep the person's identity STABLE and simple - this same prompt must reproduce the
+   same recognizable person every time.
+
+Return JSON only:
+{"who_en": "...", "scene_en": "...", "prompt": "...", "notes": [...]}
+ - who_en: the person only (face, hair, clothing, expression)
+ - scene_en: background/environment only
+ - prompt: the full sentence combining both, ready to submit
+ - notes: 0-3 short Chinese notes for the human operator (what you inferred / what to double check)
+"""
+
+STILL_POLISH_SYSTEM = """You improve an existing image prompt for a text-to-image model.
+
+Keep the described person RECOGNIZABLY THE SAME - operators reuse this across many
+videos, so never change identity features you were told about. Improve clarity,
+framing, lighting, and realism only.
+
+HARD RULES:
+1. English only, zero Chinese characters.
+2. Positive statements only - no no/not/never/without/avoid.
+3. Only visible facts. Describe what is there, never what should be absent.
+4. No text, logo, watermark, or UI requests.
+5. Vertical 9:16, photographic realism, sentences ending with a period, max 45 words.
+
+Return JSON only:
+{"prompt": "...", "changed": ["concrete sentence about what you improved"], "notes": [...]}
+"""
+
+
+def draft_still_prompt(ip, who, scene="", polish="", prefer=None):
+    """定帧素材的提示词：从中文口语描述生成，或把现有提示词润色一遍。
+
+    返回里带 `notes` 是有意的 —— AI 补出来的东西（比如它猜了这个人戴不戴眼镜）
+    必须让人看得见，否则补错的细节会一路印到成片上去。
+    """
+    mode = "polish" if polish.strip() else "new"
+    if mode == "polish":
+        user = ("现有提示词：\n%s\n\n"
+                "人物原本的描述（不得改变身份特征）：\n%s\n%s"
+                % (polish.strip(), who.strip(),
+                   ("背景要求：\n%s" % scene.strip()) if scene.strip() else ""))
+        out, prov = chat_json(STILL_POLISH_SYSTEM, user, max_tokens=900,
+                              prefer=prefer, temperature=0.5)
+        out["prompt"] = str(out.get("prompt") or "").strip()
+    else:
+        user = ("这个人长什么样（客户原话）：\n%s\n%s"
+                % (who.strip(),
+                   ("背景/环境：\n%s" % scene.strip()) if scene.strip() else "背景没说，按他的身份合理补一个。"))
+        out, prov = chat_json(STILL_SYSTEM, user, max_tokens=900,
+                              prefer=prefer, temperature=0.6)
+        out["who_en"] = str(out.get("who_en") or "").strip()
+        out["scene_en"] = str(out.get("scene_en") or "").strip()
+        out["prompt"] = str(out.get("prompt") or "").strip()
+
+    notes = [str(x).strip() for x in (out.get("notes") or []) if str(x).strip()][:5]
+    out["notes"] = notes
+    out["mode"] = mode
+    out["ip"] = ip
+    out["provider"] = prov
+
+    # 护栏：定帧提示词里出现汉字 = 会被烧成画面上的字，和出片提示词同一个坑。
+    # 这里不静默改，直接报错让人看见（改了内容但没告知，比报错更糟）。
+    p = out.get("prompt") or ""
+    if re.search(r"[\u4e00-\u9fff]", p):
+        raise ValueError("AI 写的定帧提示词里混进了中文，已拦下（原文：%s）" % p[:120])
+    if re.search(r"\b(no|not|never|without|avoid)\b", p, re.I):
+        raise ValueError("定帧提示词里出现否定词，模型会听反（原文：%s）" % p[:120])
+    return out
+
+
 # ---------------------------------------------------------------- CLI
 def main():
     ap = argparse.ArgumentParser(description="工作室 AI：选题 / 建档草案")
@@ -694,6 +1398,29 @@ def main():
 
     p = sub.add_parser("persona", help="看某 IP 的人设材料有多少字进了 context")
     p.add_argument("ip")
+
+    dp = sub.add_parser("persona-draft", help="自然语言 → 人设圣经草案（markdown）")
+    dp.add_argument("text")
+    dp.add_argument("--prefer", default=None)
+    dp.add_argument("--ip-hint", default="")
+    dp.add_argument("--json", action="store_true")
+    dp.add_argument("--out", default="")
+
+    st = sub.add_parser("still-prompt",
+                        help="定帧素材：中文描述 → 英文出图提示词（也可润色现有提示词）")
+    st.add_argument("ip")
+    st.add_argument("--who", default="", help="这个人长什么样（中文口语即可）")
+    st.add_argument("--scene", default="", help="背景/环境（中文即可）")
+    st.add_argument("--polish", default="", help="给了就是「润色现有提示词」模式")
+    st.add_argument("--prefer", default=None)
+    st.add_argument("--json", action="store_true")
+    st.add_argument("--out", default="")
+
+    dv = sub.add_parser("voice", help="按人设设计音色语气指令")
+    dv.add_argument("ip")
+    dv.add_argument("--prefer", default=None)
+    dv.add_argument("--json", action="store_true")
+    dv.add_argument("--out", default="")
 
     a = ap.parse_args()
 
@@ -762,11 +1489,62 @@ def main():
                 print("✓ 自检过了（字数/红线/钩子都在标准内）")
             if r["note"]:
                 print(f"模型备注：{r['note']}")
+        elif a.cmd == "still-prompt":
+            if not (a.who or "").strip() and not (a.polish or "").strip():
+                raise ValueError("要么给 --who（中文描述这个人），要么给 --polish（现有提示词）")
+            r = draft_still_prompt(a.ip, a.who, a.scene, a.polish, a.prefer)
+            emit(r)
+            if a.json:
+                print(json.dumps(r, ensure_ascii=False))
+                return
+            print(f"通道 {r.get('provider', '?')}   模式 {r['mode']}")
+            print("\n英文提示词：")
+            print("  " + (r["prompt"] or "（空）"))
+            if r.get("who_en"):
+                print("\n人物：" + r["who_en"])
+            if r.get("scene_en"):
+                print("背景：" + r["scene_en"])
+            if r.get("changed"):
+                print("\n改了什么：")
+                for c in r["changed"]:
+                    print("  - " + c)
+            if r["notes"]:
+                print("\n提醒：")
+                for n in r["notes"]:
+                    print("  - " + n)
         elif a.cmd == "persona":
             ctx = ip_context(a.ip)
             print(f"{ctx['name']}：{len(ctx['persona'])} 字，"
                   f"来自 {ctx['persona_files'] or '（空）'}")
             print(f"已有套次 {len(ctx['titles'])} 个")
+        elif a.cmd == "persona-draft":
+            r = draft_persona(a.text, a.prefer, a.ip_hint)
+            emit(r)
+            if a.json:
+                print(json.dumps(r, ensure_ascii=False))
+                return
+            print(f"通道 {r['provider']}")
+            print("=" * 56)
+            print(r["persona_md"])
+            print("=" * 56)
+            if r["questions"]:
+                print("还要问客户：")
+                for q in r["questions"]:
+                    print("  · " + q)
+            print(f"理解：{r['summary']}")
+        elif a.cmd == "voice":
+            r = design_voice_instruction(a.ip, a.prefer)
+            emit(r)
+            if a.json:
+                print(json.dumps(r, ensure_ascii=False))
+                return
+            print(f"通道 {r['provider']}")
+            print(f"音色语气指令：{r['instruction']}")
+            print(f"理由：{r['rationale']}")
+            for i, alt in enumerate(r["alternatives"], 1):
+                print(f"  备选{i}：{alt}")
+            if r["has_negative"]:
+                print(f"⚠ 含否定词 {r['has_negative']} —— TTS 对否定句处理不可靠，建议改成正向描述")
     except Exception as ex:
         print(f"✗ {ex}", file=sys.stderr)
         sys.exit(1)

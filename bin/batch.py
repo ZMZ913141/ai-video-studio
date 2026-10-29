@@ -132,8 +132,18 @@ def prepare_script(ip, setname, topic, script_path, tone=""):
         if os.path.abspath(script_path) != os.path.abspath(dst):
             with open(script_path, encoding="utf-8") as f:
                 txt = f.read()
+            # ★ 拷进来的稿子也要过去重闸：重复的话 TTS 会念两遍。
+            #   逻辑在 vstudio.dedupe_script_text（唯一真源）。
+            try:
+                card = V.load_card(V.resolve_ip(ip)["path"]) or {}
+                landing = str(card.get("landing") or "").strip()
+                txt, notes = V.dedupe_script_text(txt, landing)
+            except Exception:
+                notes = []
             with open(dst, "w", encoding="utf-8") as f:
-                f.write(txt)
+                f.write(txt.rstrip() + "\n")
+            if notes:
+                return True, f"用现成文案 → {os.path.basename(dst)}（已去重：{'；'.join(notes)}）"
         return True, f"用现成文案 → {os.path.basename(dst)}"
 
     if not topic:

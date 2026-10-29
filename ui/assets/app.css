@@ -896,3 +896,79 @@ input[type="range"]::-moz-range-thumb {
 }
 .hist-meta { font-size: 10.5px; color: var(--tx-3); font-variant-numeric: tabular-nums; }
 .hist-at { font-size: 10px; color: var(--tx-3); font-variant-numeric: tabular-nums; }
+
+/* ---------- 试片台（可选 / 分步 / 三模式） ---------- */
+.chk { display:flex; align-items:center; gap:6px; margin:4px 0; cursor:pointer; font-size:13px; color:var(--tx-2); }
+.chk input { accent-color: var(--accent); }
+.seg { display:flex; gap:6px; margin:6px 0; flex-wrap:wrap; }
+.seg-i { display:flex; align-items:center; gap:5px; padding:5px 11px; border:1px solid var(--stroke);
+  border-radius:999px; cursor:pointer; font-size:12px; color:var(--tx-2); background:var(--glass); }
+.seg-i input { accent-color: var(--accent); }
+.seg-i.on { border-color: var(--accent); color:var(--tx-1); background:var(--accent-soft); }
+.trial-step { border:1px solid var(--stroke); border-radius:10px; padding:8px 10px; margin:8px 0; background:var(--glass); }
+.ts-head { display:flex; align-items:center; gap:8px; }
+.ts-ctrl { margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+.badge { font-size:11px; padding:1px 8px; border-radius:999px; border:1px solid var(--stroke);
+  color:var(--tx-2); background:var(--glass-2); white-space:nowrap; }
+
+/* ---------- 总沟通对话区 ---------- */
+.dlg-wrap { display:flex; flex-direction:column; gap:8px; height:calc(100% - 120px); overflow:auto; padding:8px 0; }
+.dlg-sys { font-size:11px; color:var(--tx-3); text-align:center; padding:8px; background:var(--glass-2); border-radius:8px; }
+.dlg-msg { display:flex; flex-direction:column; gap:3px; max-width:88%; animation: dlgIn .25s ease; }
+.dlg-mine { align-self:flex-end; }
+.dlg-theirs { align-self:flex-start; }
+.dlg-bubble { padding:8px 12px; border-radius:12px; font-size:13px; line-height:1.5; white-space:pre-wrap; }
+.dlg-mine .dlg-bubble { background:var(--accent); color:#0b0c10; border-bottom-right-radius:2px; }
+.dlg-theirs .dlg-bubble { background:var(--glass); color:var(--tx-1); border:1px solid var(--stroke); border-bottom-left-radius:2px; }
+.dlg-actions { display:flex; gap:6px; flex-wrap:wrap; font-size:11px; }
+.dlg-act { padding:2px 8px; border-radius:999px; border:1px solid var(--stroke); color:var(--tx-2); background:var(--glass-2); white-space:nowrap; }
+.dlg-act-ok { border-color:var(--ok); color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent); }
+.dlg-act-wait { border-color:var(--warn); color:var(--warn); background:color-mix(in srgb, var(--warn) 12%, transparent); }
+.dlg-act-bad { border-color:var(--err); color:var(--err); background:color-mix(in srgb, var(--err) 12%, transparent); }
+.dlg-input { display:flex; gap:6px; margin-top:8px; padding-top:8px; border-top:1px solid var(--stroke); }
+.dlg-input input { flex:1; min-width:0; }
+.dlg-hint { font-size:11px; color:var(--tx-3); margin-top:6px; }
+
+@keyframes dlgIn {
+  from { opacity:0; transform:translateY(6px); }
+  to { opacity:1; transform:translateY(0); }
+}
+
+/* 建档素材行：类型图标 + 文件名 + 大小 + 移除 */
+.mat-list { display:grid; gap:6px; margin-top:8px; }
+.mat-list .mat {
+  display:flex; align-items:center; gap:8px;
+  padding:6px 8px; border:1px solid var(--stroke);
+  border-radius:var(--r-sm); background:var(--glass-2);
+}
+.mat .mk {
+  flex:0 0 20px; height:20px; border-radius:5px;
+  display:grid; place-items:center;
+  font-size:10.5px; font-weight:600;
+  background:var(--accent-soft); color:#c8c2ff;
+}
+.mat .mk.audio { background:color-mix(in srgb, var(--ok) 14%, transparent); color:var(--ok); }
+.mat .mn {
+  flex:1; min-width:0; font-size:11.5px; color:var(--tx-1);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.mat .ms { font-size:10.5px; color:var(--tx-3); font-family:var(--mono); }
+.mat .mth {
+  flex:0 0 34px; width:34px; height:34px; border-radius:6px;
+  object-fit:cover; background:var(--bg-2); border:1px solid var(--stroke);
+}
+
+/* ---------- 本套素材：分段用哪张（2026-10-30） ----------
+   一行一段：段号+时间+文案摘要 一行，下面一行是可选素材的勾选。
+   用勾选而不是下拉：一条片子常见 3~8 段、素材 2~5 张，勾选能一眼看全分配。 */
+.mat-seg {
+  border:1px solid var(--stroke); border-radius:var(--r-sm);
+  background:var(--glass-2); padding:7px 9px; margin-top:6px;
+}
+.mat-seg .ms-head { display:flex; align-items:baseline; gap:8px; margin-bottom:5px; }
+.mat-seg .ms-head b { font-size:11.5px; color:var(--tx-1); flex:0 0 auto; }
+.mat-seg .ms-body { display:flex; gap:12px; flex-wrap:wrap; }
+.mat-seg .chk { font-size:11px; }
+
+/* 配乐库行里的播放器：默认 300px 会把整行挤爆 */
+.mat audio { flex:0 0 170px; width:170px; height:28px; }

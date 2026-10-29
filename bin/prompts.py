@@ -268,18 +268,23 @@ def write_prompts(ip_root, setname, data, source):
 #
 #   这一层落成 prompts.en.json：gen_video.py 只在它存在时才采纳。
 #   没有它就走老路（ip.json 的 prompt_vars），行为跟以前逐字节一致。
-TR_SYSTEM = """你是给视频生成模型写画面提示词的英文译者。
+TR_SYSTEM = """你是给 MiniMax-H3 视频生成模型写画面提示词的英文译者。
 
-任务：把中文分镜描述译成英文短句。
+任务：把中文分镜描述译成英文短句，供 H3 的 expression / performance 字段使用。
+规范出处：docs/提示词规范-H3与QwenImage21.md（从 T8 插件提纯的官方核心 Skill）。
 
 硬约束（违反即作废）：
-1. 输出必须是纯英文，**一个中文字符都不能有**（汉字会被模型当成画面上要烧的字幕）。
+1. 输出必须是纯英文，**一个中文字符都不能有**。
+   ★ 为什么这么硬：H3 的说明字段走英文协议，画面里的汉字会被模型理解成
+     「该上屏的字」—— S04 就是这么被烧上去一整行字幕的。
 2. 只能用**正向描述**，禁止 no/not/never/without/avoid 这类否定词。
-   中文里的「不要皱眉」要译成正面说法，例如 His brows rest level and relaxed.
-3. 只写**画面上能看见的事实**：眉、眼、嘴的状态，手势幅度，身体动作。
-   不写抽象评价（「专业」「亲和」要落成具体的脸部和手部状态）。
+   中文的「不要皱眉」要写成正面说法：His brows rest level and relaxed.
+   （生成模型对否定句处理不可靠，写了否定词反而会把那个状态生出来。）
+3. 只写**画面上能看见的事实**：眉、眼、嘴的状态，手势幅度，身体动作，机位与光线。
+   不写抽象评价 ——「专业」「亲和」要落成具体的脸部和手部状态。
 4. 不写任何像字幕/标题/logo 的内容，不出现引号和换行。
 5. 每句用英文句号结尾，单句不超过 30 个词。
+6. 每句必须自包含：自己站得住，不用 it / this 这类指代上下文的代词。
 
 输出 JSON（不要解释、不要 markdown 代码块）：
 {"segments":[{"i":1,"expression_en":"His brows rest ...","perf_en":"His right hand ..."}]}
@@ -420,7 +425,12 @@ def do_gen(e, setname, optimize=False, dry=False, as_json=False):
     if not segs:
         sys.exit("✗ 切不出段：05_文案/<套次> 里没有文案 txt，也没有 SRT")
     cfg = load_cfg()
-    gp = cfg.get("global_prompt", {}).get("prefix", "")
+    # ★ enabled 以前没人读（2026-10-29 全库扫出来的假参数）：
+    #   界面上能开关，关了也没用 —— 全局片段照加。
+    #   现在让它真生效：关掉就完全不注入全局片段。
+    _gcfg = cfg.get("global_prompt", {}) or {}
+    gp = _gcfg.get("prefix", "") if _gcfg.get("enabled", True) else ""
+    gp_suffix = _gcfg.get("suffix", "") if _gcfg.get("enabled", True) else ""
 
     old, _ = load_prompts(ip_root, setname)
     if optimize and not old:
@@ -467,7 +477,7 @@ def do_gen(e, setname, optimize=False, dry=False, as_json=False):
                          "camera": s.get("camera", ""),
                          "prompt": s.get("prompt", "")})
     payload = {"ip": e["name"], "set": setname,
-               "global": {"prefix": gp, "suffix": cfg.get("global_prompt", {}).get("suffix", "")},
+               "global": {"prefix": gp, "suffix": gp_suffix},
                "segments": segments}
 
     print(f"供应商 {provider} —— 校验红线中 …")

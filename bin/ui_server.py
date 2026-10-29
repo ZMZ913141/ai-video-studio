@@ -48,6 +48,13 @@ UI_DIR = os.path.join(ROOT, "ui")
 ARCHIVE = os.environ.get("STUDIO_ARCHIVE") or "/cfu/ai视频档案库"
 CACHE_DIR = os.path.join(ROOT, ".cache", "ui")
 THUMB_DIR = os.path.join(CACHE_DIR, "thumbs")
+# 建档素材暂存区。为什么不在建档时一步到位写进档案：
+# ① 建档案之前 IP 目录根本不存在，没地方落；
+# ② 草稿是可以弃的，直接写进档案区会留一堆没人认领的孤儿文件。
+# 这里只放临时文件，建档成功才搬进 <IP>/02_素材真值/。
+UPLOAD_DIR = os.path.join(CACHE_DIR, "uploads")
+UPLOAD_MAX_BYTES = 80 * 1024 * 1024        # 单个文件上限
+UPLOAD_MAX_TOTAL = 240 * 1024 * 1024       # 单次请求总量上限
 CHANGELOG_GLOBAL = os.path.join(ROOT, "config", ".ui_changelog.jsonl")
 # 端口会被自动顺延，光看命令猜不准。写个小纸条，谁来查地址都一致。
 # ★ 纸条放项目里，不放 /tmp：/tmp 会被系统清理，容器里还常常是每次调用独立的。
@@ -59,6 +66,8 @@ BOOT_AT = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 SHUTDOWN_TOKEN = uuid.uuid4().hex
 
 PY = sys.executable if sys.version_info >= (3, 9) else "python3"
+# config/pipeline.json 万一读不到时的兜底（和那里记的是同一个 venv）
+_NPY_FALLBACK = "/home/qmr/.workbuddy/binaries/python/envs/default/bin/python"
 VSTUDIO = os.path.join(BIN_DIR, "vstudio.py")
 
 # 允许被浏览/读取的根（防路径越界：任何 fs 请求都必须在这些前缀之内）
@@ -69,6 +78,9 @@ ALLOW_ROOTS = [
 
 MEDIA_EXT = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".mp3", ".wav", ".flac", ".m4a", ".ogg"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+# 音色参考：只收纯音频。视频里虽然也有音轨，但这里要的是「拿来就能当参考音」的东西，
+# 混进 mp4 会让后面 TTS 预处理多一层不确定性。
+AUDIO_EXT = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".opus"}
 
 # ---------- 写操作白名单 ----------
 #   tier2=True 的命令必须带 confirm=1 才放行，且自动记 changelog
@@ -117,6 +129,28 @@ IP_WRITABLE = {
     "video.steps":                {"tier": 2, "type": "int",   "label": "采样步数", "min": 1, "max": 50},
     "video.lora.strength":        {"tier": 2, "type": "float", "label": "LoRA 强度", "min": 0.0, "max": 2.0},
     "video.sage_attention":       {"tier": 2, "type": "str",   "label": "Sage Attention", "enum": ["auto", "true", "false"]},
+    # ---- 配乐：四条路选一条（2026-10-29 起）----
+    # 为什么这几个必须能写：以前配乐只有「本地合成那一条 88BPM」，
+    # 想换风格只能改脚本。现在源/提示词/种子都是真值，改完重跑 bgm 那一步就行。
+    "bgm.source":                 {"tier": 1, "type": "str",   "label": "配乐来源",
+                                   "enum": ["reuse", "synth", "comfy", "library", "online"]},
+    "bgm.prompt":                 {"tier": 1, "type": "text",  "label": "配乐描述（英文）", "maxlen": 400},
+    "bgm.seed":                   {"tier": 1, "type": "int",   "label": "配乐种子", "min": 0, "max": 999999999},
+    "bgm.random":                 {"tier": 1, "type": "bool",  "label": "曲库随机挑一首"},
+    "bgm.pick":                   {"tier": 1, "type": "str",   "label": "曲库指定（文件名子串）", "maxlen": 200},
+    "bgm.library_dir":            {"tier": 2, "type": "str",   "label": "本地配乐库目录"},
+}
+# ★ ip.json 里那些**存着但没有任何脚本读**的字段（2026-10-29 全库扫出来的）。
+#   它们以前也在上面（前端能编辑），但改了不起任何作用 —— 界面在骗人。
+#   现在明确标出来：不再展示为可编辑控件，只在说明里点出来。
+#   要让它们真生效，得在生产脚本里读 ip.json（substyle.py 的字号就是这么改的）。
+IP_INERT = {
+    "subtitle.base_res": "字幕画布尺寸由出片分辨率决定，这个字段没人读",
+    "subtitle.outline": "描边宽度现在跟字号联动（字越大描边越细），这个字段没人读",
+    "video.orientation": "画幅写死在引擎（9:16 竖屏），这个字段没人读",
+    "video.sampler": "采样器写死在引擎（euler），这个字段没人读",
+    "video.second_pass.enabled": "二采开关在引擎里按档位定，这个字段没人读",
+    "voice.tts.model": "TTS 模型名写死在脚本里，这个字段没人读",
 }
 
 TASKS = {}
@@ -126,6 +160,24 @@ TASK_LOCK = threading.Lock()
 #   tier 2 的必须带 confirm（吃 GPU / 花钱 / 会覆盖产物），前端据此弹确认框。
 #   前端只传 kind + ip/set + 少数受限字段，argv 在这里拼 —— 传不进任意命令。
 GPU_KINDS = {"pipeline", "prompts-gen", "prompts-opt"}
+# ★ 这些动作跑的脚本 import numpy —— 必须从 envs/default 那套解释器起，
+#   用标准解释器会直接 ModuleNotFoundError。
+#   路径不写死在这里，从 config/pipeline.json 的 pythons.numpy 读（唯一真源）。
+NUMPY_KINDS = {"bgm-preview"}
+
+
+def _py_for(kind):
+    """按动作挑解释器。两套解释器的分工记在 config/pipeline.json 的 pythons 里。"""
+    if kind not in NUMPY_KINDS:
+        return None                      # None = 用默认 PY
+    try:
+        cfg = load_json(os.path.join(ROOT, "config", "pipeline.json")) or {}
+        p = ((cfg.get("pythons") or {}).get("numpy") or "").strip()
+        if p and os.path.exists(p):
+            return p
+    except Exception:
+        pass
+    return _NPY_FALLBACK
 
 # 中文业务阶段 → 流水线步骤区间 (from, to)。
 # ★ 这个映射只在这里写一份：前端点进度节点时不该自己再列一遍步骤名，
@@ -216,6 +268,107 @@ def safe_path(p):
         return None
     real = os.path.realpath(p)
     return real if within_roots(real) and os.path.exists(real) else None
+
+
+def trim_backups(path, keep=5):
+    """同一个文件反复保存会攒出一堆 `.bak.<时间戳>`。
+
+    2026-10-29 实测：老王的 M01 目录里有 20+ 个 brief.md.bak，
+    活的那个反而被埋在里面 —— 人说「找不到哪份是现在的」，就是这个原因。
+    规则：只留最近 keep 份在原地，更早的挪进 `_旧备份/`（不删，随时能翻）。
+    """
+    folder = os.path.dirname(path)
+    prefix = os.path.basename(path) + ".bak."
+    try:
+        baks = sorted([f for f in os.listdir(folder) if f.startswith(prefix)],
+                      key=lambda f: os.path.getmtime(os.path.join(folder, f)),
+                      reverse=True)
+    except Exception:
+        return []
+    if len(baks) <= keep:
+        return []
+    moved = []
+    dst_dir = os.path.join(folder, "_旧备份")
+    try:
+        os.makedirs(dst_dir, exist_ok=True)
+        for fn in baks[keep:]:
+            shutil.move(os.path.join(folder, fn), os.path.join(dst_dir, fn))
+            moved.append(fn)
+    except Exception:
+        pass
+    return moved
+
+
+PERSONA_CORE_KEYS = ("人设", "圣经", "IP", "ip")
+
+
+def persona_core(names):
+    """从 01_人设与规范/ 里挑出「人设主干」——顺序就是写入时要落到哪一篇。
+
+    ★ 为什么要有这个（2026-10-29 用户实测）：
+      目录里同时躺着 `陈洁斌_AI-IP人设圣经.md`（16965 字，真身）和一堆
+      `ComfyUI插件速查.md` / `背景设计方案.md`（参考资料）。界面旧逻辑在
+      没指定文件名时**固定写 `人设圣经.md`** → 于是一个 IP 出现两份人设，
+      而 studio_ai.persona_material() 是**整目录拼起来**喂给模型的。
+      两份互相矛盾的人设比没有人设更糟：模型会各信一半，写成四不像。
+    """
+    core = [n for n in names if any(k in n for k in PERSONA_CORE_KEYS)]
+
+    def rank(n):
+        # 顺序反过来会出事：`人设-补充.md` 也带「人设」两字，纯按名字排会
+        # 排到 `老王_AI-IP人设圣经.md` 前面，于是「存」默认写进补充篇，
+        # 真身反而不动。圣经 > 人设 > 只带 IP 字样。
+        if "圣经" in n:
+            return (0, n)
+        if "人设" in n:
+            return (1, n)
+        return (2, n)
+
+    core.sort(key=rank)
+    return core
+
+
+_STEP_LINE = re.compile(r"^\s*([✓⏭✗⚠])\s+([A-Za-z][A-Za-z0-9_-]*)\s*(.*)$", re.M)
+
+
+def diagnose_pipeline(logp, limit=200000):
+    """从流水线日志尾巴里读出「哪些步跑完了、停在哪一步」。
+
+    ★ 为什么要在后端做这件事（2026-10-29 用户实测）：
+      出片跑到一半失败，界面上只有一句「跑失败了」和一屏滚动的日志。
+      人最想知道的其实是两件事：**已经跑到哪了**、**能不能接着跑**。
+      这两件都写在日志里（✓ / ⏭ / ✗），只是没人愿意去翻。
+      读出来不是为了猜，是因为 pipeline.py 的断点续跑本来就在 ——
+      产物在且没变旧就跳过，所以「接着跑」真的只重做失败那一步。
+    """
+    try:
+        with open(logp, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - limit))
+            txt = f.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    done, skipped, warn, failed = [], [], [], None
+
+    def push(bag, sid):
+        # 日志末尾还有一张步骤汇总表（同样是 ⏭/✓ 开头），不去重会算两遍
+        if sid not in bag:
+            bag.append(sid)
+
+    for m in _STEP_LINE.finditer(txt):
+        mark, sid = m.group(1), m.group(2)
+        if mark == "✓":
+            push(done, sid)
+        elif mark == "⏭":
+            push(skipped, sid)
+        elif mark == "⚠":
+            push(warn, sid)
+        elif mark == "✗":
+            failed = sid        # 取最后一次，因为可能重跑过几轮
+    if not (done or skipped or failed or warn):
+        return None
+    return {"failed": failed, "done": done, "skipped": skipped, "warn": warn}
 
 
 def append_changelog(scope, ip, path, key, old, new, actor="ui"):
@@ -349,11 +502,17 @@ def _exec_paths(tid):
             os.path.join(RUN_DIR, tid + ".json"))
 
 
-def exec_start(argv, label, kind, meta=None, needs_result=False):
+def exec_start(argv, label, kind, meta=None, needs_result=False, python=None):
     """起一个后台子进程，stdout/stderr 全进日志文件。返回任务 id。
 
     needs_result=True 时给命令加 `--json --out <结果文件>`：人要看的走日志，
     机器要读的走文件 —— 两者混在一个流里，解析迟早被某句额外提示打断。
+
+    ★ `python` 是给 numpy 类脚本留的：项目有两套解释器
+      （见 config/pipeline.json 的 pythons），以前这里**永远用标准解释器**，
+      于是任何依赖 numpy 的动作从界面上跑必然死在
+      `ModuleNotFoundError: No module named 'numpy'`
+      （2026-10-29 实测：配乐预览就是这样走的）。
     """
     os.makedirs(RUN_DIR, exist_ok=True)
     tid = hashlib.md5((kind + str(argv) + str(time.time())).encode()).hexdigest()[:12]
@@ -379,7 +538,7 @@ def exec_start(argv, label, kind, meta=None, needs_result=False):
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     with open(logp, "wb") as lf:
-        p = subprocess.Popen([PY, "-u"] + argv, cwd=ROOT, stdout=lf,
+        p = subprocess.Popen([python or PY, "-u"] + argv, cwd=ROOT, stdout=lf,
                              stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                              env=env, start_new_session=True)
     with EXEC_LOCK:
@@ -398,11 +557,24 @@ def exec_start(argv, label, kind, meta=None, needs_result=False):
                 res = load_json(resp)
         except Exception:
             res = None
+        # 失败时说清楚「跑到哪、能不能接着跑」—— 光一个 rc 对操作的人没有意义
+        diag, retry = None, None
+        if st == "failed" and kind == "pipeline":
+            diag = diagnose_pipeline(logp)
+            if len(argv) >= 4 and str(argv[0]).endswith("vstudio.py") \
+                    and str(argv[1]) == "pipeline":
+                retry = {"kind": "pipeline", "ip": argv[2], "set": argv[3]}
+                if (diag or {}).get("failed"):
+                    retry["from"] = diag["failed"]
         with EXEC_LOCK:
             if tid in EXECS:
                 EXECS[tid].update({"state": st, "rc": rc, "ended": now(),
                                    "secs": round(time.time() - EXECS[tid]["t0"], 1),
                                    "result": res})
+                if diag:
+                    EXECS[tid]["diag"] = diag
+                if retry:
+                    EXECS[tid]["retry"] = retry
         # 跑完把明细落盘，重启界面后「最近跑过什么」还在
         _persist(tid)
         try:
@@ -755,6 +927,107 @@ def build_exec(b, want_result=False):
         tier = 1 if b.get("dry") else 2
         return argv, f"出片 {ip} / {setname}{tag}", tier, False
 
+    if kind == "still":
+        # ★ 定帧：接新客户的第一件事 —— 定形象底图 + 起始静帧。
+        #   没有静帧，视频模型就没有第一帧，出不了片。
+        #   这个动作占 GPU（出图 1-2 分钟），所以要二次确认。
+        who = (b.get("who") or "").strip()
+        if not who:
+            raise ValueError("要写清楚这个人长什么样（英文更好使）")
+        argv = ["bin/gen_portrait.py", "--ip", ip, "--who", who]
+        scene = (b.get("scene") or "").strip()
+        if scene:
+            argv += ["--scene", scene]
+        only = (b.get("only") or "both").strip()
+        if only in ("portrait", "still", "both"):
+            argv += ["--only", only]
+        if b.get("from"):
+            argv += ["--from", str(b["from"])]
+        if b.get("dry"):
+            argv.append("--dry")
+        return (argv, f"定帧 {ip}（{only}）", 1 if b.get("dry") else 2, False)
+
+    if kind == "still-prompt":
+        # ★ 让新手自己憋这段英文是残忍的：他要描述的是「客户长什么样」，
+        #   而出图模型要的是「肩线、发色、光线、9:16」这种话。
+        #   polish 模式是另一种用法：手上已经有提示词，只求改得更稳。
+        who = (b.get("who") or "").strip()
+        polish = (b.get("polish") or "").strip()
+        if not who and not polish:
+            raise ValueError("得给点东西：要么描述这个人，要么给一句现有的提示词让我润色")
+        argv = ["bin/studio_ai.py", "still-prompt", ip]
+        if who:
+            argv += ["--who", who]
+        scene = (b.get("scene") or "").strip()
+        if scene:
+            argv += ["--scene", scene]
+        if polish:
+            argv += ["--polish", polish]
+        if b.get("prefer"):
+            argv += ["--prefer", str(b["prefer"])]
+        why = "润色定帧提示词" if polish else "写定帧提示词"
+        # needs_result=True：写出来的提示词要填回界面的输入框，机器得读得到。
+        # 别手工加 --json --out，否则这里会拼出两份。
+        return (argv, f"{why} {ip}", 1, True)
+
+    if kind == "bgm-preview":
+        # ★ 跑的是 **IP 自己那份** make_bgm.py —— 和正式出片同一个文件。
+        #   如果跑引擎里那份模板，界面上听着挺好、正式出片又是老声音，
+        #   这种「预览和成品不一致」最伤信任。
+        root = ip_root(ip)
+        if not root:
+            raise ValueError("不认识的 IP")
+        script = os.path.join(root, "03_生产脚本", "make_bgm.py")
+        if not os.path.exists(script):
+            raise ValueError(f"这个 IP 还没有配乐脚本：{script}")
+        try:
+            with open(script, encoding="utf-8") as f:
+                if "--source" not in f.read():
+                    raise ValueError(
+                        "这份 make_bgm.py 是旧版（不支持选来源）。\n"
+                        "    在「设置 → 脚本同步」点一次同步，或执行："
+                        f"python3 bin/vstudio.py scripts-sync {ip}")
+        except OSError:
+            pass
+        secs = float(b.get("seconds") or 12)
+        out = os.path.join(root, "06_音频", "_bgm_预览.wav")
+        argv = [script, out, str(secs)]
+        for k, flag in (("source", "--source"), ("prompt", "--prompt"),
+                        ("seed", "--seed"), ("pick", "--pick"),
+                        ("library_dir", "--library-dir")):
+            v = b.get(k)
+            if v not in (None, ""):
+                argv += [flag, str(v)]
+        if b.get("random"):
+            argv.append("--random")
+        return (argv, f"试配乐 {ip}（{b.get('source') or '默认'}）", 2, False)
+
+    if kind == "tts-redo":
+        # 配音是全流水线重抽次数最多的一步（人声不对就得重来），
+        # 所以单独给两个明确的范围，别让人只能「整个片子重出一趟」。
+        setname = b.get("set") or ""
+        if not setname:
+            raise ValueError("先选一套片子")
+        only = bool(b.get("only_audio"))
+        argv = ["bin/vstudio.py", "pipeline", ip, setname, "--from", "tts"]
+        if only:
+            argv += ["--to", "pad"]
+        if b.get("force"):
+            argv.append("--force")
+        why = "重做配音（只到留白，不重出画面）" if only else "从配音开始重做后面全部"
+        return (argv, f"{why}：{ip}/{setname}", 2, False)
+
+    if kind == "voice-ref":
+        # 造一条声音参考（新客户手上没录音时的合成起点）。
+        text = (b.get("text") or "").strip()
+        voice = (b.get("voice") or "").strip()
+        if not text or not voice:
+            raise ValueError("要念的那句话 + 音色描述，两个都要")
+        argv = ["bin/gen_voice_ref.py", "--ip", ip, "--text", text, "--voice", voice]
+        if b.get("dry"):
+            argv.append("--dry")
+        return (argv, f"造声音参考 {ip}", 1 if b.get("dry") else 2, False)
+
     if kind in ("prompts-gen", "prompts-opt"):
         need_set()
         argv = ["bin/vstudio.py", "prompts", ip, setname,
@@ -817,6 +1090,33 @@ def build_exec(b, want_result=False):
         text = (b.get("text") or "").strip()
         if len(text) < 12:
             raise ValueError("再多说两句：至少说清他是谁、要做什么号")
+        intro = (b.get("intro") or "").strip()
+        uid = (b.get("uid") or "").strip()
+        # 传了形象素材就先让 AI 过一遍：图走视觉通道、音走客观测量。
+        # 结论写回暂存目录，等 card-create 落成正式的形象卡文档 ——
+        # 这样草稿阶段可以反复改，但原始素材只上传一次。
+        if uid and re.fullmatch(r"[0-9a-f]{12}", uid):
+            udir = os.path.join(UPLOAD_DIR, uid)
+            if os.path.isdir(udir):
+                try:
+                    import studio_ai
+                    a = studio_ai.analyze_materials(udir, intro=intro)
+                    with open(os.path.join(udir, "_image_card.md"), "w",
+                              encoding="utf-8") as f:
+                        f.write(str(a.get("image_card_md") or ""))
+                    with open(os.path.join(udir, "_material_notes.json"), "w",
+                              encoding="utf-8") as f:
+                        json.dump(a, f, ensure_ascii=False, indent=2)
+                    if a.get("image_card_md"):
+                        text += "\n\n【形象卡（由参考素材整理）】\n" + a["image_card_md"]
+                    if a.get("voice_human"):
+                        text += "\n\n【声音测量】" + str(a["voice_human"])
+                except Exception as ex:
+                    # 分析失败不该挡住建档 —— 只带文字照样能出草案。
+                    # 但必须说清楚，别让人以为素材已经生效了。
+                    text += "\n\n（注意：形象素材没能分析成功 —— %s）" % ex
+        if intro:
+            text += "\n\n【客户的其它介绍】\n" + intro
         return (["bin/studio_ai.py", "card-draft", text],
                 "AI 整理档案草案", 1, True)
 
@@ -1019,6 +1319,11 @@ class Handler(BaseHTTPRequestHandler):
         return self._path_and_query()[1]
 
     def _body(self):
+        # 带文件的请求走另一条路：multipart 是二进制，不能 decode 成字符串，
+        # 直接 json.loads 必然失败 —— 以前上传「翻译失败/没反应」多半死在这一步。
+        ctype = (self.headers.get("Content-Type") or "")
+        if "multipart/form-data" in ctype.lower():
+            return self._body_multipart(ctype)
         n = int(self.headers.get("Content-Length") or 0)
         if not n:
             return {}
@@ -1027,6 +1332,64 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(raw)
         except Exception:
             return {}
+
+    def _body_multipart(self, ctype):
+        """手撕 multipart/form-data（零第三方依赖）。
+
+        为什么不用 cgi.FieldStorage：Python 3.13 把它删了；
+        email 库解析二进制附件又太绕。这里只支持前端会发的那一种：
+        普通字段 + 文件，boundary 从 Content-Type 取。
+
+        返回 {"_multipart": True, "fields": {...}, "files": [...]}
+        files 里每项是 {field, filename, mime, data:bytes}。
+        """
+        m = re.search(r'boundary=(?:"([^"]+)"|([^;]+))', ctype, re.I)
+        if not m:
+            return {}
+        b = ((m.group(1) or m.group(2) or "")).strip().encode("utf-8")
+        if not b:
+            return {}
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > UPLOAD_MAX_TOTAL:
+            return {}
+        raw = self.rfile.read(n) if n else b""
+
+        fields, files, total = {}, [], 0
+        for part in raw.split(b"--" + b):
+            part = part.strip(b"\r\n")
+            if not part or part == b"--":
+                continue
+            i = part.find(b"\r\n\r\n")
+            if i < 0:
+                continue
+            head, body = part[:i], part[i + 4:]
+            hd = head.decode("utf-8", "ignore")
+
+            nm = re.search(r'name=(?:"([^"]*)"|([^;]*))', hd, re.I)
+            name = (((nm.group(1) or nm.group(2)) if nm else "") or "").strip()
+            fn = re.search(r'filename=(?:"([^"]*)"|([^;]*))', hd, re.I)
+
+            if fn is None:                       # 普通字段
+                if name:
+                    fields[name] = body.decode("utf-8", "ignore").strip()
+                continue
+
+            fname = (((fn.group(1) or fn.group(2)) or "")).strip()
+            if not fname:
+                continue
+            total += len(body)
+            if len(body) > UPLOAD_MAX_BYTES or total > UPLOAD_MAX_TOTAL:
+                continue
+            mt = re.search(r"Content-Type:\s*([\w/+\-.]+)", hd, re.I)
+            files.append({
+                "field": name or "file",
+                "filename": os.path.basename(fname.replace("\\", "/")),
+                "mime": (mt.group(1) if mt
+                         else (mimetypes.guess_type(fname)[0]
+                               or "application/octet-stream")),
+                "data": body,
+            })
+        return {"_multipart": True, "fields": fields, "files": files}
 
     # --- routes ---
     def do_HEAD(self):
@@ -1180,6 +1543,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_reset(body or {})
             if name == "brief":
                 return self._api_brief(get, body)
+            if name == "script-text":
+                return self._api_script_text(get)
             if name == "script-write":
                 return self._api_script_write(body)
             if name == "landing":
@@ -1200,6 +1565,36 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_card_draft(body or {})
             if name == "card-create":
                 return self._api_card_create(body or {})
+            if name == "material-upload":
+                return self._api_material_upload(body or {})
+            if name == "material-analyze":
+                return self._api_material_analyze(body or {})
+            if name == "persona":
+                return self._api_persona(get, body if body is not None else None)
+            if name == "persona-draft":
+                return self._api_persona_draft(body or {})
+            if name == "voice-design":
+                return self._api_voice_design(body or {})
+            if name == "trial":
+                return self._api_trial(get, body if body is not None else None)
+            if name == "materials":
+                return self._api_materials(get)
+            if name == "assets":
+                return self._api_assets(get)
+            if name == "audio-list":
+                return self._api_audio_list(get)
+            if name == "visual-apply":
+                return self._api_visual_apply(body or {})
+            if name == "set-materials":
+                return self._api_set_materials(get)
+            if name == "set-materials-install":
+                return self._api_set_materials_install(body or {})
+            if name == "materials-save":
+                return self._api_materials_save(body or {})
+            if name == "bgm-library":
+                return self._api_bgm_library(get)
+            if name == "dialogue":
+                return self._api_dialogue(get, body if body is not None else None)
             if name == "mcp":
                 return self._api_mcp()
             return self._404("未知接口 " + name)
@@ -1262,6 +1657,7 @@ class Handler(BaseHTTPRequestHandler):
             "excluded": [x.get("name") for x in reg.get("excluded", [])],
             "services": self._services(),
             "writable": {"global": GLOBAL_WRITABLE, "ip": IP_WRITABLE},
+            "inert": IP_INERT,
             "write_actions": WRITE_ACTIONS,
             "archive": ARCHIVE,
         }
@@ -1558,7 +1954,8 @@ class Handler(BaseHTTPRequestHandler):
                 "why": EXEC_WHY.get(kind, "会花时间，也可能覆盖已有产物。"),
                 "need_confirm": True, "label": label,
                 "note": "确认后会后台跑，日志实时给你看，随时能停。"}, 428)
-        tid = exec_start(argv, label, body.get("kind") or "", needs_result=needs)
+        tid = exec_start(argv, label, body.get("kind") or "",
+                         needs_result=needs, python=_py_for(body.get("kind")))
         with EXEC_LOCK:
             cmdline = EXECS[tid]["cmdline"]
         return self._json({"id": tid, "label": label, "cmdline": cmdline})
@@ -1623,6 +2020,9 @@ class Handler(BaseHTTPRequestHandler):
             "secs": t.get("secs"), "cmdline": t.get("cmdline"),
             "offset": off, "total": total, "text": text,
             "result": t.get("result"),
+            # 失败时要用的两样：跑到哪了（diag）、从哪接着跑（retry）。
+            # 漏传这两个，前端就只能显示一句「跑失败了」。
+            "diag": t.get("diag"), "retry": t.get("retry"),
         })
 
     def _api_exec_stop(self, body):
@@ -1851,6 +2251,7 @@ class Handler(BaseHTTPRequestHandler):
             if old.strip():
                 bak = path + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
                 shutil.copy2(path, bak)
+                trim_backups(path)          # 只留最近几份，旧的进 _旧备份/
             with open(path, "w", encoding="utf-8") as f:
                 f.write(body["text"].rstrip() + "\n")
             return self._json({"ok": True, "path": path, "len": len(body["text"])})
@@ -1865,6 +2266,50 @@ class Handler(BaseHTTPRequestHandler):
                            "folder": folder})
 
     # ---------- 爆款文案：落盘 / 存落点 ----------
+    def _api_script_text(self, get):
+        """读这一套**当前真正在用的稿子**。
+
+        ★ 界面上一直缺这个口子：写完稿子只能看到一句 toast 和一个路径，
+        没有地方确认「文件里到底是老内容还是新内容」。2026-10-29 用户实测
+        就是卡在这里 —— 点了「写进这套片子」，界面跳走，回头看到的还是旧稿。
+
+        注意：这里的 get 是 _api 里的取参函数 get(k, 默认值)，不是 dict。
+        """
+        ip = get("ip") or ""
+        setname = get("set") or ""
+        root = ip_root(ip)
+        if not root or not setname:
+            return self._bad("缺少 IP 或套次")
+        from vstudio import script_text_path
+        path = script_text_path(root, setname)
+        txt = ""
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8-sig") as f:
+                    txt = f.read()[:40000]
+            except Exception as e:
+                return self._bad(f"读不出来：{e}")
+        chars = len(re.sub(r"\s", "", txt))
+        lines = [x for x in txt.splitlines() if x.strip()]
+        # 同一目录里历史遗留的「目录全名_字幕文本.txt」——
+        # 打开文件夹会看到两份稿子，人容易改错那一份（改了不生效，更气）。
+        stale = []
+        base = os.path.dirname(path)
+        try:
+            for fn in os.listdir(base):
+                if fn.endswith("_字幕文本.txt") and fn != os.path.basename(path):
+                    stale.append(fn)
+        except Exception:
+            pass
+        return self._json({
+            "path": path, "folder": base, "text": txt,
+            "exists": bool(txt.strip()), "chars": chars,
+            "lines": len(lines), "est_secs": round(chars / 3.85, 1) if chars else 0,
+            "stale_copies": stale,
+            "mtime": (datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
+                      if os.path.exists(path) else None),
+        })
+
     def _api_script_write(self, body):
         """把 AI 写的稿子写进 05_文案/<套次>/<套次>_字幕文本.txt。
 
@@ -1890,12 +2335,64 @@ class Handler(BaseHTTPRequestHandler):
                     if f.read().strip():
                         bak = path + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
                         shutil.copy2(path, bak)
+                        trim_backups(path)
             except Exception:
                 pass
+        # ★ 落盘前最后一道闸：重复的句子进 TTS 会被念两遍（观众直接划走）。
+        #   2026-10-29 实测：AI 写的稿子把落点拆两行又整块追加一次，
+        #   老王 M01/M02 两套片子都带着这个重复进过 TTS。
+        #   去重逻辑在 vstudio.dedupe_script_text（唯一真源），这里只调用。
+        #   落点取「套次自己的 > 卡里的模板」—— 一套 IP 共用一条落点，
+        #   货品词会串到别的套次去（讲汤的片子结尾说「这盘雪花」）。
+        try:
+            from vstudio import dedupe_script_text, resolve_landing
+            landing, landing_src = resolve_landing(root, setname)
+            text, notes = dedupe_script_text(text, landing)
+        except Exception:
+            notes = []
+            landing_src = ""
         with open(path, "w", encoding="utf-8") as f:
             f.write(text.rstrip() + "\n")
+        # ★ 同目录里早期留下的「目录全名_字幕文本.txt」：
+        #   2026-10-29 在老王 M01 目录里实测到，新旧两份并存。
+        #   读稿方按短名找，出片用的是新的；但人打开文件夹会看到两份，
+        #   一改就改到不生效的那份 —— 所以改名留档（不删），只留一个能改的。
+        stale_bak = []
+        try:
+            base_dir = os.path.dirname(path)
+            keep = os.path.basename(path)
+            for fn in sorted(os.listdir(base_dir)):
+                if not fn.endswith("_字幕文本.txt") or fn == keep:
+                    continue
+                src = os.path.join(base_dir, fn)
+                dst = src + ".旧稿_备份." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                shutil.move(src, dst)
+                stale_bak.append(os.path.basename(dst))
+        except Exception:
+            pass
+        # ★ 这一套自己的落点存到 05_文案/<套次>/landing.md，下次写同套直接用。
+        landing_saved = None
+        try:
+            from vstudio import landing_path
+            lp = landing_path(root, setname)
+            land = str((body or {}).get("landing") or "").strip()
+            if land:
+                old = ""
+                if os.path.exists(lp):
+                    with open(lp, encoding="utf-8") as f:
+                        old = f.read().strip()
+                if old != land:
+                    with open(lp, "w", encoding="utf-8") as f:
+                        f.write(land.rstrip() + "\n")
+                    landing_saved = lp
+        except Exception:
+            pass
         return self._json({"ok": True, "path": path, "backup": bak,
-                           "chars": len(re.sub(r"\s", "", text))})
+                           "chars": len(re.sub(r"\s", "", text)),
+                           "dedup_notes": notes,
+                           "stale_backup": stale_bak,
+                           "landing_src": landing_src,
+                           "landing_path": landing_saved})
 
     def _api_landing(self, body):
         """把「本号固定落点」写进 card.json。
@@ -2191,6 +2688,76 @@ class Handler(BaseHTTPRequestHandler):
                         or "pending"}
         return None
 
+    # ---------------- AI：建档素材（人像图 / 音色音频 / 介绍文字）----------------
+    def _api_material_upload(self, body):
+        """建档素材暂存：把人像参考图、音色音频先落到 .cache/uploads/<uid>/。
+
+        ★ 为什么不直接写进 <IP>/02_素材真值/：
+          ① 建档之前 IP 目录根本不存在，没地方落 —— 顺序上不成立；
+          ② 草稿是可以弃的。直接写进档案区，弃一次就留一批没人认领的孤儿文件，
+             时间一长，档案区里到底哪些是有效真值就没法信了。
+          所以：上传 → 暂存 → 确认建档 → 搬进档案区 → 写进 ip.json。
+
+        返回 uid 凭条，后面凭它把文件搬进去。
+        """
+        files = (body or {}).get("files") or []
+        if not files:
+            return self._bad("没收到文件")
+
+        uid = uuid.uuid4().hex[:12]
+        d = os.path.join(UPLOAD_DIR, uid)
+        os.makedirs(d, exist_ok=True)
+        items, rejected = [], []
+        for idx, f in enumerate(files[:24]):          # 一次最多 24 个，防误拖整个文件夹
+            raw_name = str(f.get("filename") or "")
+            ext = os.path.splitext(raw_name)[1].lower()
+            mime = str(f.get("mime") or "")
+            kind = ("image" if mime.startswith("image/") or ext in IMAGE_EXT else
+                    "audio" if mime.startswith("audio/") or ext in AUDIO_EXT else "")
+            data = f.get("data") or b""
+            if not kind:
+                rejected.append({"name": raw_name, "why": "既不是图片也不是音频"})
+                continue
+            if not data:
+                rejected.append({"name": raw_name, "why": "空文件"})
+                continue
+            # 文件名过一遍消毒：中文保留，路径分隔符和控制字符一律换掉，
+            # 免得 ../ 之类的东西从浏览器一路穿到磁盘上。
+            safe = re.sub(r"[^\w\u4e00-\u9fff.\-]", "_", raw_name) or (kind + ext)
+            fp = os.path.join(d, "%02d_%s" % (idx, safe))
+            with open(fp, "wb") as fh:
+                fh.write(data)
+            items.append({"name": raw_name, "saved": os.path.basename(fp),
+                          "path": fp, "kind": kind, "size": len(data), "ext": ext})
+        if not items:
+            shutil.rmtree(d, ignore_errors=True)
+            return self._bad("没有可用文件：" + "；".join(x["why"] for x in rejected))
+        return self._json({"ok": True, "uid": uid, "items": items, "rejected": rejected})
+
+    def _api_material_analyze(self, body):
+        """让 AI 看一眼刚传的素材，提炼成「形象卡」的原料。
+
+        图片走视觉通道（need=vision），音频走客观声学测量 + 可选 ASR 转写。
+        ★ 音频那条路不是「AI 听一遍」：目前路由里没有音频输入通道，
+          硬要模型听，它只能瞎编一段听起来很像的音色描述 ——
+          那比不给更糟，因为后面 TTS 会照着这个假描述去克隆。
+          所以这里老老实实测物理量：时长/采样率/基频/语速/响度，
+          再让 LLM 把这些数值翻译成一句人话的音色指令。
+        """
+        uid = (body or {}).get("uid") or ""
+        if not uid or not re.fullmatch(r"[0-9a-f]{12}", str(uid)):
+            return self._bad("上传凭条不对，重传一次")
+        d = os.path.join(UPLOAD_DIR, uid)
+        if not os.path.isdir(d):
+            return self._json({"error": "暂存已过期或被清理，请重新上传"}, 410)
+
+        try:
+            import studio_ai
+            r = studio_ai.analyze_materials(d, prefer=(body or {}).get("prefer") or None)
+        except Exception as ex:
+            return self._json({"error": "%s: %s" % (type(ex).__name__, ex)}, 502)
+        return self._json(r)
+
     # ---------------- AI：对话式建档 ----------------
     def _api_card_draft(self, body):
         import studio_ai
@@ -2205,8 +2772,114 @@ class Handler(BaseHTTPRequestHandler):
         r["dup"] = bool(ip_root(r["draft"]["name"]))
         return self._json(r)
 
+    # ---------------- 建档素材：暂存 → 入库 ----------------
+    def _install_materials(self, root, name, mats):
+        """把暂存素材搬进 <IP>/02_素材真值/，并登记进 ip.json。
+
+        mats: [{"uid", "saved", "kind", "role"}]
+          role —— portrait / still（图），ref（音）
+
+        ★ 音频不直接搬，统一转码成 48k / 单声道 / flac：
+          gen_tts.py 的 prep() 就是这么处理参考音的，规格统一后面最省事，
+          也免得客户丢一条 44.1k 立体声 mp3 进来，克隆出来的音色飘。
+        """
+        outdir = os.path.join(root, "02_素材真值")
+        os.makedirs(outdir, exist_ok=True)
+        short = name.replace("演示客户", "") or "形象"
+        ff = ffmpeg_bin()
+        moved, uids = [], []
+        for m in (mats or [])[:12]:
+            uid = str(m.get("uid") or "")
+            saved = os.path.basename(str(m.get("saved") or ""))
+            if not re.fullmatch(r"[0-9a-f]{12}", uid) or not saved:
+                continue
+            src = os.path.join(UPLOAD_DIR, uid, saved)
+            if not os.path.exists(src):
+                continue
+            uids.append(uid)
+            kind = str(m.get("kind") or "")
+            role = str(m.get("role") or ("ref" if kind == "audio" else "portrait"))
+            ext = os.path.splitext(saved)[1].lower()
+
+            if kind == "audio":
+                dest = os.path.join(outdir, "%s_声音参考.flac" % short)
+                ok = False
+                if ff:
+                    try:
+                        subprocess.run(
+                            [ff, "-y", "-v", "error", "-i", src, "-t", "12",
+                             "-ar", "48000", "-ac", "1", "-c:a", "flac", dest],
+                            capture_output=True, timeout=300)
+                        ok = os.path.exists(dest)
+                    except Exception:
+                        ok = False
+                if not ok:                       # 转码不可用就原样搬，别丢素材
+                    try:
+                        shutil.copy2(src, dest)
+                    except Exception:
+                        continue
+            elif kind == "image":
+                label = "静帧" if role == "still" else "形象底图"
+                dest = os.path.join(outdir, "%s_%s%s" % (short, label, ext or ".png"))
+                try:
+                    shutil.copy2(src, dest)
+                except Exception:
+                    continue
+            else:
+                continue
+
+            moved.append({"kind": kind, "role": role,
+                          "dest_name": os.path.basename(dest),
+                          "rel": os.path.relpath(dest, root)})
+
+        # 入库后清掉暂存：里面是客户原始素材，不该在缓存里留副本
+        for uid in set(uids):
+            shutil.rmtree(os.path.join(UPLOAD_DIR, uid), ignore_errors=True)
+        if moved:
+            self._write_material_refs(root, moved)
+        return moved
+
+    def _write_material_refs(self, root, moved):
+        """把素材路径写进 ip.json（唯一真源，别处不再存一份）。
+
+        同一 role 传了多个，以最后一个为准 —— 跟「人再填一次」的行为一致，
+        真值只能有一个。
+        """
+        cp = os.path.join(root, "ip.json")
+        cfg = load_json(cp) or {}
+        for m in moved:
+            if m["kind"] == "image":
+                cfg.setdefault("visual", {})
+                cfg["visual"]["still" if m["role"] == "still" else "portrait"] = m["rel"]
+            elif m["kind"] == "audio":
+                cfg.setdefault("voice", {})
+                cfg["voice"]["ref_audio"] = m["rel"]
+        with open(cp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+    def _next_after_card(self, root, name, mats):
+        """建档后下一步干什么 —— 缺什么说什么，不给通用口号。"""
+        ipcfg = load_json(os.path.join(root or "", "ip.json")) or {}
+        voice = ipcfg.get("voice") or {}
+        visual = ipcfg.get("visual") or {}
+        missing = []
+        if not voice.get("ref_audio"):
+            missing.append("音色参考音")
+        if not (voice.get("tts") or {}).get("instruction"):
+            missing.append("音色语气指令")
+        if not visual.get("still"):
+            missing.append("起始静帧")
+        tips = []
+        if mats:
+            tips.append("已入库 %d 个素材：%s"
+                        % (len(mats), "、".join(x["dest_name"] for x in mats)))
+        tips.append(("还缺：" + "、".join(missing)) if missing
+                    else "形象真值齐了，可以开套次跑片")
+        tips.append(f"python3 bin/vstudio.py guard {name}")
+        return tips
+
     def _api_card_create(self, body):
-        """确认后的落盘：走 CLI 建档 + 记需求/红线 + 写人设 md。
+        """确认后的落盘：走 CLI 建档 + 记需求/红线 + 写人设 md + 素材入库。
 
         顺序有意为之：先 card-new（它会建目录树并登记总册），
         再 card-note 补业务内容，最后写 md。
@@ -2249,10 +2922,28 @@ class Handler(BaseHTTPRequestHandler):
 
         root = ip_root(name)
         written = []
-        if root and md:
+        # 形象卡：由 ai-card-draft 那一步整理好存在暂存目录里，这里并进人设文档。
+        # ★ 必须在 _install_materials 之前读 —— 那边入库完会把暂存目录删掉，
+        #   顺序反了就只剩一句「形象卡没写成」。
+        persona = dict(md or {})
+        for m in (body.get("materials") or [])[:12]:
+            uid = str(m.get("uid") or "")
+            if not re.fullmatch(r"[0-9a-f]{12}", uid):
+                continue
+            fp = os.path.join(UPLOAD_DIR, uid, "_image_card.md")
+            if not os.path.exists(fp):
+                continue
+            try:
+                with open(fp, encoding="utf-8") as f:
+                    t = f.read().strip()
+            except Exception:
+                t = ""
+            if t:
+                persona["形象卡.md"] = t
+        if root and persona:
             pdir = os.path.join(root, "01_人设与规范")
             os.makedirs(pdir, exist_ok=True)
-            for fn, text in md.items():
+            for fn, text in persona.items():
                 if not str(text).strip():
                     continue
                 fp = os.path.join(pdir, os.path.basename(fn))
@@ -2281,14 +2972,938 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as ex:
                 print(f"  ⚠ 写 policy 失败：{ex}")
 
+        # 上传的形象素材：从暂存区搬进 02_素材真值/ 并登记进 ip.json。
+        # 时机是刻意的 —— 在 card-new 之后（目录树得先存在才搬得进去），
+        # 在写 policy 之后（上云许可是安全决策，别让搬运的意外把它带偏）。
+        mats = self._install_materials(root, name,
+                                       body.get("materials") or []) if root else []
+
         append_changelog("ip", name, os.path.join(root or "", "card.json"),
                          "card.new", None, name, actor="ui-card")
         return self._json({"ok": True, "name": name, "root": root,
                            "cloud_llm": bool((load_json(os.path.join(root or "", "card.json")) or {})
                                              .get("policy", {}).get("allow_cloud_llm")),
-                           "notes": notes, "md": written,
-                           "next": [f"把音色参考 / 起始静帧 / 形象底图 填进 {root}/ip.json",
-                                    f"python3 bin/vstudio.py guard {name}"]})
+                           "notes": notes, "md": written, "materials": mats,
+                           "next": self._next_after_card(root, name, mats)})
+
+    IMAGE_EXT_LOCAL = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+    def _api_assets(self, get):
+        """02_素材真值 里已有的图 —— 「引用现有素材」的选择来源。
+
+        ★ 为什么单开一个接口：很多人手上早就有了客户照片、以前跑出来的静帧。
+          让他重新生成一次是浪费，还不保证一致。直接登记进来，比再抽一次稳得多。
+          注意：这里的 get 是取参函数 get(k, 默认值)，**不是 dict**。
+        """
+        ip = get("ip") or ""
+        root = ip_root(ip)
+        if not root:
+            return self._bad("不认识的 IP")
+        d = os.path.join(root, "02_素材真值")
+        items = []
+        if os.path.isdir(d):
+            for n in sorted(os.listdir(d)):
+                p = os.path.join(d, n)
+                if not os.path.isfile(p) or os.path.splitext(n)[1].lower() not in self.IMAGE_EXT_LOCAL:
+                    continue
+                items.append({"name": n, "size": os.path.getsize(p),
+                              "mtime": datetime.fromtimestamp(
+                                  os.path.getmtime(p)).strftime("%Y-%m-%d %H:%M"),
+                              "path": p})
+        cfg = load_json(os.path.join(root, "ip.json")) if os.path.exists(
+            os.path.join(root, "ip.json")) else {}
+        visual = cfg.get("visual") or {}
+        cur = {"still": visual.get("still") or "", "portrait": visual.get("portrait") or ""}
+        for it in items:
+            it["in_use"] = ([k for k, v in cur.items()
+                             if v and os.path.basename(str(v)) == it["name"]] or [])
+        return self._json({"dir": d, "items": items, "current": cur})
+
+    def _api_visual_apply(self, body):
+        """把 02_素材真值 里已有的一张图，登记成静帧 / 形象底图。
+
+        只改 ip.json 的指针，**不搬文件、不删文件**。
+        万一登记错了，改回来就行，原图还在原地。
+        """
+        if not body:
+            return self._bad("缺少参数")
+        ip = body.get("ip") or ""
+        name = (body.get("name") or "").strip()
+        role = (body.get("role") or "").strip()
+        if role not in ("still", "portrait"):
+            return self._bad("role 只能是 still / portrait")
+        if not name:
+            return self._bad("没给文件名")
+        root = ip_root(ip)
+        if not root:
+            return self._bad("不认识的 IP")
+        src = os.path.join(root, "02_素材真值", os.path.basename(name))
+        if not os.path.isfile(src):
+            return self._bad(f"素材目录里没有这张图：{name}")
+        target = os.path.join(root, "ip.json")
+        if not os.path.exists(target):
+            return self._bad("这个 IP 没有 ip.json")
+        data = load_json(target)
+        data.setdefault("visual", {})
+        old = data["visual"].get(role)
+        rel = os.path.join("02_素材真值", os.path.basename(name))
+        data["visual"][role] = rel
+        bak = target + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+        shutil.copy2(target, bak)
+        write_json_atomic(target, data)
+        append_changelog("ip", ip, target, "visual." + role, old, rel, actor="ui-assets")
+        label = "静帧" if role == "still" else "形象底图"
+        return self._json({"ok": True, "role": role, "label": label, "rel": rel,
+                           "old": old, "backup": bak, "path": src})
+
+    # ═══════════════════ 本套素材（客户给的新素材 / 分段不同素材） ═══════════════════
+    # 为什么要有这一层：IP 级素材（02_素材真值/ 根下）是「这个人长什么样」，
+    # 一套片子用一张静帧就够了。但客户常常是**一条片子给一批新素材**（门店、产品、
+    # 证书、不同场景），而且希望第 2 段用 A、第 3 段用 B。
+    # 所以分出「套次级素材」：02_素材真值/<套次号>/，清单写 05_文案/<套次>/materials.json。
+    # 格式与限制见 docs/H3时间轴与分段素材规范.md（从插件源码提取的，不是猜的）。
+
+    SET_MAT_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+    def _set_dir(self, root, full):
+        """套次素材目录。用套次号（S06）而不是全名 —— 全名带标题，改标题就丢素材。"""
+        return os.path.join(root, "02_素材真值", str(full).split("_")[0])
+
+    def _materials_path(self, root, full):
+        return os.path.join(root, "05_文案", full, "materials.json")
+
+    def _api_set_materials(self, get):
+        """本套素材：目录里有哪几张图、materials.json 现在怎么分配的、分段有多长。"""
+        ip = get("ip") or ""
+        setname = get("set") or ""
+        root = ip_root(ip)
+        if not root or not setname:
+            return self._bad("缺少 IP 或套次")
+        full = self._full_set(ip, setname) or setname
+
+        mdir = self._set_dir(root, full)
+        items = []
+        if os.path.isdir(mdir):
+            for n in sorted(os.listdir(mdir)):
+                p = os.path.join(mdir, n)
+                if os.path.isfile(p) and os.path.splitext(n)[1].lower() in self.SET_MAT_EXT:
+                    items.append({"name": n, "path": p, "size": os.path.getsize(p),
+                                  "mtime": datetime.fromtimestamp(
+                                      os.path.getmtime(p)).strftime("%m-%d %H:%M")})
+
+        doc = {}
+        mp = self._materials_path(root, full)
+        if os.path.isfile(mp):
+            try:
+                doc = load_json(mp) or {}
+            except Exception:
+                doc = {}
+
+        # 分段信息从 prompts.json 取（i / t0 / t1），界面据此摆「第几段用哪张」
+        segs = []
+        pj = os.path.join(root, "05_文案", full, "prompts.json")
+        if os.path.isfile(pj):
+            try:
+                for s in (load_json(pj) or {}).get("segments") or []:
+                    segs.append({"i": s.get("i"), "t0": s.get("t0"), "t1": s.get("t1"),
+                                 "line": (s.get("line") or "")[:28]})
+            except Exception:
+                segs = []
+
+        # IP 级素材也能引用（比如「这条片子还用同一个静帧」）
+        ip_imgs = []
+        base = os.path.join(root, "02_素材真值")
+        if os.path.isdir(base):
+            for n in sorted(os.listdir(base)):
+                p = os.path.join(base, n)
+                if os.path.isfile(p) and os.path.splitext(n)[1].lower() in self.SET_MAT_EXT:
+                    ip_imgs.append({"name": n, "rel": os.path.join("02_素材真值", n)})
+
+        return self._json({"dir": mdir, "set": full, "items": items, "materials": doc,
+                           "segments": segs, "ip_images": ip_imgs,
+                           "exists": os.path.isfile(mp),
+                           "hint": "没建 materials.json 时，整片只用 visual.still 那一张"})
+
+    def _api_set_materials_install(self, body):
+        """把暂存的上传素材搬进 02_素材真值/<套次号>/ 并登记进 materials.json。
+
+        复用 material-upload 的暂存凭条（uid）：上传先落 .cache，确认之后才进档案区。
+        —— 这条规矩是建档时定下的，套次素材沿用，理由一样：草稿可以弃，
+           直接写进档案区就会留一批没人认领的孤儿文件。
+        """
+        ip = (body.get("ip") or "").strip()
+        setname = (body.get("set") or "").strip()
+        uid = (body.get("uid") or "").strip()
+        root = ip_root(ip)
+        if not root or not setname:
+            return self._bad("缺少 IP 或套次")
+        if not uid or not re.fullmatch(r"[0-9a-f]{12}", uid):
+            return self._bad("上传凭条不对，重传一次")
+        stage = os.path.join(UPLOAD_DIR, uid)
+        if not os.path.isdir(stage):
+            return self._bad("暂存区里没有这批文件了，重传一次")
+
+        full = self._full_set(ip, setname) or setname
+        mdir = self._set_dir(root, full)
+        os.makedirs(mdir, exist_ok=True)
+        mp = self._materials_path(root, full)
+        doc = {}
+        if os.path.isfile(mp):
+            try:
+                doc = load_json(mp) or {}
+            except Exception:
+                doc = {}
+        doc.setdefault("set", full)
+        doc.setdefault("images", [])
+        have = {str(x.get("id")) for x in doc["images"] if isinstance(x, dict)}
+
+        moved, skipped = [], []
+        for fn in sorted(os.listdir(stage)):
+            sp = os.path.join(stage, fn)
+            ext = os.path.splitext(fn)[1].lower()
+            if not os.path.isfile(sp) or ext not in self.SET_MAT_EXT:
+                skipped.append({"name": fn, "why": "不是图片（这段只收图片）"})
+                continue
+            # 去掉「01_」这个暂存序号前缀，还原一个像人起的名字
+            clean = re.sub(r"^\d{2}_", "", fn)
+            clean = re.sub(r"[^\w\u4e00-\u9fff.\-]", "_", clean) or ("mat" + ext)
+            dst = os.path.join(mdir, clean)
+            if os.path.exists(dst):
+                stem, ex = os.path.splitext(clean)
+                n = 2
+                while os.path.exists(os.path.join(mdir, f"{stem}-{n}{ex}")):
+                    n += 1
+                clean = f"{stem}-{n}{ex}"
+                dst = os.path.join(mdir, clean)
+            shutil.copy2(sp, dst)
+            rel = os.path.join("02_素材真值", str(full).split("_")[0], clean)
+            mid = re.sub(r"[^\w\u4e00-\u9fff\-]", "_", os.path.splitext(clean)[0])[:24]
+            base_id, n = mid, 2
+            while mid in have:
+                mid = f"{base_id}-{n}"
+                n += 1
+            have.add(mid)
+            doc["images"].append({"id": mid, "file": rel, "note": ""})
+            moved.append({"name": clean, "id": mid, "rel": rel})
+
+        if not moved:
+            return self._bad("没有可用的图片文件")
+
+        bak = mp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+        if os.path.isfile(mp):
+            shutil.copy2(mp, bak)
+        try:
+            with open(mp, "w", encoding="utf-8") as f:
+                json.dump(doc, f, ensure_ascii=False, indent=2)
+        except Exception as ex:
+            return self._bad(f"写 materials.json 失败：{ex}")
+        shutil.rmtree(stage, ignore_errors=True)
+        append_changelog("ip", ip, mp, "materials.upload", None,
+                         "、".join(x["name"] for x in moved), actor="ui-materials")
+        return self._json({"ok": True, "moved": moved, "skipped": skipped,
+                           "dir": mdir, "materials": mp})
+
+    def _api_materials_save(self, body):
+        """整份替换 materials.json（段→素材的分配由界面调这里）。
+
+        ★ 三个必须在服务端拦的错误（前端也会拦，但别只靠前端）：
+          ① 引用了不存在的 id → 出片时 gen_video 会 exit 1，不如现在说清；
+          ② 某段挂了 >9 张图 → H3 静默截断，等于「以为用了其实没用」；
+          ③ 路径跑出本 IP 目录 → 会把上一位客户的脸串给下一位。
+        """
+        ip = (body.get("ip") or "").strip()
+        setname = (body.get("set") or "").strip()
+        doc = body.get("materials")
+        root = ip_root(ip)
+        if not root or not setname:
+            return self._bad("缺少 IP 或套次")
+        if not isinstance(doc, dict):
+            return self._bad("materials 必须是一个对象")
+
+        full = self._full_set(ip, setname) or setname
+        imgs = doc.get("images") or []
+        ids = {"img"}
+        for it in imgs:
+            if not isinstance(it, dict):
+                return self._bad("images 里每一项都要是 {id, file}")
+            iid = str(it.get("id") or "").strip()
+            rel = str(it.get("file") or "").strip()
+            if not iid or not rel:
+                return self._bad("每张图都要有 id 和 file")
+            if iid == "img":
+                return self._bad("id 不能叫「img」——那是起始静帧占用的名字")
+            p = rel if os.path.isabs(rel) else os.path.join(root, rel)
+            if not os.path.abspath(p).startswith(os.path.abspath(root) + os.sep):
+                return self._bad(f"素材不在本 IP 目录内：{rel}（禁止跨 IP 引用）")
+            if not os.path.isfile(p):
+                return self._bad(f"素材文件不存在：{rel}")
+            ids.add(iid)
+
+        segdoc = doc.get("segments") or {}
+        if not isinstance(segdoc, dict):
+            return self._bad("segments 必须是对象：{\"2\": [\"素材id\"]}")
+        for k, v in segdoc.items():
+            arr = v if isinstance(v, list) else [v]
+            if len(arr) > 9:
+                return self._bad(f"{k} 挂了 {len(arr)} 张图，H3 上限 9 张")
+            bad = [str(x) for x in arr if str(x) not in ids]
+            if bad:
+                return self._bad(f"{k} 引用了不存在的素材 {bad}")
+
+        mp = self._materials_path(root, full)
+        os.makedirs(os.path.dirname(mp), exist_ok=True)
+        bak = mp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+        if os.path.isfile(mp):
+            shutil.copy2(mp, bak)
+            old = load_json(mp) or {}
+            if old.get("segments") != doc.get("segments") or old.get("images") != doc.get("images"):
+                append_changelog("ip", ip, mp, "materials.save",
+                                 str(old.get("segments")), str(doc.get("segments")),
+                                 actor="ui-materials")
+        doc["set"] = full
+        try:
+            with open(mp, "w", encoding="utf-8") as f:
+                json.dump(doc, f, ensure_ascii=False, indent=2)
+        except Exception as ex:
+            return self._bad(f"写失败：{ex}")
+        return self._json({"ok": True, "path": mp, "backup": bak,
+                           "images": len(imgs), "segments": len(segdoc)})
+
+    def _api_bgm_library(self, get):
+        """配乐库：这个 IP 已经攒下来多少首、都是哪来的。
+
+        ★ 为什么要有这个列表：配乐是「生成一次、用很多次」的东西。
+          以前每次出片都重跑一遍生成，出的还是差不多的东西。
+          现在生成完自动沉淀进 02_素材真值/配乐/，界面挑一首即可复用（几秒完事）。
+        """
+        ip = get("ip") or ""
+        root = ip_root(ip)
+        if not root:
+            return self._bad("不认识的 IP")
+        d = os.path.join(root, "02_素材真值", "配乐")
+        meta = {}
+        idxp = os.path.join(d, "库.json")
+        if os.path.isfile(idxp):
+            try:
+                for m in (load_json(idxp) or {}).get("items") or []:
+                    if isinstance(m, dict) and m.get("file"):
+                        meta[m["file"]] = m
+            except Exception:
+                meta = {}
+        items = []
+        if os.path.isdir(d):
+            for n in sorted(os.listdir(d)):
+                p = os.path.join(d, n)
+                if not os.path.isfile(p) or os.path.splitext(n)[1].lower() not in self.AUDIO_EXT_LOCAL:
+                    continue
+                m = meta.get(n) or {}
+                items.append({"name": n, "path": p, "size": os.path.getsize(p),
+                              "source": m.get("source") or "",
+                              "prompt": m.get("prompt") or "",
+                              "seed": m.get("seed"),
+                              "seconds": m.get("seconds"),
+                              "created": m.get("created") or datetime.fromtimestamp(
+                                  os.path.getmtime(p)).strftime("%Y-%m-%d %H:%M")})
+        items.sort(key=lambda x: x["created"], reverse=True)
+        cfg = load_json(os.path.join(root, "ip.json")) or {}
+        bgm = cfg.get("bgm") or {}
+        return self._json({"dir": d, "items": items,
+                           "source": bgm.get("source") or "synth",
+                           "pick": bgm.get("pick") or ""})
+
+    AUDIO_EXT_LOCAL = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".opus", ".aac"}
+    def _api_audio_list(self, get):
+        """某一套片子的所有配音候选 —— 配音是重抽最多次的一步，必须能回头对比。
+
+        ★ 没有这个列表，人只能靠文件名里的时长猜哪条是刚跑的；
+          改了语气指令重抽之后，「新的是不是真的换了」全凭感觉。
+        """
+        ip = get("ip") or ""
+        setname = get("set") or ""
+        root = ip_root(ip)
+        if not root:
+            return self._bad("不认识的 IP")
+        if not setname:
+            return self._bad("缺套次")
+        full = self._full_set(ip, setname) or setname
+        d = os.path.join(root, "06_音频", full)
+        items = []
+        if os.path.isdir(d):
+            for n in sorted(os.listdir(d)):
+                p = os.path.join(d, n)
+                if os.path.isfile(p) and os.path.splitext(n)[1].lower() in self.AUDIO_EXT_LOCAL:
+                    items.append({
+                        "name": n, "size": os.path.getsize(p), "path": p,
+                        "mtime": os.path.getmtime(p),
+                        "mtime_str": datetime.fromtimestamp(
+                            os.path.getmtime(p)).strftime("%m-%d %H:%M:%S"),
+                    })
+        items.sort(key=lambda x: -x["mtime"])
+        cfg = load_json(os.path.join(root, "ip.json")) if os.path.exists(
+            os.path.join(root, "ip.json")) else {}
+        return self._json({"dir": d, "set": full, "items": items,
+                           "instruction": (((cfg.get("voice") or {}).get("tts") or {})
+                                           .get("instruction") or ""),
+                           "seed": (((cfg.get("voice") or {}).get("tts") or {}).get("seed"))})
+
+    def _api_materials(self, get):
+        """这个 IP 的素材齐不齐（定帧状态）。
+
+        ★ 接新客户时最需要知道的一件事：「我这儿还缺什么」。
+          以前要自己翻 ip.json 和 02_素材真值/ 对，比对脚本的输出还费劲。
+          这里一次说清：缺哪张图、缺哪条音、缺的是真值还是文件。
+        """
+        ip = get("ip")
+        root = ip_root(ip)
+        if not root:
+            return self._bad("不认识的 IP")
+        ipcfg = load_json(os.path.join(root, "ip.json")) or {}
+        voice = ipcfg.get("voice") or {}
+        visual = ipcfg.get("visual") or {}
+
+        def chk(rel):
+            if not rel:
+                return {"set": False, "file": False, "path": None, "why": "没登记（ip.json 里是 null）"}
+            p = rel if os.path.isabs(rel) else os.path.join(root, rel)
+            ok = os.path.exists(p)
+            return {"set": True, "file": ok, "path": p,
+                    "size": (os.path.getsize(p) if ok else 0),
+                    "why": "" if ok else "登记了但文件不在"}
+
+        items = [
+            {"key": "voice.ref_audio", "name": "声音参考音（8秒）",
+             "role": "TTS 音色克隆的基准，没它出不了声",
+             **chk(voice.get("ref_audio"))},
+            {"key": "voice.ref_text_file", "name": "声音逐字稿",
+             "role": "必须和参考音是同一句，写错音色就跑偏",
+             **chk(voice.get("ref_text_file"))},
+            {"key": "visual.still", "name": "起始静帧",
+             "role": "视频模型的第一帧，没它出不了片",
+             **chk(visual.get("still"))},
+            {"key": "visual.portrait", "name": "形象底图",
+             "role": "身份参考（换背景/换装用）",
+             **chk(visual.get("portrait"))},
+        ]
+        ready = sum(1 for i in items if i["file"])
+        return self._json({"ip": ip, "items": items, "ready": ready,
+                           "total": len(items),
+                           "all_ready": ready == len(items),
+                           "persona_empty": True})
+
+    # ---------------- 人设与规范 ----------------
+    def _api_persona(self, get, body):
+        """读写 01_人设与规范/ 里的 md。
+
+        ★ 这个目录是空的 → AI 写稿没东西可读 → 只能瞎编（2026-10-29 实测）。
+          所以它必须有正经的读写入口，不能只能靠人手动往里放文件。
+        """
+        ip = (body or {}).get("ip") or get("ip")
+        root = ip_root(ip)
+        if not root:
+            return self._bad("不认识的 IP")
+        pdir = os.path.join(root, "01_人设与规范")
+        files = []
+        if os.path.isdir(pdir):
+            for fn in sorted(os.listdir(pdir)):
+                fp = os.path.join(pdir, fn)
+                if os.path.isfile(fp) and fn.endswith(".md"):
+                    files.append({"name": fn, "size": os.path.getsize(fp),
+                                  "path": fp})
+        total = sum(f["size"] for f in files)
+
+        # 写入
+        if body is not None and body.get("text") is not None:
+            text = str(body.get("text") or "")
+            if not text.strip():
+                return self._bad("内容是空的")
+            os.makedirs(pdir, exist_ok=True)
+
+            # ---------- 落到哪一篇：替换 / 新增，必须分得清 ----------
+            # 旧行为：没给 name 就固定写 `人设圣经.md`。
+            # 主号原本那份叫 `陈洁斌_AI-IP人设圣经.md`，于是每存一次就多一份
+            # 平行人设，AI 把整个目录拼起来读 → 两份互相矛盾 → 写出来四不像。
+            # 现在的规矩：
+            #   mode=replace（或不给 mode）→ 落到已有的**人设主干**上，覆盖前先备份
+            #   mode=new                 → 另起一篇，绝不覆盖任何人
+            mode = str(body.get("mode") or "").strip().lower()
+            want = os.path.basename(str(body.get("name") or "").strip())
+            core = persona_core([f["name"] for f in files])
+
+            if want:
+                fn = want if want.endswith(".md") else want + ".md"
+            elif mode == "new":
+                fn = "人设圣经.md"
+            elif core:
+                fn = core[0]                    # 自动落回本来那一篇
+            else:
+                fn = "人设圣经.md"
+
+            if mode == "new" and os.path.exists(os.path.join(pdir, fn)):
+                stem = fn[:-3]
+                i = 2
+                while os.path.exists(os.path.join(pdir, "%s-%d.md" % (stem, i))):
+                    i += 1
+                fn = "%s-%d.md" % (stem, i)
+
+            fp = os.path.join(pdir, fn)
+            bak = None
+            replaced = os.path.exists(fp)
+            if replaced:
+                with open(fp, encoding="utf-8") as f:
+                    if f.read().strip():
+                        bak = fp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                        shutil.copy2(fp, bak)
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(text.rstrip() + "\n")
+            if bak:
+                trim_backups(fp, keep=5)
+            append_changelog("ip", ip, fp,
+                             "persona.replace" if replaced else "persona.new",
+                             None, fn, actor="ui-persona")
+            return self._json({"ok": True, "path": fp, "backup": bak, "name": fn,
+                               "size": len(text), "replaced": replaced,
+                               "mode": "replace" if replaced else "new",
+                               "core": core})
+
+        # 读单篇
+        name = (body or {}).get("name") or get("name")
+        if name:
+            fp = os.path.join(pdir, os.path.basename(name))
+            if not os.path.exists(fp):
+                return self._json({"error": "没有这一篇"}, 404)
+            with open(fp, encoding="utf-8") as f:
+                txt = f.read()
+            return self._json({"name": os.path.basename(name), "text": txt,
+                               "path": fp})
+
+        return self._json({"dir": pdir, "files": files, "total": total,
+                           "empty": total == 0, "ip": ip,
+                           "core": persona_core([f["name"] for f in files])})
+
+    def _api_persona_draft(self, body):
+        """AI 按客户原话起草一份人设圣经（markdown）。
+
+        ★ 走 studio_ai.draft_persona —— 和「对话式建档」那份粗的分开。
+          建档那份是两篇几百字，缺了内容支柱/钩子库/禁止项；
+          这份按成熟 IP 的圣经结构写全（1200-2000 字）。
+        """
+        text = (body.get("text") or "").strip()
+        if not text:
+            return self._bad("先说说这个号是谁、要做什么")
+        import studio_ai
+        try:
+            r = studio_ai.draft_persona(text, body.get("prefer") or None,
+                                        body.get("ip") or "")
+        except Exception as ex:
+            return self._json({"error": f"{type(ex).__name__}: {ex}"}, 502)
+        return self._json(r)
+
+    def _api_voice_design(self, body):
+        """按人设设计音色语气指令。
+
+        ★ 为什么需要这个：
+          ip.json 的 voice.tts.instruction 是空的 → gen_tts.py 把空字符串
+          直接传给 TTS（`INSTR = ... or IP.get(...) or ""`），
+          **不会自动填，也不会报错** —— 片子照出，音色却是模型默认值，
+          跟人设圣经里写的声音真值对不上。
+          这个接口按人设推一条出来，确认后写回 ip.json（唯一真源）。
+        """
+        ip = (body.get("ip") or "").strip()
+        root = ip_root(ip)
+        if not root:
+            return self._bad("不认识的 IP")
+        import studio_ai
+        try:
+            r = studio_ai.design_voice_instruction(ip, body.get("prefer") or None)
+        except Exception as ex:
+            return self._json({"error": f"{type(ex).__name__}: {ex}"}, 502)
+        # 确认后落盘（写进 ip.json 的 voice.tts.instruction）
+        if body.get("save"):
+            ins = str(r.get("instruction") or "").strip()
+            if not ins:
+                return self._bad("没有可存的指令")
+            target = os.path.join(root, "ip.json")
+            data = load_json(target) or {}
+            old = ((data.get("voice") or {}).get("tts") or {}).get("instruction")
+            bak = target + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+            try:
+                shutil.copy2(target, bak)
+            except Exception:
+                bak = None
+            data.setdefault("voice", {}).setdefault("tts", {})["instruction"] = ins
+            write_json_atomic(target, data)
+            append_changelog("ip", ip, target, "voice.tts.instruction",
+                             old, ins, actor="ui-voice")
+            r["saved"] = {"path": target, "backup": bak, "old": old}
+        return self._json(r)
+
+    def _api_trial(self, get, body):
+        """试片配置（定帧 / 样片 可选项 + 执行模式）的读写。
+
+        ★ 新客很多东西要试，但不一定每轮都试同一套。所以这两步是**可选项**，
+          默认都不开，需要时才勾。配置存在 ip.json 的 trial 段（唯一真源）。
+          mode ∈ {manual, run-rest, auto}：
+            manual    手动：每步单独点跑，跑完过审再手动点下一步
+            run-rest  从此处起跑完后面：连跑剩余步骤，但每步过完审才走下一步
+            auto      一条龙全自动：连跑到底，过审自动放行，不等人
+        """
+        ip = (body or {}).get("ip") or get("ip")
+        root = ip_root(ip)
+        if not root:
+            return self._bad("不认识的 IP")
+        target = os.path.join(root, "ip.json")
+        data = load_json(target) if os.path.exists(target) else {}
+
+        if body is not None and body.get("save") is True:
+            t = body.get("trial") or {}
+            mode = (t.get("mode") or "manual")
+            if mode not in ("manual", "run-rest", "auto"):
+                mode = "manual"
+            en = t.get("enabled") or {}
+            enabled = {
+                "still": bool(en.get("still", False)),
+                "sample": bool(en.get("sample", False)),
+            }
+            old = data.get("trial")
+            data["trial"] = {"mode": mode, "enabled": enabled}
+            try:
+                shutil.copy2(target, target + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S"))
+            except Exception:
+                pass
+            write_json_atomic(target, data)
+            append_changelog("ip", ip, target, "trial", old, data["trial"], actor="ui-trial")
+            return self._json({"ok": True, "trial": data["trial"]})
+
+        cur = data.get("trial") or {}
+        return self._json({"trial": {
+            "mode": cur.get("mode", "manual"),
+            "enabled": {
+                "still": bool((cur.get("enabled") or {}).get("still", False)),
+                "sample": bool((cur.get("enabled") or {}).get("sample", False)),
+            },
+        }})
+
+    # ---------------- 总沟通对话区 ----------------
+    def _api_dialogue(self, get, body):
+        """自然语言对话 → 结构化意图 → 执行 CLI / 文件操作 → 自然语言回复。
+
+        ★ 这是「总沟通对话区域」的后端。用户用跟人说话一样的话下指令，
+          比如「把老王的音色改成温和一点」「给陈洁斌加条红线：不许出现同行品牌」
+          「帮我新建一个客户档案卡」。后端先用大模型把意图拆成可执行动作，
+          再逐一执行，最后把结果用自然语言说给用户听。
+
+        所有写操作（write_* / new_card / set_stage / trial_cfg）先只返回「将做什么」
+        并要求确认（confirm_needed=true），除非用户明确说「直接改/立即执行」。
+        读操作直接执行并返回结果摘要。
+
+        敏感边界：客户内容（稿子、人设、档案卡）sensitive=True，只走付费池，
+        不进免费池。每一处写都记入 changelog。
+        """
+        ip = (body or {}).get("ip") or get("ip")
+        text = (body or {}).get("text") or ""
+        history = (body or {}).get("history") or []
+
+        if not text.strip():
+            return self._bad("没说什么，先说点需求吧")
+
+        # 把意图拆成结构化动作（走付费池，sensitive=True）
+        import studio_ai
+        system = """你是「洁斌视频工作台」的总沟通代理。用户用自然语言跟你说需求，
+把它拆成一个或多个可执行动作，每个动作用 JSON 描述。
+
+可用动作（action）及参数（params）：
+- read_card: 读档案卡（card.json）。params: {ip}
+- write_card: 改档案卡业务层。params: {ip, field, value}  field ∈ role/needs/landing_template
+- add_habit: 往档案卡 habits 加一条。params: {ip, text}
+- add_redline: 往档案卡 redlines 加一条。params: {ip, text}
+- add_need: 往档案卡 needs 加一条。params: {ip, key, value}
+- read_ip: 读技术真值（ip.json）。params: {ip}
+- write_ip: 改技术真值。params: {ip, key, value}  key ∈ voice.tts.instruction, subtitle.fs_cue, subtitle.fs_title
+- read_persona: 读人设圣经。params: {ip, name?}
+- write_persona: 写/新建人设圣经 md。params: {ip, name, text}
+- run_guard: 开工前自检。params: {ip}
+- run_status: 看生产状态。params: {ip}
+- run_jobs: 看所有套次进度。params: {ip}
+- new_card: 新建档案卡。params: {name, type, tag, role, aliases, space}
+- set_stage: 推进某套的阶段。params: {ip, set, stage, status}
+- read_script: 读某套稿子。params: {ip, set}
+- write_script: 写某套稿子。params: {ip, set, text}
+- trial_cfg: 改试片配置（定帧/样片可选+模式）。params: {ip, mode, enabled_still, enabled_sample}
+- unknown: 无法理解或超出能力。params: {}
+
+规则：
+1. 先识别用户提到的 IP（按名字/别名，如「老王」「陈洁斌」「主号」），没提到就设 confirm_needed=true 并让用户说明。
+2. 涉及写操作（write_* / add_* / new_card / set_stage / trial_cfg）必须 confirm_needed=true，
+   在 reply 里先说明白将改什么，等用户说「直接改/立即执行/确认」后再执行。
+   读操作（read_* / run_* / run_jobs）直接执行，confirm_needed=false。
+3. 用户说「学习/记住/习惯/红线/需求」→ 写入档案卡的 habits/redlines/needs。
+   用户说「字号/音色/静帧/技术参数」→ 写入 ip.json。
+   用户说「人设/规范/圣经」→ 写入 01_人设与规范/。
+   用户说「这套/M01/套次/稿子/字幕」→ 操作成片层（05_文案/07_成片）。
+4. 返回 JSON：{"actions": [{"action","params","confirm_needed","explanation"}], "reply": "对用户的自然语言回复"}
+   reply 要口语化、简短，像人说话。
+"""
+
+        # 把对话历史压进 user 侧，给模型上下文
+        hist_txt = ""
+        for h in history[-6:]:
+            role = "用户" if h.get("role") == "user" else "助手"
+            hist_txt += f"{role}：{h.get('content','')}\n"
+        user_msg = f"最近对话：\n{hist_txt}\n当前用户说：{text}\n当前选中 IP：{ip or '（未选）'}"
+
+        try:
+            parsed, provider = studio_ai.chat_json(system, user_msg,
+                                                   max_tokens=1500, temperature=0.3)
+        except Exception as ex:
+            return self._json({
+                "ok": False,
+                "reply": f"抱歉，我没看懂您这句话，能换种说法吗？（解析失败：{ex}）",
+                "actions": [],
+            }, 502)
+
+        actions = parsed.get("actions", [])
+        if not actions:
+            return self._json({
+                "ok": True,
+                "reply": parsed.get("reply", "您说的我暂时不太确定怎么操作，能再说具体点吗？"),
+                "actions": [],
+            })
+
+        # 逐个执行动作；读操作直接执行，写操作先确认
+        results = []
+        reply_parts = []
+        any_confirm = False
+
+        for a in actions:
+            action = a.get("action")
+            params = a.get("params", {})
+            cn = bool(a.get("confirm_needed", False))
+            expl = a.get("explanation", "")
+
+            # 写操作需要确认，除非用户显式说「直接改/立即执行/确认」
+            is_write = action in (
+                "write_card", "add_habit", "add_redline", "add_need",
+                "write_ip", "write_persona", "new_card", "set_stage",
+                "write_script", "trial_cfg",
+            )
+            need_confirm = is_write and cn and not any(
+                k in text for k in ("直接改", "立即执行", "确认", "马上", "就这么办")
+            )
+
+            if need_confirm:
+                any_confirm = True
+                reply_parts.append(f"⏸ {expl or action} —— 需要您确认后才改。")
+                results.append({"action": action, "status": "await_confirm",
+                                "params": params, "explanation": expl})
+                continue
+
+            ok, msg, data = self._exec_dialogue_action(ip, action, params)
+            results.append({"action": action, "status": "done" if ok else "error",
+                            "params": params, "message": msg, "data": data})
+            if ok:
+                reply_parts.append(f"✔ {msg or expl or action}")
+            else:
+                reply_parts.append(f"✗ {msg or action} 失败")
+
+        final_reply = parsed.get("reply", "")
+        if reply_parts:
+            final_reply = (final_reply + " " if final_reply and not final_reply.endswith(("。", "！", "？", ".")) else "") + " ".join(reply_parts)
+        if any_confirm:
+            final_reply += " 说「直接改」或「确认」即可执行上述需要确认的项。"
+
+        return self._json({
+            "ok": True,
+            "reply": final_reply.strip(),
+            "actions": results,
+        })
+
+    def _exec_dialogue_action(self, ip, action, params):
+        """执行单个对话动作，返回 (ok, message, data)。"""
+        root = ip_root(ip) if ip else None
+        if action != "new_card" and not root:
+            return False, "不认识的 IP：「" + str(ip or "（未选）") + "」。先在左栏选一个 IP，或告诉我 IP 名字。", None
+
+        try:
+            import subprocess, json as _json
+
+            # ---------- 读类 ----------
+            if action == "read_card":
+                cp = os.path.join(root, "card.json")
+                if not os.path.exists(cp):
+                    return False, "该 IP 没有 card.json", None
+                return True, "档案卡已读", load_json(cp)
+
+            if action == "read_ip":
+                cp = os.path.join(root, "ip.json")
+                if not os.path.exists(cp):
+                    return False, "该 IP 没有 ip.json", None
+                return True, "技术真值已读", load_json(cp)
+
+            if action == "read_persona":
+                name = params.get("name") or "人设圣经.md"
+                pdir = os.path.join(root, "01_人设与规范")
+                fp = os.path.join(pdir, _json.dumps(name) if False else os.path.basename(name))
+                if not os.path.exists(fp):
+                    return False, f"没找到人设文件：{name}", None
+                with open(fp, encoding="utf-8") as f:
+                    return True, f"人设「{name}」已读", {"name": name, "text": f.read()}
+
+            if action == "run_guard":
+                rc, out, err = run_cli(["guard", ip], timeout=120)
+                return rc == 0, (out or err or f"exit {rc}").strip(), None
+
+            if action == "run_status":
+                return True, cli_json(["status"], timeout=90), None
+
+            if action == "run_jobs":
+                return True, cli_json(["jobs", ip], timeout=90), None
+
+            if action == "read_script":
+                setname = params.get("set") or ""
+                from vstudio import script_text_path
+                p = script_text_path(root, setname)
+                if not os.path.exists(p):
+                    return False, f"这套还没有稿子：{setname}", None
+                with open(p, encoding="utf-8") as f:
+                    return True, f"稿子「{setname}」已读", {"text": f.read()}
+
+            # ---------- 写类 ----------
+            if action == "write_card":
+                field = params.get("field")
+                value = params.get("value")
+                cp = os.path.join(root, "card.json")
+                data = load_json(cp) if os.path.exists(cp) else {}
+                old = data.get(field)
+                data[field] = value
+                bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                shutil.copy2(cp, bak)
+                write_json_atomic(cp, data)
+                append_changelog("ip", ip, cp, f"card.{field}", old, value, actor="dialogue")
+                return True, f"档案卡已改：{field} → {value}", None
+
+            if action == "add_habit":
+                cp = os.path.join(root, "card.json")
+                data = load_json(cp) if os.path.exists(cp) else {}
+                data.setdefault("habits", []).append(params.get("text"))
+                bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                shutil.copy2(cp, bak)
+                write_json_atomic(cp, data)
+                append_changelog("ip", ip, cp, "card.habits", None, params.get("text"), actor="dialogue")
+                return True, f"已加入习惯：{params.get('text')}", None
+
+            if action == "add_redline":
+                cp = os.path.join(root, "card.json")
+                data = load_json(cp) if os.path.exists(cp) else {}
+                data.setdefault("redlines", []).append(params.get("text"))
+                bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                shutil.copy2(cp, bak)
+                write_json_atomic(cp, data)
+                append_changelog("ip", ip, cp, "card.redlines", None, params.get("text"), actor="dialogue")
+                return True, f"已加入红线：{params.get('text')}", None
+
+            if action == "add_need":
+                cp = os.path.join(root, "card.json")
+                data = load_json(cp) if os.path.exists(cp) else {}
+                data.setdefault("needs", {}).update({params.get("key"): params.get("value")})
+                bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                shutil.copy2(cp, bak)
+                write_json_atomic(cp, data)
+                append_changelog("ip", ip, cp, "card.needs", None, params.get("key"), actor="dialogue")
+                return True, f"已记录需求：{params.get('key')} = {params.get('value')}", None
+
+            if action == "write_ip":
+                key = params.get("key")
+                value = params.get("value")
+                cp = os.path.join(root, "ip.json")
+                data = load_json(cp) if os.path.exists(cp) else {}
+                # 支持点号路径，如 voice.tts.instruction
+                parts = key.split(".")
+                cur = data
+                for p in parts[:-1]:
+                    cur = cur.setdefault(p, {})
+                old = cur.get(parts[-1])
+                cur[parts[-1]] = value
+                bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                shutil.copy2(cp, bak)
+                write_json_atomic(cp, data)
+                append_changelog("ip", ip, cp, f"ip.{key}", old, value, actor="dialogue")
+                return True, f"技术真值已改：{key} → {value}", None
+
+            if action == "write_persona":
+                name = params.get("name") or "人设圣经.md"
+                text = params.get("text") or ""
+                if not text.strip():
+                    return False, "人设内容是空的", None
+                pdir = os.path.join(root, "01_人设与规范")
+                os.makedirs(pdir, exist_ok=True)
+                fp = os.path.join(pdir, os.path.basename(name))
+                bak = None
+                if os.path.exists(fp):
+                    with open(fp, encoding="utf-8") as f:
+                        if f.read().strip():
+                            bak = fp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                            shutil.copy2(fp, bak)
+                with open(fp, "w", encoding="utf-8") as f:
+                    f.write(text.rstrip() + "\n")
+                append_changelog("ip", ip, fp, "persona.write", None, name, actor="dialogue")
+                return True, f"人设已写入：{name}", None
+
+            if action == "new_card":
+                name = params.get("name")
+                if not name:
+                    return False, "新建档案卡需要名字", None
+                rc, out, err = run_cli([
+                    "card-new", "--name", name,
+                    "--type", params.get("type") or "客户",
+                    "--tag", params.get("tag") or "M",
+                    "--role", params.get("role") or "",
+                    "--aliases", ",".join(params.get("aliases") or []),
+                    "--space", params.get("space") or "",
+                ], timeout=60)
+                return rc == 0, (out or err or f"exit {rc}").strip(), None
+
+            if action == "set_stage":
+                setname = params.get("set") or ""
+                stage = params.get("stage") or ""
+                status = params.get("status") or ""
+                rc, out, err = run_cli([
+                    "--json", "job-set", ip, setname, stage, status
+                ], timeout=60)
+                return rc == 0, (out or err or f"exit {rc}").strip(), None
+
+            if action == "write_script":
+                setname = params.get("set") or ""
+                text = params.get("text") or ""
+                from vstudio import script_text_path, dedupe_script_text
+                p = script_text_path(root, setname)
+                landing = params.get("landing") or ""
+                clean, notes = dedupe_script_text(text, landing)
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(clean)
+                return True, f"稿子已写入并去重：{setname}（{'; '.join(notes) if notes else '无重复'}）", None
+
+            if action == "trial_cfg":
+                cp = os.path.join(root, "ip.json")
+                data = load_json(cp) if os.path.exists(cp) else {}
+                mode = params.get("mode") or "manual"
+                enabled = {
+                    "still": bool(params.get("enabled_still", False)),
+                    "sample": bool(params.get("enabled_sample", False)),
+                }
+                old = data.get("trial")
+                data["trial"] = {"mode": mode, "enabled": enabled}
+                bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                shutil.copy2(cp, bak)
+                write_json_atomic(cp, data)
+                append_changelog("ip", ip, cp, "trial", old, data["trial"], actor="dialogue")
+                return True, f"试片配置已改：{mode}，定帧={enabled['still']}，样片={enabled['sample']}", None
+
+            return False, f"不认识的动作：{action}", None
+
+        except Exception as ex:
+            import traceback
+            traceback.print_exc()
+            return False, f"{type(ex).__name__}: {ex}", None
 
     # ---------------- MCP 自检 ----------------
     def _api_mcp(self):

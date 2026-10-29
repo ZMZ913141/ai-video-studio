@@ -58,3 +58,8 @@ config/*.bak.*
 
 # 本地测试脚本（jsdom 点按钮用），不进版本库
 .uitest/
+
+# 本地密钥（2026-10-30）：Pexels / Jamendo 这类第三方 key。
+# ★ 绝不写成 config/llm.env 那样的 *.env —— .env 规则里那条 `!.env.example`
+#   会让人误以为「环境变量文件都能进库」。这里是独立文件，不进库。
+config/secrets.local.json

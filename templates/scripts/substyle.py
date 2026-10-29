@@ -138,6 +138,90 @@ def font_of(kind):
     env, default = _FONT_ENV[kind]
     return os.environ.get(env) or default
 
+# ---------- 本 IP 的字号覆盖（ip.json） ----------
+# ★ 2026-10-29 修的「假参数」问题：
+#   ip.json 里一直有 subtitle.fs_cue / fs_title，界面上也一直能编辑，
+#   但**没有任何脚本读它们** —— 字号是这里写死的 52。
+#   人改完看界面显示"改了"，实际出片一点没变。这是最恶劣的一类 bug：
+#   界面在骗人。
+#   现在让它真读 ip.json（唯一真源），null/空 = 用这里的定板值。
+#
+#   应用时机：**set_size() 之后**。因为 set_size 会按分辨率把字号等比缩放，
+#   先覆盖再缩放 = 覆盖值被缩掉，等于没覆盖。
+_IP_OVERRIDE = {}       # {"fs_cue": 87, ...}
+
+
+def load_ip_overrides(start=None):
+    """从本 IP 的 ip.json 读字号覆盖。找不到就什么都不改（行为与从前一致）。"""
+    global _IP_OVERRIDE
+    _IP_OVERRIDE = {}
+    try:
+        from ip_guard import find_ip_json
+        path, root = find_ip_json(start)
+        if not path:
+            return _IP_OVERRIDE
+        import json as _j
+        with open(path, encoding="utf-8") as f:
+            data = _j.load(f)
+        sub = data.get("subtitle") or {}
+        for key, name in (("fs_cue", "FS_CUE"), ("fs_title", "FS_TITLE"),
+                          ("fs_sub", "FS_SUB"), ("fs_cta", "FS_CTA"),
+                          ("fs_tag", "FS_TAG"), ("outline", "OUT_CUE")):
+            v = sub.get(key)
+            if v is None:
+                continue
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                _IP_OVERRIDE[name] = v
+    except Exception:
+        _IP_OVERRIDE = {}
+    return _IP_OVERRIDE
+
+
+def apply_ip_overrides():
+    """把 ip.json 的字号覆盖应用到当前常量（必须在 set_size 之后调）。"""
+    if not _IP_OVERRIDE:
+        return {}
+    g = globals()
+    applied = {}
+    for name, v in _IP_OVERRIDE.items():
+        if name in g and g[name] != v:
+            applied[name] = {"from": g[name], "to": v}
+            g[name] = v
+    return applied
+
+# ---------- 字号安全检查 ----------
+# 普惠体 2.0 的汉字实际进距 ≈ 0.745em（实测：11 字 377px / 12 字 410px @46px）
+CHAR_ADVANCE = 0.745
+
+
+def check_font_fit(fs_cue=None, max_chars=12):
+    """字号能不能在安全区里放下。
+
+    ★ 为什么必须查：
+      ip.json 的 subtitle.fs_cue 现在真生效了（以前是死的）。
+      但那值常常是从别的 IP 抄来的 —— 2026-10-29 实测：老王抄了 87，
+      而它出片是 544 宽（安全区可用 438px），87px×7 字就要 454px → 溢出。
+      溢出 = 字幕被切掉，或者压到画面边缘。
+      以前这个值是死的所以看不出来，现在生效了，就必须当场拦。
+
+    返回 (是否放得下, 说明文字, 建议最大字号)。
+    """
+    fs = fs_cue if fs_cue is not None else FS_CUE
+    usable = SAFE_RIGHT - SAFE_LEFT
+    need = fs * CHAR_ADVANCE * max_chars
+    if need <= usable:
+        return True, f"字号 {fs}，{max_chars} 字宽 {need:.0f}px，安全区可用 {usable}px —— 放得下", fs
+    # 给个建议值：刚好放下的最大字号
+    adv = int(usable / (CHAR_ADVANCE * max_chars))
+    return (False,
+            f"字号 {fs} 太大：{max_chars} 字要 {need:.0f}px，安全区只有 {usable}px（会溢出）",
+            max(adv, 12))
+
+
 # ---------- 关键位置 ----------
 CUE_MARGIN_V = 288          # 字幕底边落在 y≈1088，安全区内且不压下巴
 TITLE_MARGIN_V = 150        # 标题顶部下移，避开系统状态栏

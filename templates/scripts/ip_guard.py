@@ -231,9 +231,10 @@ def load_ip(strict=True, verbose=True, allow_env=True, start=None):
         print("\n✗ 找不到 ip.json。", file=sys.stderr)
         print(f"  当前起点：{os.path.dirname(os.path.abspath(sys.argv[0]))}",
               file=sys.stderr)
-        print("  请确认脚本位于某个 IP 的工作区内"
-              "（如 /home/qmr/github/ai-video-studio/profiles/陈洁斌主号/03_生产脚本/）。",
+        print("  请确认脚本位于某个 IP 的工作区内：", file=sys.stderr)
+        print("    档案根目录（默认 /cfu/ai视频档案库，可由环境变量 STUDIO_ARCHIVE 改）",
               file=sys.stderr)
+        print("    下面应该是 <档案根目录>/<IP名>/03_生产脚本/。", file=sys.stderr)
         print("  新建 IP 请用：python newip.py\n", file=sys.stderr)
         sys.exit(2)
 

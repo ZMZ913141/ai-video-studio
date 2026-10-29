@@ -121,6 +121,107 @@ LORA_STRENGTH = float(IP.get("video.lora.strength") or LORA_STRENGTH)
 SAGE = IP.get("video.sage_attention") or SAGE
 STEPS = int(IP.get("video.steps") or STEPS)
 
+# ══════════════════════════════════════════════════════ 分段素材（2026-10-30）
+# 「客户提供新素材要怎么引用」「不同分段不同素材」——H3 原生就支持，只是我们没用。
+# 规范不是猜的，是从本机插件源码读出来的，完整版见 docs/H3时间轴与分段素材规范.md。
+# 三条最重要的：
+#   ① 段的 images 是 **id 列表**，插件按段筛选后 <Picture N> **重新从 1 编号**
+#      → 英文骨架里写死的 <Picture 1> 在第 2 段自动指到新素材，模板一个字不用改；
+#   ② 段的 images **为空 = 这一段没有参考图**（不是"用全部图"）→ 会退化成文生视频、
+#      脸直接崩。所以下面给每段都兜底成 ["img"]，绝不留空；
+#   ③ 图上限 9 张，超了被静默截断、不报错。
+MATERIALS = (os.environ.get("MATERIALS") or "").strip()
+BASE_IMAGE_ID = "img"          # 起始静帧占用的 id，materials.json 不能再叫这个名
+EXTRA_IMAGES = []              # [{"id","src","ext","name","w","h","note","in_name"}]
+SEG_IMAGES = {}                # {段号(1起): [id, ...]}
+DEFAULT_IMAGE_IDS = [BASE_IMAGE_ID]
+
+
+def _image_size(path, fallback=(1088, 1920)):
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return int(im.size[0]), int(im.size[1])
+    except Exception:
+        return fallback
+
+
+def _load_materials():
+    """读 materials.json。没有这个文件 → 行为跟加这段之前一字不差。"""
+    if not MATERIALS or not os.path.isfile(MATERIALS):
+        return [], {}, [BASE_IMAGE_ID]
+
+    try:
+        with open(MATERIALS, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+    except Exception as ex:
+        sys.exit(f"✗ materials.json 读不了：{MATERIALS}\n  → {ex}")
+
+    root = os.path.abspath(IP.root)
+    extras = []
+    for i, it in enumerate(doc.get("images") or []):
+        if not isinstance(it, dict):
+            continue
+        iid = str(it.get("id") or "").strip()
+        rel = str(it.get("file") or "").strip()
+        if not iid or not rel:
+            sys.exit(f"✗ materials.json 第 {i+1} 张图缺 id 或 file")
+        if iid == BASE_IMAGE_ID:
+            sys.exit(f"✗ materials.json 里的 id 不能叫「{BASE_IMAGE_ID}」"
+                     f"（那是起始静帧占用的名字）")
+        src = IP.abspath(rel)
+        # ★ 越界必须硬拦：跨 IP 引用素材 = 把上一位客户的脸/门店串到下一位身上。
+        if not os.path.abspath(src).startswith(root + os.sep):
+            sys.exit(f"✗ 素材不在本 IP（{IP.get('ip', '?')}）目录内：{rel}\n"
+                     f"  禁止跨 IP 引用素材 —— 会把别人的脸/场景串进来。")
+        if not os.path.isfile(src):
+            sys.exit(f"✗ 素材文件不存在：{src}")
+        w, h = _image_size(src)
+        ext = os.path.splitext(src)[1].lower() or ".png"
+        extras.append({"id": iid, "src": src, "name": os.path.basename(src),
+                       "ext": ext, "in_name": f"{TAG}_mat_{iid}{ext}",
+                       "w": w, "h": h, "note": str(it.get("note") or "")})
+
+    known = {BASE_IMAGE_ID} | {m["id"] for m in extras}
+    segmap = {}
+    for k, v in (doc.get("segments") or {}).items():
+        try:
+            idx = int(k)
+        except (TypeError, ValueError):
+            continue                      # "default" / "*" 走下面那条分支
+        ids = [str(x).strip() for x in (v if isinstance(v, list) else [v])]
+        ids = [x for x in ids if x]
+        if ids:
+            segmap[idx] = ids
+
+    default_ids = None
+    for key in ("default", "*"):
+        v = (doc.get("segments") or {}).get(key)
+        if isinstance(v, list) and v:
+            default_ids = [str(x).strip() for x in v if str(x).strip()]
+            break
+    if not default_ids:
+        default_ids = [BASE_IMAGE_ID]
+
+    for owner, ids in list(segmap.items()) + [("default", default_ids)]:
+        bad = [x for x in ids if x not in known]
+        if bad:
+            sys.exit(f"✗ materials.json 引用了不存在的素材 id {bad}"
+                     f"（{owner}）。已登记的：{sorted(known)}")
+        if len(ids) > 9:
+            sys.exit(f"✗ materials.json 里 {owner} 挂了 {len(ids)} 张图，H3 上限 9 张"
+                     f"（超出的会被静默丢弃，不如现在就说清楚）")
+    return extras, segmap, default_ids
+
+
+EXTRA_IMAGES, SEG_IMAGES, DEFAULT_IMAGE_IDS = _load_materials()
+
+
+def seg_image_ids(i_one_based):
+    """第 i 段（1 起）用哪几张图。★ 永不返回空列表 —— 空 = 无参考图 = 脸崩。"""
+    return SEG_IMAGES.get(i_one_based) or DEFAULT_IMAGE_IDS
+
+
 # ★ 模型名自动补 .safetensors（防档案卡漏写后缀）
 #   2026-10-28 踩的坑：ip.json 里写的是 "minimax_h3_latent_upscaler_3d_fp16_V2"
 #   （漏了 .safetensors），提交后 ComfyUI 报
@@ -1620,28 +1721,53 @@ def build_prompt(i, segs, cues, audio_sec):
     return Template(subj + summ + ret + det + snd + mus).safe_substitute(pv)
 
 
-def timeline(segs, cues, audio_sec, total_sec):
+def timeline(segs, cues, audio_sec, total_sec, offset=0, full=None, frame_base=0):
+    """offset = 这批 segs 在全片里的起始段号（0 起）；full = 全片分段表；
+    frame_base = 本批第一段的绝对起始帧（PILOT 只跑中段时用来平移）。
+
+    ★ 为什么需要这三个：
+    ① offset：PILOT=3 只把第 3 段切成 `segs[-1:]` 交给这里，如果下标从 0 重新数，
+       `i==0` 就会命中「段1 的缓推镜头」，`SEG_EN.get(0)` 会取到**段1 的英文分镜**，
+       素材也取段1那张 —— 「只测第 3 段」测出来的是「段1的提示词 + 段3的时间轴」，
+       等着看末段劣化永远等不到。
+    ② frame_base：插件硬校验「第 1 段必须从第 0 帧开始、段间无缝且重叠对齐」
+       （minimax_h3_finite_segments.py:461）。不平移的话 PILOT=2 直接被拒：
+       「Segment 1 must advance in time without gaps」—— 这个功能以前就是坏的。
+       平移后起始帧归 0，而音频用 trimStart 取对应的那一段，时间关系不变。
+    """
+    full = segs if full is None else full
+    sel_dur = (max(e for _s, e in segs) - frame_base) / FPS
+    # 素材箱：起始静帧 + materials.json 里登记的额外图。
+    # 顺序无所谓，真正决定「某段用哪几张」的是下面 segmentConfig 里的 images（按 id 取）。
+    images = [{"id": BASE_IMAGE_ID, "file": f"{REL}/{STILL_NAME}", "name": STILL_NAME,
+               "width": 1088, "height": 1920}]
+    for m in EXTRA_IMAGES:
+        images.append({"id": m["id"], "file": f"{REL}/{m['in_name']}",
+                       "name": m["name"], "width": m["w"], "height": m["h"]})
     return {
         "version": 10, "fps": FPS, "globalPrompt": "",
         "secondPass": True,
         "secondPassModel": UPSCALER, "secondPassHighSteps": 2,
-        "selection": {"start": 0, "duration": total_sec},
+        "selection": {"start": 0, "duration": sel_dur},
         "videoAudioEnabled": True, "videoClips": [],
-        "images": [{"id": "img", "file": f"{REL}/{STILL_NAME}", "name": STILL_NAME,
-                    "width": 1088, "height": 1920}],
+        "images": images,
         "audios": [{"id": "aud", "file": f"{REL}/{AUDIO_NAME}", "name": AUDIO_NAME,
-                    "duration": audio_sec, "trimStart": 0, "audioMode": "locked"}],
+                    "duration": sel_dur if frame_base else audio_sec,
+                    "trimStart": frame_base / FPS, "audioMode": "locked"}],
         "segmentConfig": {
             "count": len(segs), "activeIndex": 0, "mode": "timeline",
-            "segments": [{"images": ["img"], "audios": ["aud"],
-                          "prompt": build_prompt(i, segs, cues, audio_sec),
-                          "startFrame": s, "endFrame": e}
-                         for i, (s, e) in enumerate(segs)],
+            # ★ 每段都显式列 images。留空不是「用全部」，是「这段没有参考图」→ 脸崩。
+            #   插件会按段重新筛一遍并按顺序重新编号 <Picture N>，所以骨架里写死的
+            #   <Picture 1> 在第 2 段自动指向新素材 —— 英文模板一个字都不用改。
+            "segments": [{"images": seg_image_ids(offset + k + 1), "audios": ["aud"],
+                          "prompt": build_prompt(offset + k, full, cues, audio_sec),
+                          "startFrame": s - frame_base, "endFrame": e - frame_base}
+                         for k, (s, e) in enumerate(segs)],
         },
     }
 
 
-def graph(prefix, segs, cues, audio_sec, total_sec):
+def graph(prefix, segs, cues, audio_sec, total_sec, offset=0, full=None, frame_base=0):
     hc, qc, ts = lowvram_settings()
     use_patch = hc > 0 or qc > 0
 
@@ -1655,7 +1781,9 @@ def graph(prefix, segs, cues, audio_sec, total_sec):
         "13": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
         "11": {"class_type": "MiniMaxH3TimelinePlanner", "inputs": {
             "width": ["47", 0], "height": ["47", 1], "generation_seconds": total_sec,
-            "timeline_data": json.dumps(timeline(segs, cues, audio_sec, total_sec), ensure_ascii=False)}},
+            "timeline_data": json.dumps(timeline(segs, cues, audio_sec, total_sec,
+                             offset=offset, full=full, frame_base=frame_base),
+                             ensure_ascii=False)}},
     }
 
     # ★ model 链：UNET → LoRA → Sage → 低显存分块 → 消费者
@@ -1764,6 +1892,12 @@ def prep(audio_sec):
     if not os.path.exists(d) or md5(d) != md5(STILL_SRC):
         shutil.copy2(STILL_SRC, d)
         print("静帧 →input")
+    # 分段素材：额外那几张也要进 ComfyUI 的 input 目录，否则图里的 file 指向空
+    for m in EXTRA_IMAGES:
+        dst = os.path.join(IN_DIR, m["in_name"])
+        if not os.path.exists(dst) or md5(dst) != md5(m["src"]):
+            shutil.copy2(m["src"], dst)
+        print(f"素材 {m['id']}（{m['name']}） →input")
     a = os.path.join(IN_DIR, AUDIO_NAME)
     subprocess.run([FF, "-y", "-i", AUDIO_SRC, "-af", "apad=pad_dur=0.60",
                     "-t", f"{audio_sec}", "-ar", "48000", "-ac", "2", "-b:a", "192k", a],
@@ -1882,6 +2016,17 @@ def main():
     for i, (s, e) in enumerate(segs):
         ov = segs[i - 1][1] - s if i else 0
         line = f"   段{i+1}  {s:4d}-{e:4d}  {e-s:3d}帧 {s/FPS:6.2f}-{e/FPS:6.2f}s  重叠{ov}"
+        # 分段素材：每段用哪几张图必须打出来 —— <Picture N> 是段内重新编号的，
+        # 不打出来人根本不知道「第2段的 Picture 1 到底是啥」。
+        if EXTRA_IMAGES:
+            names = []
+            for n, iid in enumerate(seg_image_ids(i + 1), 1):
+                if iid == BASE_IMAGE_ID:
+                    names.append(f"<Picture {n}>=静帧")
+                else:
+                    m = next((x for x in EXTRA_IMAGES if x["id"] == iid), None)
+                    names.append(f"<Picture {n}>={m['name'] if m else iid}")
+            line += "  " + " ".join(names)
         if _want[i] is not None:
             real = (e - s) / FPS
             d = real - _want[i]
@@ -1904,6 +2049,13 @@ def main():
             for w in [" no ", " not ", " never ", " without "]:
                 assert w not in det.lower(), f"段{i+1} detailed_description 有否定词 {w!r}"
         print("\n✓ 所有约束通过")
+        # 铁律 8：改完影响出片的东西，先存 golden 再 diff。
+        # 提示词是文本、肉眼可比；timeline JSON 是结构体、肉眼比不了 —— 所以要能 dump。
+        #   DRY=1 DUMP_TIMELINE=1 <脚本> > 改后.json   再用旧版本跑一份 diff
+        if (os.environ.get("DUMP_TIMELINE") or "").strip() not in ("", "0"):
+            print("\n=========== timeline ===========")
+            print(json.dumps(timeline(segs, cues, audio_sec, total_sec),
+                             ensure_ascii=False, indent=2, sort_keys=True))
         return
 
     prep(audio_sec)
@@ -1931,22 +2083,30 @@ def main():
     #   PILOT=3      → 第 3 段
     if not PILOT:
         s = segs
+        _off = 0
     else:
         _k = PILOT_SPEC
         if _k in ("", "1", "true", "yes", "on"):
-            s = segs[:1]
+            _off = 0
         elif _k in ("last", "end"):
-            s = segs[-1:]
+            _off = len(segs) - 1
         else:
-            _i = max(1, min(len(segs), int(_k))) - 1
-            s = segs[_i:_i + 1]
-        print(f"   PILOT 指定段 = 第 {segs.index(s[0]) + 1}/{len(segs)} 段")
+            _off = max(0, min(len(segs) - 1, int(_k) - 1))
+        s = segs[_off:_off + 1]
+        print(f"   PILOT 指定段 = 第 {_off + 1}/{len(segs)} 段")
+    # 本批的绝对起点与总长。全片跑时 _base=0、_batch_sec=total_sec，
+    # 与加这段之前逐字节一致；只有 PILOT 才真的平移。
+    _base = s[0][0]
+    _batch_sec = (s[-1][1] - _base) / FPS
     prefix = f"{TAG}_pilot" if PILOT else f"{TAG}_full"
     print(f"提交 {len(s)} 段 / seed={SEED} / 二采=V2", flush=True)
     t0 = time.time()
     r = None
     for attempt in range(1, 4):
-        res = post({"prompt": graph(prefix, s, cues, audio_sec, total_sec),
+        # ★ offset/full 必须传：只跑单段时，提示词与素材仍要按**全片的段号**取，
+        #   否则「只测第3段」拿到的其实是段1的提示词（2026-10-30 修）。
+        res = post({"prompt": graph(prefix, s, cues, audio_sec, _batch_sec,
+                                    offset=_off, full=segs, frame_base=_base),
                     "client_id": "c_%d" % int(time.time())})
         pid = res["prompt_id"]
         print(f"[{attempt}] submitted {pid}", flush=True)

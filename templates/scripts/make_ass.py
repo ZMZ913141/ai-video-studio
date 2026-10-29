@@ -270,6 +270,22 @@ if __name__ == "__main__":
     if len(sys.argv) >= 6:
         W_, H_ = int(sys.argv[4]), int(sys.argv[5])
         S.set_size(W_, H_)
+        # ★ 字号覆盖必须在 set_size 之后 —— set_size 会按分辨率把字号等比缩放，
+        #   先覆盖再缩放 = 覆盖值被缩掉，等于没覆盖（2026-10-29 实测）。
+        S.load_ip_overrides()
+        _ov = S.apply_ip_overrides()
+        if _ov:
+            print("  字号覆盖（本 IP 的 ip.json）：" +
+                  " ".join(f"{k} {v['from']}→{v['to']}" for k, v in _ov.items()))
+        # ★ 字号溢出会让字幕被切掉/压边。以前 ip.json 的字号是死的所以看不出来，
+        #   现在真生效了，就必须在烧之前拦下来（2026-10-29 实测：老王抄了 87，
+        #   而它出片 544 宽，安全区只有 438px，87×7 字就 454px → 必溢出）。
+        _ok, _msg, _suggest = S.check_font_fit()
+        if not _ok:
+            print(f"\n✗ {_msg}", file=sys.stderr)
+            print(f"  建议字号 ≤ {_suggest}（按安全区 {S.SAFE_RIGHT - S.SAFE_LEFT}px 反算）", file=sys.stderr)
+            print("  改 ip.json 的 subtitle.fs_cue，或把它设成 null 用引擎定板值。\n", file=sys.stderr)
+            sys.exit(2)
         print(f"  字幕画布 {W_}x{H_}  正文字号 {S.FS_CUE}  标题 {S.FS_TITLE}")
     tag, srt, out = sys.argv[1], sys.argv[2], sys.argv[3]
     ev, warns = build(tag, srt, out)

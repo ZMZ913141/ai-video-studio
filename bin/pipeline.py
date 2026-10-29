@@ -401,8 +401,11 @@ class Pipeline:
         if st.get("builtin") == "audio_pad":
             rc = self._builtin_pad(rec)
         else:
+            # STUDIO_HOME：让 IP 目录里的脚本副本也能找到仓库（比如
+            # config/secrets.local.json 里的第三方 key）。不传的话，
+            # 从 /cfu/ai视频档案库/<IP>/03_生产脚本 往上走是找不到仓库的。
             rc = subprocess.run(cmd, cwd=self.root,
-                                env=dict(os.environ, **env)).returncode
+                                env=dict(os.environ, STUDIO_HOME=ROOT, **env)).returncode
         rec["rc"] = rc
         rec["t1"] = time.time()
         rec["sec"] = round(rec["t1"] - rec["t0"], 1)

@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>新手使用手册 · ai-video-studio</title>
+<style>
+  :root{
+    --bg:#0e0f13; --panel:#16181f; --panel2:#1c1f28; --line:#2a2e3a;
+    --tx:#e8eaf0; --tx2:#a8aec0; --tx3:#6f7688;
+    --acc:#7c6cff; --acc2:#4dd0e1; --ok:#3ddc97; --warn:#ffb457; --err:#ff5c7a;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);
+    font:15px/1.75 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:880px;margin:0 auto;padding:36px 22px 80px}
+  h1{font-size:28px;margin:0 0 6px}
+  .sub{color:var(--tx3);font-size:13px;margin-bottom:28px}
+  h2{font-size:19px;margin:34px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h3{font-size:15px;margin:20px 0 8px;color:var(--acc2)}
+  p{margin:9px 0}
+  code{font-family:var(--mono);font-size:12.5px;background:var(--panel2);
+    padding:1.5px 5px;border-radius:4px;color:#d6dae8;}
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:13px 15px;overflow:auto;font-family:var(--mono);font-size:12.5px;line-height:1.65}
+  pre code{background:none;padding:0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 17px;margin:13px 0}
+  .card.warn{border-color:rgba(255,180,87,.4);background:rgba(255,180,87,.05)}
+  .card.bad{border-color:rgba(255,92,122,.42);background:rgba(255,92,122,.06)}
+  .card.ok{border-color:rgba(61,220,151,.35);background:rgba(61,220,151,.05)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:11px;margin:13px 0}
+  .step{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .step b{color:var(--acc2);display:block;font-size:12px;letter-spacing:.4px;margin-bottom:3px}
+  .kbd{font-family:var(--mono);font-size:11.5px;background:var(--bg);
+    border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--tx2)}
+  .path{font-family:var(--mono);font-size:12px;color:var(--acc2)}
+  svg{max-width:100%;height:auto;display:block;margin:14px auto}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left}
+  th{background:var(--panel2);color:var(--tx2);font-weight:600}
+  .tag{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:999px;
+    border:1px solid var(--line);color:var(--tx3);margin-left:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>新手使用手册</h1>
+<div class="sub">ai-video-studio · 从开机到出第一支片 · 照着做就行</div>
+
+<div class="card ok">
+<b>一句话：这是什么</b>
+<p>这是一套「AI 数字人口播视频」的生产线。你给它一段文案，它出一条竖屏口播片
+（配音 + 字幕 + 画面 + BGM）。客户多了也不乱 —— 每个人一份独立档案。</p>
+</div>
+
+<h2>一、先记住：东西分两个地方</h2>
+
+<p>这是最容易搞混的一件事，搞清楚了后面全顺。</p>
+
+<svg viewBox="0 0 680 210" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#7c6cff"/>
+    </marker>
+  </defs>
+  <rect x="14" y="14" width="290" height="80" rx="11" fill="#16181f" stroke="#2a2e3a"/>
+  <text x="30" y="40" fill="#7c6cff" font-size="13.5" font-family="system-ui" font-weight="600">引擎（本项目·可进 git）</text>
+  <text x="30" y="62" fill="#a8aec0" font-size="11.5" font-family="ui-monospace,monospace">/home/qmr/github/ai-video-studio/</text>
+  <text x="30" y="82" fill="#6f7688" font-size="11.5" font-family="system-ui">脚本 · 模板 · 文档 · 网页工作台</text>
+
+  <rect x="376" y="14" width="290" height="80" rx="11" fill="#16181f" stroke="#2a2e3a"/>
+  <text x="392" y="40" fill="#4dd0e1" font-size="13.5" font-family="system-ui" font-weight="600">档案（生产盘·不进 git）</text>
+  <text x="392" y="62" fill="#a8aec0" font-size="11.5" font-family="system-ui">一个人一个目录，素材/成片/交付全在里面</text>
+  <text x="392" y="82" fill="#6f7688" font-size="11.5" font-family="system-ui">默认 <tspan font-family="ui-monospace,monospace">/cfu/ai视频档案库/&lt;IP名&gt;/</tspan></text>
+
+  <line x1="159" y1="98" x2="159" y2="140" stroke="#7c6cff" stroke-width="1.6" marker-end="url(#ar)"/>
+  <line x1="521" y1="98" x2="521" y2="140" stroke="#4dd0e1" stroke-width="1.6" marker-end="url(#ar)"/>
+
+  <rect x="150" y="146" width="360" height="46" rx="10" fill="#1c1f28" stroke="#2a2e3a"/>
+  <text x="330" y="174" fill="#e8eaf0" font-size="12.5" font-family="system-ui" text-anchor="middle">引擎「调用」档案，两边各有独立 git，互不污染</text>
+</svg>
+
+<table>
+<tr><th>改什么</th><th>动哪里</th><th>影响面</th></tr>
+<tr><td>引擎升级（模型/字幕/路由）</td><td><span class="path">bin/</span> <span class="path">orchestration/</span> <span class="path">captions/</span> <span class="path">config/</span></td><td>所有 IP 受益，档案一字不改</td></tr>
+<tr><td>个人档案（音色/静帧/参数）</td><td><span class="path">/cfu/ai视频档案库/&lt;IP&gt;/</span></td><td>只影响这个人，引擎不动</td></tr>
+</table>
+
+<h2>二、开机（每天第一件事）</h2>
+
+<div class="grid">
+  <div class="step"><b>第 1 步</b>起网页工作台<br><code>bash bin/start-ui.sh</code></div>
+  <div class="step"><b>第 2 步</b>看它打印的真实地址<br><span class="kbd">端口会自动顺延，别猜</span></div>
+  <div class="step"><b>第 3 步</b>开工自检<br><code>python3 bin/vstudio.py guard 洁斌</code></div>
+</div>
+
+<p>自检会告诉你：参数齐不齐、服务活着没、缺什么素材。<b>自检不过就别出片</b>
+—— 不然十几分钟 GPU 白烧。</p>
+
+<h2>三、接一个新客户</h2>
+
+<p>点界面上「新建档案卡」，跟它说人话就行，比如：</p>
+
+<pre><code>客户是开潮汕牛肉火锅的，馆子叫八合里，老板姓林，四十多岁，
+不愿意上镜，想让我用 AI 给他做个口播号，一周三条，
+发抖音和小红书，主要讲牛肉怎么挑、火锅怎么涮，
+别讲加盟别讲价格，他说话有潮汕口音，语速慢点</code></pre>
+
+<p>AI 会整理成字段，顺手写人设文档。<b>建档时可以同时传素材</b>：</p>
+
+<table>
+<tr><th>传什么</th><th>AI 怎么处理</th></tr>
+<tr><td>人像参考图</td><td>看图写外貌真值（性别/年龄段/脸型/发型/穿着/气质）</td></tr>
+<tr><td>音色音频</td><td><b>实测</b>基频 / 语速 / 响度 / 静音占比</td></tr>
+<tr><td>其它介绍文字</td><td>直接并入上下文</td></tr>
+</table>
+
+<div class="card warn">
+<b>关于音色：这里不「听」，只测</b>
+<p>路由里目前没有音频输入通道（只有文本和图片）。硬让模型描述音色，它只能编一段
+听起来很像的假话 —— 而后面 TTS 会照着这段假描述去克隆，等于给真人安一个
+不存在的嗓音。<b>这比不给更糟。</b></p>
+<p>所以做法是用 ffmpeg 量出客观物理量，再让 LLM 把数值翻译成一句人话。</p>
+</div>
+
+<h2>四、出一支片（六步，顺序别乱）</h2>
+
+<svg viewBox="0 0 680 260" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#4dd0e1"/>
+    </marker>
+  </defs>
+  <g font-family="system-ui" font-size="12">
+    <rect x="22" y="16" width="180" height="42" rx="9" fill="#1c1f28" stroke="#2a2e3a"/>
+    <text x="112" y="42" fill="#e8eaf0" text-anchor="middle">1 · 文案</text>
+
+    <rect x="250" y="16" width="180" height="42" rx="9" fill="#1c1f28" stroke="#2a2e3a"/>
+    <text x="340" y="42" fill="#e8eaf0" text-anchor="middle">2 · 配音 gen_tts</text>
+
+    <rect x="478" y="16" width="180" height="42" rx="9" fill="#1c1f28" stroke="#2a2e3a"/>
+    <text x="568" y="42" fill="#e8eaf0" text-anchor="middle">3 · 字幕 ASR</text>
+
+    <rect x="250" y="104" width="180" height="42" rx="9" fill="#1c1f28" stroke="#2a2e3a"/>
+    <text x="340" y="130" fill="#e8eaf0" text-anchor="middle">5 · 混音 mix_bgm</text>
+
+    <rect x="22" y="104" width="180" height="42" rx="9" fill="#1c1f28" stroke="#2a2e3a"/>
+    <text x="112" y="130" fill="#e8eaf0" text-anchor="middle">4 · 画面 gen_video</text>
+
+    <rect x="478" y="104" width="180" height="42" rx="9" fill="#1c1f28" stroke="#2a2e3a"/>
+    <text x="568" y="130" fill="#e8eaf0" text-anchor="middle">6 · 烧字幕 burn_ass</text>
+  </g>
+  <g stroke="#4dd0e1" stroke-width="1.6" fill="none" marker-end="url(#a2)">
+    <path d="M202,37 L246,37"/>
+    <path d="M430,37 L474,37"/>
+    <path d="M568,58 Q568,80 400,80 L340,80 Q340,100 340,100"/>
+    <path d="M202,125 L246,125"/>
+    <path d="M430,125 L474,125"/>
+  </g>
+  <text x="340" y="196" fill="#6f7688" font-size="11.5" font-family="system-ui" text-anchor="middle">
+    顺序固定：先配音 → 按真实音频对齐字幕 → 再生成画面 → 最后混音烧字
+  </text>
+  <text x="340" y="222" fill="#6f7688" font-size="11.5" font-family="system-ui" text-anchor="middle">
+    ★ 改了中文提示词 → 必须重跑「译成英文」，否则出片用的还是旧英文分镜
+  </text>
+</svg>
+
+<h2>四之二、试片（可选，默认不开）</h2>
+
+<p>正式出片前想先看看「这个人长什么样 / 这段动起来是什么感觉」，用试片台：</p>
+
+<table>
+<tr><th>模式</th><th>怎么跑</th></tr>
+<tr><td>手动</td><td>每一步都要你点一下，过审了才走下一步</td></tr>
+<tr><td>从此处起跑完后面</td><td>从某一步开始，后面自动跑完</td></tr>
+<tr><td>一条龙全自动</td><td>从头跑到尾，中间不停</td></tr>
+</table>
+
+<div class="card warn">
+<b>默认是「手动 + 都不启用」</b>
+<p>定帧和样片都<b>默认关闭</b> —— 不是每一轮都需要，需要的时候再打开。
+想先确认形象就开定帧，想看动态感觉就开样片。</p>
+</div>
+
+<h2>四之三、定帧素材：三条路挑一条</h2>
+
+<p>最难的一步不是「生成」，是<b>写那段英文</b>。所以给了三条路：</p>
+
+<table>
+<tr><th>路</th><th>什么时候用</th><th>要注意</th></tr>
+<tr><td><b>中文描述 → AI 写</b></td><td>手上只有中文：「五十多岁的面馆老板，短发花白，深蓝围裙」</td>
+    <td>AI 补出来的细节（比如它猜了戴不戴眼镜）会列给你，<b>一定要核</b></td></tr>
+<tr><td><b>润色现有英文</b></td><td>已经有一段提示词，只想改得更稳</td>
+    <td>身份特征不会被动到，改的是光线 / 机位 / 质感</td></tr>
+<tr><td><b>引用已有素材</b></td><td>手上已经有客户照片或以前跑出来的静帧</td>
+    <td>只改 ip.json 的指针，<b>原图不动</b>；登记错了改回来就行</td></tr>
+</table>
+
+<h2>四之四、配乐：五条路，默认走「复用」（不再每次重新生成）</h2>
+
+<div class="card">
+<b>一句话：配乐生成一次就够了。</b>
+<p>任何一条路生成完，那首曲子都会<b>自动沉淀</b>进
+<span class="path">&lt;IP&gt;/02_素材真值/配乐/</span>（带来源/种子/时长），
+之后把来源切成 <b>复用已有</b> 挑一首即可 —— <b>0.5 秒出结果，不占显卡</b>，
+原来是几分钟。<br>
+在「声音 · 配音与配乐」面板里能<b>直接试听、点「用这首」</b>，
+选完写进 <span class="path">ip.json</span> 的 <span class="path">bgm.source=reuse</span> +
+<span class="path">bgm.pick=&lt;文件名子串&gt;</span>，以后每次出片都拿这首。</p>
+</div>
+
+<table>
+<tr><th>路</th><th>优点</th><th>代价</th></tr>
+<tr><td><b>reuse 复用已有 ★推荐</b></td><td>0.5 秒、不占显卡、风格稳定（系列片听感统一）</td><td>库里得先有一首</td></tr>
+<tr><td><b>synth 本地合成</b></td><td>几秒出、不占显卡、每次一样</td><td>永远同一首 88 BPM</td></tr>
+<tr><td><b>comfy ComfyUI 生成</b></td><td>本机 MiniMax-Music-3 三件套齐全，按描述生乐</td><td>占显存约 10G，一次几分钟</td></tr>
+<tr><td><b>library 本地曲库</b></td><td>用你已买断 / 已有的曲子，可随机换</td><td>要先在 <span class="path">bgm.library_dir</span> 填目录</td></tr>
+<tr><td><b>online 在线曲库</b></td><td>Jamendo / Freesound 有 API</td><td>要申请 key（界面不给填密钥，防止泄漏）</td></tr>
+</table>
+
+<div class="card warn">
+<b>别指望 Pexels 和 Pixabay 拿音乐</b>
+<p>这两家的 API <b>只有图片和视频，没有音乐端点</b>（实测 Pexels 的 /v1/music 之类全是 404）。
+网页上能下音乐，但 API 走不通。</p>
+</div>
+
+<h2>四之四之二、客户给了新素材：怎么引用、每段能不能用不同的</h2>
+
+<div class="card">
+<b>素材分两级，别混。</b>
+<table>
+<tr><th>级别</th><th>放哪</th><th>管什么</th></tr>
+<tr><td><b>IP 级</b></td><td><span class="path">02_素材真值/</span> 根下</td><td>这个人长什么样：形象底图、起始静帧、8 秒声音参考</td></tr>
+<tr><td><b>套次级</b></td><td><span class="path">02_素材真值/&lt;套次号&gt;/</span></td><td>这条片子专用：门店照、产品照、客户现场照</td></tr>
+</table>
+<p>界面：「创作」标签 → <b>本套素材 · 每段用哪张</b>。上传 → 文件进套次目录、
+清单写 <span class="path">05_文案/&lt;套次&gt;/materials.json</span>。
+<b>没建这份清单时，整片只用起始静帧那一张</b>，跟以前完全一样。</p>
+</div>
+
+<div class="card ok">
+<b>不同分段用不同素材：能，而且是原生的</b>
+<p>H3 每段最多吃 <b>9 张</b>参考图；分段生成时插件会按该段的图片列表重新筛一遍，
+并从 1 <b>重新编号</b> <span class="path">&lt;Picture N&gt;</span>。
+所以：<b>段 2 勾上门店照，出片提示词骨架一个字都不用改</b>，
+那句 <span class="path">&lt;Picture 1&gt;</span> 在第 2 段自动指到门店照。</p>
+<p>已实测：同一条音频、同一个种子，只把第 2 段的参考图换成另一位老者，
+第 2 段出来就是他，其他段还是本人。</p>
+</div>
+
+<div class="card warn">
+<b>⚠ 换了素材，服装和背景不会跟着换</b>
+<p>实测里第 2 段的脸换成了新素材的人，但身上还是提示词描述的「白色对襟衫 + 领夹麦」、
+背景还是原来那间屋子。因为服装/场景是写在提示词骨架里的具体描述，<b>描述压过参考图</b>。<br>
+要让服装背景也跟着变，得同时改 <span class="path">ip.json</span> 的
+<span class="path">video.prompt_vars</span>，或那一段的
+<span class="path">prompts.en.json</span> —— <b>光换图不够</b>。</p>
+</div>
+
+<div class="card warn">
+<b>三个会被拦下来的写法</b>
+<p>① 某段挂了超过 9 张 → 直接报错（不拦的话 H3 会静默丢掉多余的，你以为用了其实没用）<br>
+② 引用了清单里不存在的 id → 报错，并列出已登记的有哪些<br>
+③ 素材路径跑出本 IP 目录 → 报错。<b>禁止跨 IP 引用</b>，否则会把上一位客户的脸串给下一位。</p>
+</div>
+
+<h2>四之五、配音（TTS）：重抽最多的一步，单独给了面板</h2>
+
+<p>配音不对就得重来，来回最多次。面板里能：</p>
+<ul>
+<li>看到这套片子<b>所有候选</b>（新的在上），直接在页面里试听对比</li>
+<li>改语气指令后点 <b>「只重做配音」</b> —— 只跑到留白那一步，<b>不重出画面</b></li>
+<li>想连着后面一起重做，点「从配音开始，后面全重做」</li>
+</ul>
+
+<div class="card">
+<b>改了语气却没变？</b>
+<p>点重做时会自动先把语气指令存进 ip.json。但如果你是直接改的 ip.json，
+记得存完要点「重做配音」才会重抽 —— 光改文件不会触发。</p>
+</div>
+
+<h2>五、界面地图</h2>
+
+<table>
+<tr><th>位置</th><th>是什么</th><th>能干什么</th></tr>
+<tr><td>最左</td><td>IP 列表</td><td>切换客户；点名字进这张卡</td></tr>
+<tr><td>左</td><td>套次树</td><td>这套片子做到哪一步了（6 个阶段）</td></tr>
+<tr><td>中</td><td>看板</td><td>提示词 / 文件 / 素材 / 试片，点标签切换</td></tr>
+<tr><td>右</td><td>对话区</td><td>用自然语言说需求，它会先说「要做什么」等你确认</td></tr>
+<tr><td>右下</td><td>日志</td><td>长任务实时进度，能停</td></tr>
+</table>
+
+<p><b>安全动作 vs 重活</b>：界面上能直接跑的是安全的（重建索引、开新套次、记笔记）；
+出片这类要调模型/显卡的重活，界面<b>只给命令</b>，你复制回终端跑 ——
+不是做不到，是<b>刻意不代跑</b>：看不见它死在哪，比慢更可怕。</p>
+
+<h2>六、七个最常见的坑</h2>
+
+<h3>1. 改了中文提示词，画面没变</h3>
+<p>出片只认 <span class="path">prompts.en.json</span>。中文稿只是给人看的。
+改完必须点「按现在的中文稿重新译」，否则画面用的还是<b>旧的英文分镜</b>
+—— 这是最难查的一类假片。</p>
+
+<h3>2. 提示词里混进汉字，被烧成字幕</h3>
+<p>模型把提示词里的汉字理解成「画面上该出现的字」。S04 那版就是这么烧上去一整行的。
+翻译前后都会过红线校验，含汉字直接<b>整批不落盘</b>（宁可留着旧版，不写半成品）。</p>
+
+<h3>3. 新卡看起来「功能全是坏的」</h3>
+<p>客户卡默认<b>禁止上云</b>（保护客户商业信息），所以 AI 选题/写文案需要本机模型能跑。
+本人 IP 默认允许。要改去卡里的 <span class="path">card.json → policy.allow_cloud_llm</span>。</p>
+
+<h3>4. 写了文案，别的地方看着还是老的</h3>
+<p>文案落盘只有一份：<span class="path">05_文案/&lt;套次&gt;/&lt;套次号&gt;_字幕文本.txt</span>。
+「需求台」面板下半截现在有一块 <b>本套文案</b>，显示的就是这个文件里的真实内容，
+带字数、预估时长、最后修改时间 —— <b>你看到的和出片念的是同一份</b>。</p>
+<p>三个动作的区别，别搞混：</p>
+<ul>
+  <li><b>存文案</b> —— 只改稿子，不给画面</li>
+  <li><b>按文案生成提示词</b> —— 把稿子切成逐段分镜（提示词是<b>快照</b>，改了稿子要重切）</li>
+  <li><b>译成英文</b> —— 出片只认 <span class="path">prompts.en.json</span>，不译就不进片</li>
+</ul>
+<p>目录里若出现两份稿子（旧版命名 <span class="path">目录全名_字幕文本.txt</span>），
+出片只认短名那份；下次保存会自动把旧的那份改名留档，不会删。</p>
+
+<h3>5. 音色描述是「量」出来的，不是猜的</h3>
+<p>没有音频输入通道的模型说得出「低沉有磁性」，但它<b>没在听</b> —— 那是编的。
+项目现在的做法是先用 ffmpeg 量 F0 / 响度 / 静音占比，再让模型把数值翻成人话；
+真要让模型听音色质感，得装 llama.cpp 跑本机已有的 Qwen2.5-Omni。
+细节见 <span class="path">docs/音色识别方案.md</span>。</p>
+
+<h3>6. 出片跑到一半失败，前面白跑了吗</h3>
+<p><b>没白跑。</b>流水线是「按产物断点续跑」的：每一步做完都会在
+<span class="path">07_成片/&lt;套次&gt;/</span> 留下文件，下次开跑时先看产物在不在、
+比上游新不新 —— 在就不重做。所以失败后<b>接着跑只重做失败那一步</b>。</p>
+<p>失败了看运行面板底部，会直接写明：</p>
+<ul>
+  <li><b>停在第几步</b>（例如 <span class="path">video</span>）</li>
+  <li>前面<b>几步的产物还在</b>（可以复用）</li>
+  <li>按钮会变成 <b>「从 video 接着跑」</b> —— 点它就行，不要重新点「出片」</li>
+</ul>
+<p><b>但有一个例外，必须说清楚：</b>H3 出片是<b>一次提交整片</b>
+（<span class="path">segmentConfig.count=N</span>，靠 previous_latent 保证段间连贯），
+ComfyUI 只在最后落一个完整 mp4。所以 <b>video 这一步内部失败，盘上什么都没有</b>，
+只能整段重出。想做成「段级续跑」就得拆成 N 次单段提交 ——
+那样段与段之间的连贯性会掉，画面会跳，不值得。</p>
+<h3>7. 人设到底在哪、会不会被新内容盖掉</h3>
+<p>人设只有一处真源：<span class="path">档案库/&lt;IP&gt;/01_人设与规范/</span> 里的 md。
+面板上显示「<b>N 篇人设 + M 篇参考</b>」—— 加粗的是<b>人设主干</b>
+（文件名带「圣经」的优先，其次「人设」），其余是背景参考资料。</p>
+<p>存的时候分两种，界面上是两个不同的按钮：</p>
+<ul>
+  <li><b>存这一篇（替换）</b> —— 落到你正打开的那一篇，覆盖前自动备份
+      （<span class="path">.bak.时间戳</span>，只留最近 5 份，更早的进 <span class="path">_旧备份/</span>）</li>
+  <li><b>另存为新一篇</b> —— 另起一份，<b>绝不碰任何人</b></li>
+</ul>
+<p>如果不指定也照样安全：后端会<b>自动落到人设主干那一篇</b>，不会另造一份
+<span class="path">人设圣经.md</span> 去跟原有的圣经抢话。
+（同一个 IP 有两份互相矛盾的人设时，AI 是整目录拼起来读的 ——
+它会各信一半，写出来四不像，比没有人设更糟。）</p>
+<p>改完人设<b>不用重跑任何东西</b>，下一次写稿/选题就生效。</p>
+
+<h2>七、常用命令（抄走就用）</h2>
+
+<pre><code>bash bin/start-ui.sh                 # 起网页工作台
+python3 bin/vstudio.py cards         # 看所有档案卡
+python3 bin/vstudio.py status        # 总览 + 服务健康
+python3 bin/vstudio.py guard 洁斌     # 开工自检
+python3 bin/vstudio.py prompts 洁斌 S05 --gen      # 生成提示词
+python3 bin/vstudio.py prompts 洁斌 S05 --optimize # 优化提示词
+python3 bin/vstudio.py prompts 洁斌 S05 --to-en    # 译成英文（出片才认）
+python3 bin/vstudio.py pipeline 洁斌 S05 --from video  # 从失败那步接着跑
+</code></pre>
+
+<div class="card">
+<b>提示词规范</b>
+<p>生图生视频的提示词怎么写才不出岔子，见
+<span class="path">docs/提示词规范-H3与QwenImage21.md</span>
+（从 ComfyUI 的 T8 插件里提纯的官方核心规则）。</p>
+</div>
+
+</div>
+</body>
+</html>

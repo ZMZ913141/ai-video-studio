@@ -156,6 +156,144 @@ def set_dirs(ip_root, setname):
     return {k: os.path.join(ip_root, d[k], setname) for k in ("05", "06", "07", "08")}
 
 
+def landing_path(ip_root, setname):
+    """一套片子**自己的落点**文件（05_文案/<套次目录>/landing.md）。
+
+    ★ 为什么落点要分「IP 级模板」和「套次级成品」两层
+    ----------------------------------------------------
+    2026-10-29 实测踩到的坑：老王的落点只存在 card.json 里一条 ——
+      「到店说一句「刷到你们家视频」，这盘雪花我请你尝。你先吃，合口再来。」
+    这条落点里有**具体货品**（这盘雪花 / 你先吃）。
+    于是 M01（讲牛骨汤）那条片子的落点应该是「这锅汤…你先喝」，
+    但卡里存的是「这盘雪花…你先吃」—— 一套 IP 共用一条落点，
+    写 M01 时把 M02 的落点原样塞进去，观众听到的是「这盘雪花」，
+    前后完全对不上。
+
+    正确结构（参考珠珠那套人设圣经的「结尾固定动作」）：
+      card.json 的 landing_template = **固定骨架**（那句 CTA 的样子）
+      05_文案/<套次>/landing.md       = **这一套的具体落点**（骨架 + 本套的货品词）
+    写稿时：优先用套次自己的 landing.md；没有才用卡里的模板。
+    """
+    base = os.path.join(ip_root, "05_文案")
+    cand = [x for x in (os.listdir(base) if os.path.isdir(base) else [])
+            if x.startswith(setname)]
+    folder = os.path.join(base, cand[0]) if cand else os.path.join(base, setname)
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, "landing.md")
+
+
+def resolve_landing(ip_root, setname=""):
+    """一套片子该用的落点：套次自己的 > 卡里的模板 > 空。
+
+    返回 (落点文本, 来源说明)。来源说明会显示在界面上，
+    让人一眼看出「这句是这套自己的」还是「这是卡的模板，还没为本套定制」。
+    """
+    card = load_card(ip_root) or {}
+    tpl = str(card.get("landing") or card.get("landing_template") or "").strip()
+    if setname:
+        p = landing_path(ip_root, setname)
+        if os.path.exists(p):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    t = f.read().strip()
+                if t:
+                    return t, f"套次自己的落点（{os.path.basename(p)}）"
+            except Exception:
+                pass
+    if tpl:
+        return tpl, "档案卡里的落点模板（还没为本套定制，货品词可能是别的片子的）"
+    return "", ""
+
+
+# ---------- 文案去重（唯一真源） ----------
+def script_norm(s):
+    """归一化：只留文字，去掉所有空白和标点。
+
+    ★ 为什么不能直接用 `line == landing` 比：
+      落点是一整句，但模型常把它拆成两三行写进正文（实测 2026-10-29
+      老王 M02：card.json 里落点是一行「到店说一句…这盘雪花我请你尝。你先吃，合口再来。」，
+      模型在正文里拆成了两行）。整行相等永远匹配不上 → 一行都没删 →
+      最后又把整块落点追加一次 → 观众连听两遍。
+      归一化后按「包含」判定，拆行与否都能认出来。
+    """
+    return re.sub(r"""[\s，。！？、；：""''（）()「」『』【】…—·,.!?;:'"[\]]+""",
+                  "", str(s or ""))
+
+
+def dedupe_script(lines, landing=""):
+    """把稿子里的重复去掉，落点只留一份且必须在最后。
+
+    返回 (lines, 说明)。三道防线：
+      ① 落点去重：任何一行只要（归一化后）包含落点，或落点包含这一行，都算落点，
+         只保留最后一份。
+      ② 尾部通用重复：最后 N 行与前面某段完全重复 → 删掉后面那份。
+         （不针对落点，是给「模型把任意一段写两遍」兜底的。）
+      ③ 落点补齐：真的一处都没有 → 在末尾补上。
+
+    ★ 这是护栏，不是装饰。同一段话在 TTS 里念两遍，观众直接划走；
+      而这事**不报错、不崩，片子照出**，只能靠文本层拦。
+    """
+    notes = []
+    L = [str(x).strip() for x in (lines or []) if str(x).strip()]
+    key = script_norm(landing)
+
+    # ---- ① 落点去重 ----
+    if key:
+        kept, dropped = [], 0
+        for ln in L:
+            n = script_norm(ln)
+            if n and (n in key or key in n):
+                dropped += 1
+                continue
+            kept.append(ln)
+        if dropped:
+            notes.append(f"删掉重复的落点 {dropped} 处")
+        # 最后补一份完整落点
+        if not kept or script_norm(kept[-1]) != key:
+            kept.append(str(landing).strip())
+            notes.append("末尾补上落点")
+        L = kept
+
+    # ---- ② 尾部通用重复 ----
+    # 判据：末尾连续 k 行（归一化后）等于前面某处连续 k 行 → 后面那份删掉。
+    # 从长往短试，先删大段重复。
+    changed = True
+    while changed and len(L) >= 4:
+        changed = False
+        for k in range(len(L) // 2, 1, -1):
+            tail = "".join(script_norm(x) for x in L[-k:])
+            if not tail:
+                continue
+            for i in range(0, len(L) - k):
+                if "".join(script_norm(x) for x in L[i:i + k]) == tail:
+                    L = L[:-k]
+                    notes.append(f"删掉尾部重复 {k} 行")
+                    changed = True
+                    break
+            if changed:
+                break
+
+    # ---- ③ 落点必须真在最后 ----
+    if key and L and script_norm(L[-1]) != key:
+        L.append(str(landing).strip())
+        notes.append("落点不在末尾，挪到最后")
+
+    return L, notes
+
+
+def dedupe_script_text(text, landing=""):
+    """对一整篇稿子文本去重（按行拆 → 去重 → 重拼）。
+
+    ★ 这是**落盘前最后一道闸**。生成端（studio_ai）已经去重过，
+      但稿子还可能被手工改过、或从别处粘进来 —— 只要重复还在，
+      TTS 就会照着念两遍。宁可在这里拦下来报个错，也别出一片口播事故。
+    """
+    raw = str(text or "")
+    lines = [x.strip() for x in raw.splitlines() if x.strip()]
+    out, notes = dedupe_script(lines, landing)
+    return "\n".join(out), notes
+
+
 def job_path(ip_root, setname):
     return os.path.join(set_dirs(ip_root, setname)["05"], "job.json")
 

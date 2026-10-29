@@ -134,7 +134,7 @@ BASE_TEMPLATE = {
 #     ② 更隐蔽的：vstudio.py 通过 IP_REGISTRY 环境变量指路，但任何人**直接**
 #        跑 newip.py（不经 CLI）时仍会写进旧册 → 两份总册分叉，新建的 IP 在
 #        CLI 里查不到。（S05 建档前实测踩到过，旧册被写入脏数据。）
-#   现在默认值直接指向项目册，按本文件位置反推（profiles/<IP>/03_生产脚本/ → 上三层）。
+#   现在默认值直接指向总册，按本文件位置反推（<档案根目录>/<IP>/03_生产脚本/ → 上三层）。
 _HERE = os.path.dirname(os.path.abspath(__file__))
 REGISTRY = os.environ.get("IP_REGISTRY") or os.path.normpath(
     os.path.join(_HERE, "..", "..", "..", "registry.json")

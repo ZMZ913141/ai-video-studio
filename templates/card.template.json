@@ -1,6 +1,6 @@
 {
   "_schema": "ip-card/1.0",
-  "_说明": "档案卡模板。card-new 会按这个骨架生成 profiles/<IP名>/card.json。业务层只放这里，技术真值放 ip.json，两边不重复。",
+  "_说明": "档案卡模板。card-new 会按这个骨架生成 <档案根目录>/<IP名>/card.json。业务层只放这里，技术真值放 ip.json，两边不重复。",
 
   "name": "客户品牌名",
   "type": "客户",
