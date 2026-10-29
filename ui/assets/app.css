@@ -309,6 +309,8 @@ input[type="text"], input[type="number"], select, textarea {
   outline: 0; transition: border-color .18s var(--ease), box-shadow .18s var(--ease);
 }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* 空值/非法值的即时反馈：清空输入框点保存时，框自己先红一下（2026-10-29 加） */
+input.bad, select.bad, textarea.bad { border-color: var(--err); box-shadow: 0 0 0 3px rgba(255, 92, 122, .18); }
 textarea { resize: vertical; min-height: 66px; line-height: 1.6; font-family: var(--mono); font-size: 12px; }
 select option { background: var(--bg-2); }
 input[type="range"] { width: 100%; accent-color: var(--accent); }

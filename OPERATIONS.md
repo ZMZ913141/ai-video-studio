@@ -261,14 +261,29 @@ grep MemAvailable /proc/meminfo        # 中断后内存通常立刻回来
 **静态扫 HTML 没用**：看板里绝大多数按钮是 `app.js` 动态生成的，
 扫源码只能看到 16 个冰山一角。真点一遍才知道点了会不会有反应。
 
-工具在 `.cache/uiprobe/`（已 gitignore）：
+### 10.1 三轮递进（前一轮看不见后一轮的问题）
+
+| 轮次 | 判什么 | 工具 | 2026-10-29 实测 |
+|---|---|---|---|
+| ① 静��交叉 | 按钮 id 在 app.js 里有没有被引用 | 见下方「静态自查」 | 77 个 id **零漏网** |
+| ② 真点（不看后端） | 点了有没有反应 / 有没有抛异常 | `.cache/uiprobe/deep.js` | 1365 次点击，零 console 错误 |
+| ③ 真点（**看后端回什么**） | 后端有没有回 error / 5xx | `.uitest/click_api_effect.js` | 1365 次点击，373 个 api-error **全是设计内护栏** |
+
+★ 第③轮最有价值：前两轮只判「前端有没有反应」，
+**「按钮接上了、但后端逻辑是坏的」这类问题前两轮完全看不见**。
+2026-10-29 就是靠它抓到「清空输入框点保存 → 界面弹 Python 的
+`could not convert string to float: ''`」。
+
+### 10.2 工具
 
 | 脚本 | 干什么 |
 |---|---|
-| `domprobe.js` | 首屏全部按钮真点一遍（干净状态，最快） |
-| `deep.js` | 切 tab × 每个 IP × 每个套次，逐个上下文重扫 |
-| `loop.js` | 完整闭环：写文案 → 等 AI → 「写进这套片子」→ 验证落盘 |
-| `create.js` / `newset.js` | 走前端表单建档 / 建套次 |
+| `.cache/uiprobe/domprobe.js` | 首屏全部按钮真点一遍（干净状态，最快） |
+| `.cache/uiprobe/deep.js` | 切 tab × 每个 IP × 每个套次，逐个上下文重扫 |
+| `.cache/uiprobe/loop.js` | 完整闭环：写文案 → 等 AI → 「写进这套片子」→ 验证落盘 |
+| `.cache/uiprobe/create.js` / `newset.js` | 走前端表单建档 / 建套次 |
+| `.uitest/click_api_effect.js` | **第③轮**：看后端回了什么（.uitest 已 gitignore） |
+| `.uitest/test_empty_value.js` | 单点回归：空值拦截 |
 
 跑法（另开一个终端起看板，用 `--force` 绕开「已有一个实例」守卫）：
 
@@ -276,12 +291,28 @@ grep MemAvailable /proc/meminfo        # 中断后内存通常立刻回来
 python3 bin/ui_server.py --port 8798 --force &
 NODE_PATH=/home/qmr/.workbuddy/binaries/node/workspace/node_modules \
   node .cache/uiprobe/deep.js http://127.0.0.1:8798
+# 第③轮
+NODE_PATH=/home/qmr/.workbuddy/binaries/node/workspace/node_modules \
+  node .uitest/click_api_effect.js http://127.0.0.1:8798
 ```
 
 判定分四档：`api-ok`（点了调了接口）/ `reacted`（界面变了）/ `silent`（毫无反应，**要查**）/
 `js-error`（抛异常，**要查**）。
 
-**坑（都是实测踩的）**：
+### 10.3 静态自查（不点也能查漏）
+
+```bash
+# ① 有没有按钮在 app.js 里完全没被引用（词边界匹配，别用朴素 in）
+#    ⚠ 用 `'btnX' in app` 会漏掉 `$('#btnX')` —— 必须用正则词边界
+# ② 模板里用 data-* 的按钮，有没有消费代码
+#    ⚠ 消费可能是 dataset.setKey（camelCase）或 querySelector('[data-set-key]')
+```
+
+2026-10-29 实测：静态**零漏网**。但静态只能证明「接了」，证明不了「接对了」——
+还是得真点。
+
+### 10.4 坑（都是实测踩的）
+
 - 本沙箱里 **Chromium 一访问看板就崩**（`ERR_INSUFFICIENT_RESOURCES`），
   headless_shell 也被 SIGKILL → **用 jsdom，别用真浏览器**。
 - jsdom 里 `fetch` 要**真转发到后端**，不能用 mock：mock 返回空对象，
@@ -290,6 +321,9 @@ NODE_PATH=/home/qmr/.workbuddy/binaries/node/workspace/node_modules \
   拿旧引用 click 会打在孤儿节点上 → 假的「毫无反应」。
 - **每个上下文之间要重新加载页面**，否则前一个上下文点坏了状态，后面全是假阳性。
 - 危险按钮（停止/重置/删除）**不要点**。
+- ⚠ **沙箱里 pkill 杀不掉主机上的 ui_server**（跨 PID 命名空间），
+  端口会被旧实例占着 → 测新代码要**另起端口**（`--port 8805`），
+  拿旧端口测到的还是旧代码（2026-10-29 就被这个骗过一次）。
 
 ---
 

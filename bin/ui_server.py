@@ -2336,10 +2336,18 @@ class Handler(BaseHTTPRequestHandler):
         # 类型/范围校验
         try:
             t = meta["type"]
-            if t == "int":
-                value = int(value)
-            elif t == "float":
-                value = float(value)
+            if t in ("int", "float"):
+                # ★ 空值要说人话。2026-10-29 实测：用户把输入框清空了点保存，
+                #   原来直接把 Python 的 ValueError 甩到界面上
+                #   （"取值不合法：could not convert string to float: ''"），
+                #   用户看不懂「float」是什么，只知道界面在骂人。
+                sv = ("" if value is None else str(value)).strip()
+                if sv == "":
+                    return self._bad("这里不能空 —— 要恢复原来的值，点右边的「默认」")
+                try:
+                    value = int(sv) if t == "int" else float(sv)
+                except ValueError:
+                    return self._bad(f"要填一个数字（现在是「{sv}」）")
             elif t == "bool":
                 value = bool(value) if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes")
             elif t in ("str", "text"):

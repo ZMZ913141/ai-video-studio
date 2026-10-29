@@ -929,6 +929,16 @@ async function renderLog() {
 async function saveSetting(scope, key, ctrlId, tier) {
   const elv = document.getElementById(ctrlId);
   let value = elv.value;
+  // ★ 空值在本地就拦掉，别让请求飞出去再让后端骂人。
+  //   2026-10-29 实测：清空输入框点保存，界面弹的是 Python 的
+  //   "could not convert string to float: ''"——用户完全看不懂。
+  if (String(value).trim() === '') {
+    elv.classList.add('bad');
+    elv.focus();
+    toast('这里不能空', '要恢复原来的值，点右边的「默认」', 'err');
+    setTimeout(() => elv.classList.remove('bad'), 1600);
+    return;
+  }
   const OK = async (withConfirm) => {
     const r = await api('set', { body: { scope, key, value, path: state.ip, confirm: withConfirm } });
     if (r._needConfirm) {
