@@ -276,12 +276,20 @@ def src_comfy(total, cfg, log):
 
     # 等它跑完
     deadline = time.time() + max(600, total * 12)
+    bad = 0
     while time.time() < deadline:
         time.sleep(3)
         try:
             with urllib.request.urlopen(COMFY + f"/history/{pid}", timeout=20) as r:
                 h = json.load(r)
-        except Exception:
+            bad = 0
+        except Exception as ex:
+            # ★ 服务挂了要报错，不能静默重试到 deadline（同 gen_tts 的坑，2026-10-30）
+            bad += 1
+            if bad >= 10:
+                raise RuntimeError(f"连不上 ComfyUI（{COMFY}）：{type(ex).__name__}: {ex}"
+                                   f"\n  配乐任务 {pid} 拿不到结果，已停止等待。"
+                                   f"\n  先确认：curl -s --noproxy '*' {COMFY}/system_stats")
             continue
         item = (h or {}).get(pid) or {}
         outs = ((item.get("outputs") or {}).get("9") or {}).get("audio") or []

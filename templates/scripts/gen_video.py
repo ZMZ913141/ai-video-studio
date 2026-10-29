@@ -52,6 +52,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 COMFY = "http://127.0.0.1:8188"
@@ -1946,21 +1947,49 @@ def graph(prefix, segs, cues, audio_sec, total_sec, offset=0, full=None, frame_b
 def post(data):
     req = urllib.request.Request(COMFY + "/prompt", data=json.dumps(data).encode(),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as r:
-        return json.loads(r.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as ex:
+        sys.exit(f"✗ ComfyUI 拒收这条出片工作流（HTTP {ex.code}）：\n"
+                 + ex.read().decode("utf-8", "ignore")[:1200])
+    except Exception as ex:
+        sys.exit(f"✗ 提交出片失败：连不上 ComfyUI（{COMFY}）\n"
+                 f"  {type(ex).__name__}: {ex}\n"
+                 f"  先确认它还在跑：curl -s --noproxy '*' {COMFY}/system_stats")
 
 
 def poll(pid, timeout=10800):
+    """等出片结果。
+
+    ★ ComfyUI 挂了必须报错，不能死等 3 小时。2026-10-30 实测：TTS 阶段服务崩掉
+      （内存还有 58G，不是 OOM），轮询永不返回，批量任务静默卡了 12 分钟一个字不打。
+      出片本身可能跑很久，所以阈值放宽到「连续 100 秒连不上」才判死。
+    """
     end = time.time() + timeout
+    t0 = time.time()
+    bad = 0
     while time.time() < end:
         try:
             with urllib.request.urlopen(f"{COMFY}/history/{pid}", timeout=30) as r:
                 h = json.loads(r.read().decode())
-        except Exception:
+            bad = 0
+        except Exception as ex:
+            bad += 1
+            if bad >= 10:
+                sys.exit(f"✗ 连不上 ComfyUI（{COMFY}）：{type(ex).__name__}: {ex}\n"
+                         f"  任务 {pid} 拿不到结果，已停止等待。\n"
+                         f"  先确认还在跑：curl -s --noproxy '*' {COMFY}/system_stats\n"
+                         f"  出片是整片一次提交、盘上不留半成品，服务恢复后要整段重出：\n"
+                         f"    vstudio pipeline <IP> <套次> --from video")
             time.sleep(10)
             continue
         if pid in h:
             return h[pid]
+        waited = int(time.time() - t0)
+        if waited >= 300 and waited % 300 < 16:
+            print(f"  … 已等 {waited // 60} 分钟（出片正常 2–6 分钟/段，"
+                  f"超 20 分钟请看 ComfyUI 日志）")
         time.sleep(15)
     return None
 

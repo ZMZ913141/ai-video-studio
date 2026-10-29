@@ -74,12 +74,20 @@ def post(api, data):
 
 
 def poll(pid, timeout=3600):
+    """等出图结果。服务挂了要报错，别死等（同 gen_tts / gen_video 的坑）。"""
     dl = time.time() + timeout
+    bad = 0
     while time.time() < dl:
         try:
             with urllib.request.urlopen(COMFY + "/history/" + pid, timeout=30) as r:
                 h = json.loads(r.read().decode())
-        except Exception:
+            bad = 0
+        except Exception as ex:
+            bad += 1
+            if bad >= 8:                # 约 64 秒连不上 = 服务没了
+                sys.exit(f"✗ 连不上 ComfyUI（{COMFY}）：{type(ex).__name__}: {ex}\n"
+                         f"  任务 {pid} 拿不到结果，已停止等待。\n"
+                         f"  先确认：curl -s --noproxy '*' {COMFY}/system_stats")
             time.sleep(8); continue
         if pid in h:
             return h[pid]

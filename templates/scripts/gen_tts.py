@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 COMFY = "http://127.0.0.1:8188"
@@ -123,21 +124,48 @@ def graph(prefix, text):
 def post(data):
     req = urllib.request.Request(COMFY + "/prompt", data=json.dumps(data).encode(),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as r:
-        return json.loads(r.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as ex:
+        sys.exit(f"✗ ComfyUI 拒收这条 TTS 工作流（HTTP {ex.code}）：\n"
+                 + ex.read().decode("utf-8", "ignore")[:800])
+    except Exception as ex:
+        # 连不上是最常见的：ComfyUI 没起 / 中途崩了。给一句话，不要甩 traceback
+        sys.exit(f"✗ 提交 TTS 失败：连不上 ComfyUI（{COMFY}）\n"
+                 f"  {type(ex).__name__}: {ex}\n"
+                 f"  先确认它还在跑：curl -s --noproxy '*' {COMFY}/system_stats")
 
 
 def poll(pid, timeout=1800):
+    """等 ComfyUI 返回结果。
+
+    ★ 服务挂了必须**报错退出**，不能死等。2026-10-30 实测：ComfyUI 中途崩掉，
+      这里连不上就 sleep(5) 无限重试，批量任务卡了 12 分钟一个字都不打，
+      人以为在排队，其实在等一个永远不会来的结果（内存还有 58G，不是 OOM）。
+    """
     end = time.time() + timeout
+    t0 = time.time()
+    bad = 0
     while time.time() < end:
         try:
             with urllib.request.urlopen(f"{COMFY}/history/{pid}", timeout=30) as r:
                 h = json.loads(r.read().decode())
-        except Exception:
+            bad = 0
+        except Exception as ex:
+            bad += 1
+            if bad >= 6:              # 连续 30 秒都连不上 = 服务没了
+                sys.exit(f"✗ 连不上 ComfyUI（{COMFY}）：{type(ex).__name__}: {ex}\n"
+                         f"  任务 {pid} 拿不到结果，已停止等待。\n"
+                         f"  先确认它还在跑：curl -s --noproxy '*' {COMFY}/system_stats\n"
+                         f"  起来后接着跑：vstudio pipeline <IP> <套次> --from tts")
             time.sleep(5)
             continue
         if pid in h:
             return h[pid]
+        waited = int(time.time() - t0)
+        if waited >= 60 and waited % 60 < 6:
+            print(f"  … 已等 {waited}s（正常 30–90s；超过 3 分钟请查 ComfyUI 日志）")
         time.sleep(5)
     return None
 
