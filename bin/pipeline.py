@@ -99,6 +99,43 @@ def pick_script_txt(d05):
     return None
 
 
+# ══════════════════════════════════════════ 废品站（不真删）
+# 换地方：export STUDIO_WASTE=/新路径
+WASTE_ROOT = os.environ.get("STUDIO_WASTE") or "/cfu/废品站"
+
+
+def trash(path, tag):
+    """把文件挪进废品站，**永远不用 os.remove**。
+
+    ★ 为什么非要绕这一下：以前这里是 `os.remove(f)` —— 旧的一版当场消失，
+      连后悔的机会都没有。出片这行有一条铁律：**任何删除都先进废品站**，
+      因为「上一版」经常是唯一还能交差的那一版（新版换个种子反而崩了是很常见的）。
+
+    目录按「日期_描述」命名，跟手动清理时的规矩一致。
+    同 rename 失败（跨盘）就退化成复制-删除。
+    """
+    try:
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        dest_dir = os.path.join(WASTE_ROOT, f"{stamp}_{tag}")
+        os.makedirs(dest_dir, exist_ok=True)
+        base = os.path.basename(path)
+        dest = os.path.join(dest_dir, base)
+        n = 1
+        while os.path.exists(dest):
+            rt, ext = os.path.splitext(base)
+            dest = os.path.join(dest_dir, f"{rt}_{n}{ext}")
+            n += 1
+        try:
+            os.replace(path, dest)
+        except OSError:                      # 跨设备：退化成「先拷过去，再删原的」
+            import shutil
+            shutil.copy2(path, dest)
+            os.remove(path)
+        return dest
+    except OSError:
+        return None
+
+
 # ---------------- 编排器 ----------------
 class Pipeline:
     def __init__(self, ip_entry, setname, cfg, tier="std", mode="auto",
@@ -310,6 +347,9 @@ class Pipeline:
         sid = st["id"]
         rec = {"id": sid, "stage": st.get("stage"), "desc": st.get("desc", ""),
                "t0": time.time()}
+        # 废品站目录名要能一眼看出「谁的、哪个套次」——不然几天后废品站里
+        # 一堆同名的 mp3 分不清谁是谁。套次名可能很长（还带冒号），所以只用 jid。
+        ip_tag = f"{self.e['name']}_{self.jid}"
         cmd, env, out, miss = self.step_cmd(st)
         rec["cmd"] = " ".join(cmd)
         rec["env"] = env or None
@@ -416,14 +456,18 @@ class Pipeline:
             # ★ 把这一步**刚生成的空壳产物**清掉。否则下一轮 --from 会把它
             #   当成"已有产物"跳过，然后拿着 0 字节文件往下跑。
             #   只删本步时间窗内新建的、且属于本步 out_glob 的文件，不碰旧文件。
+            #   注：以前是 os.remove 直接删。这些是 0 字节空壳（本步刚写的），
+            #   严格说没价值，但为了「删除只走废品站」这条铁律不被开口子，一并挪过去。
             if out:
+                _tag = f"{ip_tag}_{sid}_失败留下的空壳"
                 for f in glob.glob(out):
                     try:
                         if os.path.isfile(f) and os.path.getmtime(f) >= rec["t0"] - 1:
                             sz = os.path.getsize(f)
-                            os.remove(f)
-                            print(f"    清掉本步产生的半成品：{os.path.basename(f)}"
-                                  f"（{sz} 字节）")
+                            dest = trash(f, _tag)
+                            print(f"    半成品挪进废品站：{os.path.basename(f)}"
+                                  f"（{sz} 字节）"
+                                  + (f" → {os.path.relpath(dest, WASTE_ROOT)}" if dest else ""))
                     except OSError:
                         pass
             if st.get("optional"):
@@ -460,12 +504,16 @@ class Pipeline:
                 # 只清本步 glob 命中的、早于本次开跑的；别的步骤一概不碰 ——
                 # 07_成片 里同一个 jid 还有 raw/成片/混音/字幕版好几种形态。
                 if out and hit and not self.dry:
+                    _tag = f"{ip_tag}_{sid}_重跑前的旧版本"
                     for f in glob.glob(out):
                         try:
                             if os.path.isfile(f) and os.path.abspath(f) != os.path.abspath(hit) \
                                     and os.path.getmtime(f) < rec["t0"] - 1:
-                                os.remove(f)
-                                print(f"    清掉本步的旧版本：{os.path.basename(f)}")
+                                # ★ 以前这里是 os.remove —— 旧版直接没了。
+                                #   现在挪进废品站，51.7s 那版 mp3 还能找回来。
+                                dest = trash(f, _tag)
+                                print(f"    旧版本挪进废品站：{os.path.basename(f)}"
+                                      + (f" → {os.path.relpath(dest, WASTE_ROOT)}" if dest else ""))
                         except OSError:
                             pass
         self.log["steps"].append(rec)

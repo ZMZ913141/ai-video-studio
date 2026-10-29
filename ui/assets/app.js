@@ -55,6 +55,31 @@ function toast(title, body, kind = '') {
   setTimeout(() => { d.style.opacity = '0'; d.style.transform = 'translateY(8px)'; d.style.transition = '.3s'; setTimeout(() => d.remove(), 320); }, 4200);
 }
 
+/* 慢操作的「忙碌锁」（2026-10-30 前端审计补的）
+   ------------------------------------------------------------
+   ★ 为什么必须有：实测点「AI 起草」到出结果要 26 秒，而这 26 秒里按钮既不禁用、
+     页面也完全没有「正在跑」的迹象。小白的反应一定是「没点上」→ 再点一下，
+     于是同一件事提交两次：双倍 token 费，两份草稿还互相覆盖。
+     这里统一三件事：① 按钮立刻变成转圈+在干嘛 ② 期间禁用，双保险防重复提交
+     ③ 无论成功失败都还原（放 finally，不然一抛异常按钮就永久卡在禁用态）。 */
+async function busyBtn(el, doingText, fn) {
+  if (!el) return await fn();
+  if (el.dataset.busy === '1') { toast('已经在跑了', '等这一下出结果再说', ''); return undefined; }
+  const html0 = el.innerHTML;
+  el.dataset.busy = '1';
+  el.disabled = true;
+  el.style.minWidth = Math.max(el.offsetWidth || 0, 72) + 'px';
+  el.innerHTML = `<span class="spin"></span>${esc(doingText)}`;
+  try {
+    return await fn();
+  } finally {
+    el.innerHTML = html0;
+    el.style.minWidth = '';
+    el.disabled = false;
+    delete el.dataset.busy;
+  }
+}
+
 function copyText(t) {
   navigator.clipboard.writeText(t).then(() => toast('已复制', t, 'ok')).catch(() => {
     const ta = document.createElement('textarea');
@@ -3278,13 +3303,15 @@ function bind() {
         '起个文件名。已有的文件不会被改动，新内容写成独立的一份。', '人设-补充.md', '存成新的一篇');
       return void savePersona(nm, 'new');
     }
-    if (e.target.closest('#btnPersonaAI') || e.target.closest('#btnPersonaDraft')) return void aiDraftPersona();
+    if (e.target.closest('#btnPersonaAI') || e.target.closest('#btnPersonaDraft'))
+      return void busyBtn(e.target.closest('button'), '起草中…', aiDraftPersona);
     const pfile = e.target.closest('[data-persona-file]');
     if (pfile) {
       state.personaCur = pfile.getAttribute('data-persona-file');
       return void openPersonaFile(state.personaCur);
     }
-    if (e.target.closest('[data-voice-design]')) return void designVoice();
+    if (e.target.closest('[data-voice-design]'))
+      return void busyBtn(e.target.closest('button'), '设计中…', designVoice);
     // ---- 试片台 ----
     if (e.target.closest('[data-gate]')) {
       const g = e.target.closest('[data-gate]').getAttribute('data-gate');
@@ -3310,7 +3337,8 @@ function bind() {
       if (state.stillMode === 'pick') await renderStillPick();
       return;
     }
-    if (e.target.closest('#btnStillAI')) return void genStillPrompt();
+    if (e.target.closest('#btnStillAI'))
+      return void busyBtn(e.target.closest('button'), '写 / 润色中…', genStillPrompt);
     if (e.target.closest('[data-visual]')) {
       const el = e.target.closest('[data-visual]');
       return void applyVisual(el.getAttribute('data-name'), el.getAttribute('data-visual'));
@@ -3330,7 +3358,8 @@ function bind() {
     }
     if (e.target.closest('#btnBgmSave')) return void saveBgmParams(false);
     if (e.target.closest('#btnBgmRandom')) return void saveBgmParams(true);
-    if (e.target.closest('#btnBgmProbe')) return void probeBgm();
+    if (e.target.closest('#btnBgmProbe'))
+      return void busyBtn(e.target.closest('button'), '生成 12 秒…', probeBgm);
     if (e.target.closest('#btnTtsInstrSave')) return void saveTtsInstr();
     if (e.target.closest('#btnTtsRedoAudio') || e.target.closest('#btnTtsRedoAll')) {
       const only = !!e.target.closest('#btnTtsRedoAudio');
@@ -3339,9 +3368,12 @@ function bind() {
       return void startExec({ kind: 'tts-redo', ip: state.ip, set: state.setId, only_audio: only });
     }
     // 写文案前先把需求存一次：人刚改完需求就点写文案，不先存等于白改
-    if (e.target.closest('#btnScriptGen')) { await saveBrief(false); return void genScript(); }
-    if (e.target.closest('#btnBriefGen')) return void saveBrief(true);
-    if (e.target.closest('#hGuard') || e.target.closest('#btnGuard')) return void runGuard();
+    if (e.target.closest('#btnScriptGen'))
+      return void busyBtn(e.target.closest('button'), '先看需求…', async () => { await saveBrief(false); await genScript(); });
+    if (e.target.closest('#btnBriefGen'))
+      return void busyBtn(e.target.closest('button'), '存并生成…', () => saveBrief(true));
+    if (e.target.closest('#hGuard') || e.target.closest('#btnGuard'))
+      return void busyBtn(e.target.closest('button'), '自检中…', runGuard);
     if (e.target.closest('#hAlgo')) return void showAlgo();
     if (e.target.closest('#hCmd')) {
       // 以前这里是「复制命令」。人真正想点的是「开跑」，而且要先看一眼计划。
@@ -3349,10 +3381,10 @@ function bind() {
     }
     if (e.target.closest('#btnUp')) return void renderFiles(state.fsParent);
     if (e.target.closest('#btnCmdGen')) {
-      return void genPrompts('prompts-gen');
+      return void busyBtn(e.target.closest('button'), '生成中…', () => genPrompts('prompts-gen'));
     }
     if (e.target.closest('#btnCmdOpt')) {
-      return void genPrompts('prompts-opt');
+      return void busyBtn(e.target.closest('button'), '优化中…', () => genPrompts('prompts-opt'));
     }
     if (e.target.closest('#actNote')) {
       return void showNoteDialog();
@@ -3365,7 +3397,20 @@ function bind() {
     // ---- 总沟通对话区 ----
     if (e.target.closest('#dlgSend')) return void sendDialogue();
     if (e.target.closest('#btnDialogueClear')) {
-      state.dialogue = []; renderDialogue(); return;
+      // ★ 以前是「一点就清」：没有确认、没有提示、也找不回来。
+      //   小白手一抖点上去，前面聊了十几轮的需求上下文全没了。
+      //   2026-10-30 改成先问一句，并且明说「丢的是什么、不丢的是什么」。
+      const n = (state.dialogue || []).length;
+      if (!n) { toast('对话区已经是空的'); return; }
+      const ok = await confirmBox(
+        `清空这 ${n} 条对话？`,
+        `<p>清空的是<b>界面上的对话记录</b>，清除后<b>找不回来</b>。</p>
+         <p class="hint" style="margin-top:6px">已经存进档案卡 / ip.json / brief.md 的东西
+         不受影响——那些是确认过的落盘数据。<br>
+         如果只是想把地方腾出来，用这块面板右上角的折叠就行，不用清空。</p>`,
+        '清空');
+      if (!ok) return;
+      state.dialogue = []; renderDialogue(); toast(`已清空 ${n} 条对话`); return;
     }
   });
 }

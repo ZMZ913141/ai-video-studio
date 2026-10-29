@@ -972,3 +972,15 @@ input[type="range"]::-moz-range-thumb {
 
 /* 配乐库行里的播放器：默认 300px 会把整行挤爆 */
 .mat audio { flex:0 0 170px; width:170px; height:28px; }
+
+/* 忙碌锁的小转圈（2026-10-30）
+   AI 起草实测要 26 秒 —— 这期间按钮上得有个东西在动，
+   否则人只能猜「到底点上了没有」。 */
+.spin {
+  display: inline-block; width: 11px; height: 11px; margin-right: 6px;
+  vertical-align: -1px;
+  border: 2px solid rgba(255, 255, 255, .28);
+  border-top-color: currentColor; border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
