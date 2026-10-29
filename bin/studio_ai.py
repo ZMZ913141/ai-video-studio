@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -147,10 +148,18 @@ def ip_context(ip):
             titles.append(f"{s}：{j.get('title') or '（无标题）'}")
     except Exception:
         titles = []
+    # ★ 返工记录（自动学习闭环的「用」那一半）
+    #   以前踩过的坑只活在人脑里和 docs/ 里，模型每次都当没发生过，
+    #   同一个「后段过曝」能返工三次。现在出稿时把历史教训一起给模型。
+    try:
+        from learning import digest as _digest
+        lessons = _digest(ip)
+    except Exception:
+        lessons = ""          # 学习库读不了不该拖垮出稿
     return {
         "name": e["name"], "root": root,
         "persona": persona, "persona_files": pfiles,
-        "card": card, "titles": titles,
+        "card": card, "titles": titles, "lessons": lessons,
     }
 
 
@@ -404,6 +413,9 @@ def write_script(ip, setname="", topic="", tone="", prefer=None, length="standar
 
 # 他的说话习惯
 {chr(10).join('- ' + h for h in habits) if habits else '（没记）'}
+
+# 这个 IP 踩过的坑（真实发生过的返工，不是猜测）
+{ctx.get('lessons') or '（还没有返工记录）'}
 
 # 本号落点
 {landing if landing else '（还没定落点 —— 这次请你按这个客户的业务拟一条，并在 landing_new 标 true）'}
@@ -1366,6 +1378,299 @@ def draft_still_prompt(ip, who, scene="", polish="", prefer=None):
 
 
 # ---------------------------------------------------------------- CLI
+# ══════════════════════════════════════ 素材：AI 自动打标 + 按段匹配
+#
+# 用户的原话是「我提供所有素材，AI 自行调用和匹配」。所以这里不做逐段手勾，
+# 拆成两件事：
+#   ① 逐张看图写标签 —— 只做一次，结果**缓存进 materials.json**，
+#      之后重跑不再花钱重看（视觉调用是这里最贵的一步）。
+#   ② 拿每段的文案分镜 + 素材标签，让模型一次性把素材分到各段，
+#      并且**必须为每一段给出一句理由** —— 人看不见理由就不会信这个分配。
+#
+# ★ 只输出 JSON，不输出 markdown 代码块（_vision_json 会尝试剥，但别依赖）。
+
+ASSET_TAG_SYSTEM = """你是素材管理员，给一张视频素材图写检索用的标签。
+
+这可能是人像，也可能是门店、产品、场景、空镜 —— 别一律当人像写。
+
+看图说话，只写画面上确实存在的东西。没把握写「看不出」，不许编。
+
+输出 JSON：
+  subject       画面主体（一句，如「穿白色对襟衫的中年男性」/「火锅店灶台」）
+  scene         环境背景（一句）
+  composition   构图与机位（如 胸口以上中景、正面、轻微仰拍）
+  light         光线（如 正面柔光、暖色射灯）
+  mood          氛围（如 干净通透、烟火气、安静）
+  is_portrait   是否人物主体（true / false）
+  usable_for    适合用作什么（一句，如「人物出镜的定帧」「门店空镜」）
+  summary       15 字以内概括
+
+★ 全中文。禁止否定式（不许写「不油」「不暗」），一律改成正向说法。
+只输出 JSON，不要 markdown 代码块。"""
+
+ASSET_MATCH_SYSTEM = """你是剪辑师，把客户给的素材分配到视频的每一段。
+
+输入：① 每段的台词与画面描述 ② 素材清单（每张有 AI 看图写出的标签）
+
+分配规则（按重要性）：
+1. 这段在讲什么，就配什么。讲门店配门店照，讲产品配产品照。
+2. 人物口播段优先配本人素材；只有这段明确在讲别的东西时才换。
+3. ★ 没有合适素材的段，一律配人物主素材（清单里标记 _primary 的那张），
+   不要留空 —— 段里没有参考图会让脸直接崩掉。
+4. 一段最多 3 张，按主次排序（第一张是这段的主画面）。
+5. 别为了「每段都不一样」硬换。连续几段用同一张是常态。
+
+输出 JSON：
+{
+  "segments": {"1": ["id1"], "2": ["id2"], ...},
+  "reasons":  {"1": "一句话说明为什么这么配", ...}
+}
+段号写成字符串键。只输出 JSON，不要 markdown 代码块。"""
+
+# 套次级素材目录用的是 jid（套次号，如 M01），不是完整套次名
+_ASSET_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+_PRIMARY_ID = "img"          # 起始静帧的固定 id，跟 gen_video 的兜底一致
+
+
+def _full_set(root, setname):
+    """把用户给的套次（可能是简写）补全成 05_文案 下的真实目录名。"""
+    d05 = os.path.join(root, "05_文案")
+    if os.path.isdir(os.path.join(d05, setname)):
+        return setname
+    if os.path.isdir(d05):
+        for n in sorted(os.listdir(d05)):
+            if n == setname or n.startswith(setname):
+                return n
+    return setname
+
+
+def _jid(setname):
+    m = re.match(r"^([A-Za-z]+\d+)", setname)
+    return m.group(1) if m else setname
+
+
+def tag_asset(path, prefer=None):
+    """给一张素材图写标签。走视觉通道（sensitive=True，不进免费池）。"""
+    return _vision_json(
+        ASSET_TAG_SYSTEM, path,
+        "按系统提示里的字段描述这张素材，只输出 JSON。", prefer=prefer)
+
+
+def match_materials(ip, setname, prefer=None, force_retag=False, apply=True):
+    """扫描本套素材 → 逐张打标 → 按段匹配 → 写回 materials.json。
+
+    返回 {images, segments, reasons, provider, notes, materials_path, tagged}
+    """
+    from vstudio import resolve_ip
+    e = resolve_ip(ip)
+    root = e["path"]
+    full = _full_set(root, setname)
+    jid = _jid(full)
+
+    mdir = os.path.join(root, "02_素材真值", jid)
+    mp = os.path.join(root, "05_文案", full, "materials.json")
+    pj = os.path.join(root, "05_文案", full, "prompts.json")
+
+    out = {"ip": e["name"], "set": full, "dir": mdir, "materials_path": mp,
+           "images": [], "segments": {}, "reasons": {}, "notes": [],
+           "provider": "?", "tagged": 0}
+
+    # ---- ① 收集素材：套次级优先，IP 级兜底 ----
+    doc = {}
+    if os.path.isfile(mp):
+        try:
+            doc = json.load(open(mp, encoding="utf-8")) or {}
+        except Exception:
+            doc = {}
+    known = {x.get("id"): x for x in (doc.get("images") or []) if x.get("id")}
+
+    def _add(file_rel, name, primary=False):
+        it = dict(known.get(_id_of(file_rel, primary), {}))
+        it.update({"id": _id_of(file_rel, primary), "file": file_rel, "name": name})
+        if primary:
+            it["_primary"] = True
+        out["images"].append(it)
+
+    def _id_of(file_rel, primary):
+        return _PRIMARY_ID if primary else ("a%d" % len(out["images"]))
+
+    # 起始静帧（永远在，作为所有段的兜底 —— 见规则 3）
+    still = _read_ip_still(root)
+    if still:
+        it = dict(known.get(_PRIMARY_ID, {}))
+        it.update({"id": _PRIMARY_ID, "file": still,
+                   "name": os.path.basename(still), "_primary": True})
+        out["images"].append(it)
+
+    # 套次级素材
+    if os.path.isdir(mdir):
+        for n in sorted(os.listdir(mdir)):
+            p = os.path.join(mdir, n)
+            if os.path.isfile(p) and os.path.splitext(n)[1].lower() in _ASSET_EXT:
+                rel = os.path.join("02_素材真值", jid, n).replace("\\", "/")
+                dup = [x for x in out["images"] if x["file"] == rel]
+                if not dup:
+                    _add(rel, n)
+
+    if len(out["images"]) <= 1:
+        out["notes"].append(
+            "本套素材目录里还没有图（%s）。先把客户给的图传进去，再点自动分配。" % mdir)
+        return out
+
+    # ---- ② 逐张打标（有缓存就跳过，视觉调用很贵）----
+    for it in out["images"]:
+        if not force_retag and it.get("desc"):
+            continue
+        fp = os.path.join(root, it["file"])
+        if not os.path.isfile(fp):
+            it["desc"] = None
+            out["notes"].append("「%s」找不到了，跳过打标" % it["name"])
+            continue
+        try:
+            desc, prov = tag_asset(fp, prefer)
+            it["desc"] = desc
+            out["provider"] = prov
+            out["tagged"] += 1
+        except Exception as ex:
+            it["desc"] = None
+            out["notes"].append("「%s」没能看图（%s）—— 它还能用，只是按文件名匹配"
+                                % (it["name"], ex))
+
+    # ---- ③ 读分段 ----
+    segs = []
+    if os.path.isfile(pj):
+        try:
+            segs = (json.load(open(pj, encoding="utf-8")) or {}).get("segments") or []
+        except Exception:
+            segs = []
+    if not segs:
+        out["notes"].append("还没有分镜（prompts.json），先去「提示词」生成一次，"
+                            "否则 AI 不知道每段在讲什么。")
+        _save(root, mp, doc, out, apply)
+        return out
+
+    # ---- ④ 一次调用，按段匹配 ----
+    asset_lines = []
+    for it in out["images"]:
+        d = it.get("desc") or {}
+        if d:
+            line = ("- id=%s | %s | 主体：%s | 环境：%s | 适合：%s"
+                    % (it["id"], it["name"], d.get("subject", "看不出"),
+                       d.get("scene", "看不出"), d.get("usable_for", "")))
+        else:
+            line = "- id=%s | %s |（没能看图，只能按文件名猜）" % (it["id"], it["name"])
+        if it.get("_primary"):
+            line += "  ★这是本人主素材，没别的合适就用它"
+        asset_lines.append(line)
+
+    seg_lines = []
+    for s in segs:
+        seg_lines.append("[段%s] 台词：%s\n     画面：%s"
+                         % (s.get("i"), (s.get("line") or "")[:60],
+                            (s.get("prompt") or s.get("line") or "")[:200]))
+
+    question = ("下面是这条片子的分段：\n%s\n\n下面是可用素材：\n%s\n\n"
+                "请按规则把素材分配到每一段，并给每段一句理由。"
+                % ("\n".join(seg_lines), "\n".join(asset_lines)))
+    try:
+        # chat_json 返回的是 (data, provider) 元组 —— 不是 dict。
+        # 2026-10-30 第一次写这里时当 dict 用了，直接 AttributeError。
+        d, prov = chat_json(ASSET_MATCH_SYSTEM, question, prefer=prefer,
+                            max_tokens=1600, temperature=0.3)
+        out["provider"] = prov
+    except Exception as ex:
+        out["notes"].append("匹配失败：%s" % ex)
+        _save(root, mp, doc, out, apply)
+        return out
+
+    ids = {x["id"] for x in out["images"]}
+    seg_map = {}
+    reasons = {}
+    for k, v in (d.get("segments") or {}).items():
+        try:
+            n = int(k)
+        except (TypeError, ValueError):
+            continue
+        picks = [p for p in (v if isinstance(v, list) else [v]) if p in ids]
+        if not picks:                       # 模型给了不存在的 id → 兜底主素材
+            picks = [_PRIMARY_ID] if _PRIMARY_ID in ids else []
+        if picks:
+            seg_map[str(n)] = picks[:3]
+    for k, v in (d.get("reasons") or {}).items():
+        try:
+            reasons[str(int(k))] = str(v)
+        except (TypeError, ValueError):
+            pass
+
+    # 模型漏掉的段，一律兜底主素材 —— 空段会让脸崩
+    for s in segs:
+        key = str(s.get("i"))
+        if key not in seg_map and _PRIMARY_ID in ids:
+            seg_map[key] = [_PRIMARY_ID]
+            reasons.setdefault(key, "AI 没给这一段，自动用本人主素材兜底")
+
+    out["segments"] = seg_map
+    out["reasons"] = reasons
+
+    # ---- ⑤ 用不上的素材要点名说清楚 ----
+    # 2026-10-30 实测：给的门店/汤锅/牛肉三张，AI 一张都没用，全部分配给本人。
+    #   这不是 bug，是分镜决定的：prompts.json 里每一段都写成「人物站在…」，
+    #   都是人物口播段，按规则 2 就该用本人。
+    #   但用户看到「素材白给了」会以为分配坏了 —— 所以必须把原因摆出来，
+    #   并告诉他真正该怎么让素材进片子（改分镜，不是改这里）。
+    used = set()
+    for v in seg_map.values():
+        used.update(v)
+    unused = [it for it in out["images"]
+              if it["id"] not in used and not it.get("_primary")]
+    if unused:
+        out["notes"].append(
+            "有 %d 张素材没被用上（%s）。原因是每一段的分镜都写成「人物口播」，"
+            "按规则口播段优先用本人。要让它们真的进片子，去「提示词」里给对应那一段"
+            "加一句画面描述（比如「镜头切到翻滚的汤锅」），或者在下面手动指定。"
+            % (len(unused), "、".join(x["name"] for x in unused[:4])))
+
+    # ---- ⑥ 写回 ----
+    _save(root, mp, doc, out, apply)
+    return out
+
+
+def _read_ip_still(root):
+    """IP 的起始静帧路径（相对 IP 根）。所有段的兜底素材。"""
+    try:
+        d = json.load(open(os.path.join(root, "ip.json"), encoding="utf-8")) or {}
+    except Exception:
+        return ""
+    rel = ((d.get("visual") or {}).get("still") or "").strip()
+    if not rel:
+        return ""
+    if os.path.isabs(rel) or rel.startswith(".."):
+        return ""
+    return rel.replace("\\", "/")
+
+
+def _save(root, mp, doc, out, apply):
+    """把打标结果和分配结果写回 materials.json。"""
+    # ★ 起始静帧不能写进清单：gen_video 里 BASE_IMAGE_ID 就是「img」，
+    #   它由 ip.json 的 visual.still 提供，不需要（也不允许）在 materials.json 里登记
+    #   —— 写了会撞名，gen_video 直接 exit：「id 不能叫 img」。
+    #   但它在匹配阶段必须留在候选里，那是所有段的兜底，所以只在写回时排除。
+    doc["images"] = [{k: v for k, v in it.items() if not k.startswith("_")}
+                     for it in out["images"] if not it.get("_primary")]
+    doc["segments"] = out.get("segments") or {}
+    # ★ notes 也要存：最要紧的一条是「有 N 张素材没被用上，因为每段都写成口播」。
+    #   这话只在分配那一刻说一次，不存下来人刷新页面就再也看不到了，
+    #   于是就会以为「AI 把我素材弄丢了」。
+    doc["_ai"] = {"at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                  "provider": out.get("provider", "?"),
+                  "reasons": out.get("reasons") or {},
+                  "notes": out.get("notes") or []}
+    if apply:
+        os.makedirs(os.path.dirname(mp), exist_ok=True)
+        json.dump(doc, open(mp, "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=2)
+
+
 def main():
     ap = argparse.ArgumentParser(description="工作室 AI：选题 / 建档草案")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1421,6 +1726,18 @@ def main():
     dv.add_argument("--prefer", default=None)
     dv.add_argument("--json", action="store_true")
     dv.add_argument("--out", default="")
+
+    am = sub.add_parser(
+        "assets",
+        help="本套素材：AI 逐张看图打标，再按文案分镜自动匹配到每段")
+    am.add_argument("ip")
+    am.add_argument("set")
+    am.add_argument("--prefer", default=None)
+    am.add_argument("--retag", action="store_true",
+                    help="已经打过标的也重看一遍（默认复用缓存，省视觉调用的钱）")
+    am.add_argument("--dry", action="store_true", help="只算不写回")
+    am.add_argument("--json", action="store_true")
+    am.add_argument("--out", default="")
 
     a = ap.parse_args()
 
@@ -1545,6 +1862,31 @@ def main():
                 print(f"  备选{i}：{alt}")
             if r["has_negative"]:
                 print(f"⚠ 含否定词 {r['has_negative']} —— TTS 对否定句处理不可靠，建议改成正向描述")
+        elif a.cmd == "assets":
+            r = match_materials(a.ip, a.set, prefer=a.prefer,
+                                force_retag=a.retag, apply=not a.dry)
+            if a.json:
+                print(json.dumps(r, ensure_ascii=False))
+                return
+            print(f"套次 {r['set']}  通道 {r['provider']}  新打标 {r['tagged']} 张")
+            print(f"素材目录 {r['dir']}")
+            print("=" * 62)
+            for it in r["images"]:
+                d = it.get("desc") or {}
+                mark = "★主" if it.get("_primary") else "  "
+                sum_ = d.get("summary") or d.get("subject") or "（没能看图）"
+                print(f" {mark} {it['id']:6s} {it['name'][:34]:34s} {sum_}")
+            print("=" * 62)
+            for k in sorted(r["segments"], key=lambda x: int(x)):
+                print(f"  段{k:>2s} → {' + '.join(r['segments'][k])}")
+                if r["reasons"].get(k):
+                    print(f"        {r['reasons'][k]}")
+            if r["notes"]:
+                print("\n提醒：")
+                for n in r["notes"]:
+                    print("  - " + n)
+            if a.dry:
+                print("\n（--dry：没写回 materials.json）")
     except Exception as ex:
         print(f"✗ {ex}", file=sys.stderr)
         sys.exit(1)

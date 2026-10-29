@@ -1591,6 +1591,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_set_materials_install(body or {})
             if name == "materials-save":
                 return self._api_materials_save(body or {})
+            if name == "assets-match":
+                return self._api_assets_match(body or {})
+            if name == "learn-add":
+                return self._api_learn_add(body or {})
+            if name == "learn-list":
+                return self._api_learn_list(get)
             if name == "bgm-library":
                 return self._api_bgm_library(get)
             if name == "dialogue":
@@ -3268,6 +3274,83 @@ class Handler(BaseHTTPRequestHandler):
             return self._bad(f"写失败：{ex}")
         return self._json({"ok": True, "path": mp, "backup": bak,
                            "images": len(imgs), "segments": len(segdoc)})
+
+    def _api_assets_match(self, body):
+        """AI 自动分配素材：逐张看图打标 → 按文案分镜匹配到每段。
+
+        用户的原话是「我提供所有素材，AI 自行调用和匹配」—— 所以这里不再要求
+        人逐段勾选。但**每一段都会带回一句理由**，人看不见理由就不会信这个分配。
+
+        ★ 走子进程而不是直接 import：打标要调视觉模型，一次几秒、四张就是二十秒，
+          直接 import 会把 UI 线程整个堵住（界面假死）。而且 studio_ai 里那条
+          sensitive=True 的规矩在子进程里一样生效 —— 客户素材不进免费池。
+        """
+        ip = (body.get("ip") or "").strip()
+        setname = (body.get("set") or "").strip()
+        retag = bool(body.get("retag"))
+        dry = bool(body.get("dry"))
+        prefer = (body.get("prefer") or "").strip() or None
+        if not ip or not setname:
+            return self._bad("缺少 IP 或套次")
+        cmd = [sys.executable, os.path.join(BIN_DIR, "studio_ai.py"), "assets",
+               ip, setname, "--json"]
+        if retag:
+            cmd.append("--retag")
+        if dry:
+            cmd.append("--dry")
+        if prefer:
+            cmd += ["--prefer", prefer]
+        try:
+            p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
+                               timeout=600)
+        except subprocess.TimeoutExpired:
+            return self._bad("跑超时了（10 分钟）。素材多的时候打标会慢，"
+                             "可以先把素材精简一下再试。")
+        if p.returncode != 0:
+            return self._bad((p.stderr or p.stdout or "失败").strip()[-500:])
+        try:
+            r = json.loads((p.stdout or "").strip())
+        except Exception:
+            return self._bad("AI 没回 JSON：" + (p.stdout or "")[-300:])
+        r["ok"] = True
+        return self._json(r)
+
+    def _api_learn_add(self, body):
+        """记一条返工教训（自动学习闭环的「记」那一半）。
+
+        ★ 为什么必须问一句原因：不写原因的重跑，等于这次学费白交 ——
+          下一次照样踩同一个坑。写下来，出稿时才能把它喂给模型（见
+          bin/learning.py 的 digest）。
+        """
+        ip = (body.get("ip") or "").strip()
+        kind = (body.get("kind") or "重跑").strip()
+        reason = (body.get("reason") or "").strip()
+        if not ip:
+            return self._bad("缺少 IP")
+        if not reason:
+            return self._bad("原因不能为空 —— 不写原因的记录等于没记")
+        try:
+            import learning
+            rec = learning.add(ip, kind, reason,
+                               setname=(body.get("set") or "").strip(),
+                               step=(body.get("step") or "").strip(),
+                               actor="ui")
+        except Exception as ex:
+            return self._bad(str(ex))
+        return self._json({"ok": True, "rec": rec})
+
+    def _api_learn_list(self, get):
+        """这个 IP 记过哪些教训。界面上给「踩过的坑」看。"""
+        ip = get("ip") or ""
+        if not ip:
+            return self._bad("缺少 IP")
+        try:
+            import learning
+            rows = learning.load(ip, int(get("n") or 30))
+            hab = learning.habits(ip)
+        except Exception as ex:
+            return self._bad(str(ex))
+        return self._json({"rows": rows, "habits": hab, "kinds": list(learning.KINDS)})
 
     def _api_bgm_library(self, get):
         """配乐库：这个 IP 已经攒下来多少首、都是哪来的。

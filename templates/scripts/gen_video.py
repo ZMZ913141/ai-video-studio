@@ -149,7 +149,7 @@ def _image_size(path, fallback=(1088, 1920)):
 def _load_materials():
     """读 materials.json。没有这个文件 → 行为跟加这段之前一字不差。"""
     if not MATERIALS or not os.path.isfile(MATERIALS):
-        return [], {}, [BASE_IMAGE_ID]
+        return [], {}, [BASE_IMAGE_ID], [], {}
 
     try:
         with open(MATERIALS, "r", encoding="utf-8") as f:
@@ -211,10 +211,60 @@ def _load_materials():
         if len(ids) > 9:
             sys.exit(f"✗ materials.json 里 {owner} 挂了 {len(ids)} 张图，H3 上限 9 张"
                      f"（超出的会被静默丢弃，不如现在就说清楚）")
-    return extras, segmap, default_ids
+
+    # ---- 参考视频 ----
+    # 三种用途（插件 README 里写的，源码 _reference_mode 认这三个值）：
+    #   guide    固定 Guide：重叠区按生成时间硬锁，适合**续写 / 保持运动**
+    #   edit     可编辑参考：只作 <Video N> 参考，不硬锁原人物 → 换人 / 换服装 / 换风格
+    #   boundary 仅固定边界：只锁重叠区首尾帧
+    VID_EXT = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
+    vids = []
+    for i, it in enumerate(doc.get("videos") or []):
+        if not isinstance(it, dict):
+            continue
+        vid = str(it.get("id") or "").strip()
+        rel = str(it.get("file") or "").strip()
+        if not vid or not rel:
+            sys.exit(f"✗ materials.json 第 {i+1} 个视频缺 id 或 file")
+        src = IP.abspath(rel)
+        if not os.path.abspath(src).startswith(root + os.sep):
+            sys.exit(f"✗ 参考视频不在本 IP 目录内：{rel}（禁止跨 IP 引用）")
+        if not os.path.isfile(src):
+            sys.exit(f"✗ 参考视频不存在：{src}")
+        ext = os.path.splitext(src)[1].lower()
+        if ext not in VID_EXT:
+            sys.exit(f"✗ 参考视频格式不支持：{src}（要 {'/'.join(sorted(VID_EXT))}）")
+        use = str(it.get("use") or "edit").strip().lower()
+        if use not in ("guide", "edit", "boundary"):
+            sys.exit(f"✗ 参考视频 {vid} 的 use={use!r} 不认识"
+                     f"（只能 guide / edit / boundary）")
+        vids.append({"id": vid, "src": src, "name": os.path.basename(src),
+                     "in_name": f"{TAG}_vid_{vid}{ext}",
+                     "use": use,
+                     "trim_start": float(it.get("trimStart") or 0),
+                     "note": str(it.get("note") or "")})
+
+    vknown = {v["id"] for v in vids}
+    vsegmap = {}
+    for k, v in (doc.get("seg_videos") or {}).items():
+        try:
+            idx = int(k)
+        except (TypeError, ValueError):
+            continue
+        ids = [str(x).strip() for x in (v if isinstance(v, list) else [v])]
+        ids = [x for x in ids if x]
+        if ids:
+            bad = [x for x in ids if x not in vknown]
+            if bad:
+                sys.exit(f"✗ materials.json 的 seg_videos 引用了不存在的视频 id {bad}"
+                         f"（已登记的：{sorted(vknown)}）")
+            vsegmap[idx] = ids
+
+    return extras, segmap, default_ids, vids, vsegmap
 
 
-EXTRA_IMAGES, SEG_IMAGES, DEFAULT_IMAGE_IDS = _load_materials()
+EXTRA_IMAGES, SEG_IMAGES, DEFAULT_IMAGE_IDS, EXTRA_VIDEOS, SEG_VIDEOS = _load_materials()
+VIDEO_BY_ID = {v["id"]: v for v in EXTRA_VIDEOS}
 
 
 def seg_image_ids(i_one_based):
@@ -1744,12 +1794,42 @@ def timeline(segs, cues, audio_sec, total_sec, offset=0, full=None, frame_base=0
     for m in EXTRA_IMAGES:
         images.append({"id": m["id"], "file": f"{REL}/{m['in_name']}",
                        "name": m["name"], "width": m["w"], "height": m["h"]})
+
+    # ---- 参考视频 ----
+    # ★ 定位方式跟图片不一样：图片是「段里点名用哪几张」（按 id），
+    #   视频是「按时间区间摆位置」—— videoClips 自己带 start/duration，
+    #   插件拿它跟 selection 求交集，交集部分才是生效的部分。
+    #   所以这里把视频的时间窗**对齐到它所属的那一段**，段多长它就多长。
+    #
+    #   referenceMode 三种（源码 _reference_mode 只认这三个）：
+    #     guide    硬锁重叠区 → 续写、保持运动
+    #     edit     只作 <Video N> 参考，不硬锁原人物 → 换人 / 换服装 / 换风格
+    #     boundary 只锁重叠区首尾帧
+    vclips = []
+    for k, (s, e) in enumerate(segs):
+        idx = offset + k + 1                      # 绝对段号（1 起）
+        for vid in (SEG_VIDEOS.get(idx) or []):
+            v = VIDEO_BY_ID.get(vid)
+            if not v:
+                continue
+            vclips.append({
+                "id": v["id"], "file": f"{REL}/{v['in_name']}", "name": v["in_name"],
+                "start": round(s / FPS, 4),
+                "duration": round((e - s) / FPS, 4),
+                "trimStart": v["trim_start"],
+                "referenceMode": v["use"],
+            })
+    if vclips:
+        for c in vclips:
+            print(f"   参考视频 {c['id']}（{c['referenceMode']}）"
+                  f" {c['start']}s 起、{c['duration']}s")
+
     return {
         "version": 10, "fps": FPS, "globalPrompt": "",
         "secondPass": True,
         "secondPassModel": UPSCALER, "secondPassHighSteps": 2,
         "selection": {"start": 0, "duration": sel_dur},
-        "videoAudioEnabled": True, "videoClips": [],
+        "videoAudioEnabled": True, "videoClips": vclips,
         "images": images,
         "audios": [{"id": "aud", "file": f"{REL}/{AUDIO_NAME}", "name": AUDIO_NAME,
                     "duration": sel_dur if frame_base else audio_sec,
@@ -1898,6 +1978,13 @@ def prep(audio_sec):
         if not os.path.exists(dst) or md5(dst) != md5(m["src"]):
             shutil.copy2(m["src"], dst)
         print(f"素材 {m['id']}（{m['name']}） →input")
+    # 参考视频同理：不进 input，时间轴里那个 file 就指向一个不存在的路径，
+    # 插件会静默跳过（不报错、也不生效）——「我明明挂了为什么没变化」就是这么来的。
+    for v in EXTRA_VIDEOS:
+        dst = os.path.join(IN_DIR, v["in_name"])
+        if not os.path.exists(dst) or md5(dst) != md5(v["src"]):
+            shutil.copy2(v["src"], dst)
+        print(f"参考视频 {v['id']}（{v['name']}，{v['use']}） →input")
     a = os.path.join(IN_DIR, AUDIO_NAME)
     subprocess.run([FF, "-y", "-i", AUDIO_SRC, "-af", "apad=pad_dur=0.60",
                     "-t", f"{audio_sec}", "-ar", "48000", "-ac", "2", "-b:a", "192k", a],

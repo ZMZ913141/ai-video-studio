@@ -1260,9 +1260,15 @@ async function renderMaterials() {
         style="width:38px;height:56px;object-fit:cover;border-radius:6px">
     </div>`).join('') : '<div class="empty">这个套次还没有自己的素材。上传几张，或从下面「IP 素材」里挑。</div>';
 
+  // AI 上次分配时给的理由 —— 看不见理由，人就不会信这个分配
+  const aiWhy = (mats._ai && mats._ai.reasons) || {};
+  const aiAt = (mats._ai && mats._ai.at) || '';
+  const aiNotes = (mats._ai && mats._ai.notes) || [];
+
   const segRows = segs.length ? segs.map(s => {
     const cur = segMap[String(s.i)] || [];
     const opts = [['img', '起始静帧']].concat(mine.map(x => [x.id, x.id]));
+    const why = aiWhy[String(s.i)] || '';
     return `<div class="mat-seg">
       <div class="ms-head"><b>段 ${esc(String(s.i))}</b>
         <span class="hint">${esc(String(s.t0))}–${esc(String(s.t1))}s</span>
@@ -1271,22 +1277,24 @@ async function renderMaterials() {
         <label class="chk"><input type="checkbox" data-seg="${esc(String(s.i))}" value="${esc(v)}"
           ${(cur.includes(v) || (!cur.length && k === 0)) ? 'checked' : ''}>
           ${k === 0 ? esc(l) : `Picture ${k + 1} · ${esc(l)}`}</label>`).join('')}</div>
+      ${why ? `<div class="mat-why">${ico('spark')} ${esc(why)}</div>` : ''}
     </div>`;
   }).join('') : '<div class="empty">这套还没有分镜（prompts.json）。先出提示词，再来分配素材。</div>';
 
   box.innerHTML = `
     <div class="hint" style="margin-bottom:8px">
-      客户一条片子给了好几张图（门店/产品/不同场景）？传到这里，
-      再给每段勾上「这一段该看哪张」。<b>没建清单时整片只用起始静帧那一张</b>，
-      跟以前完全一样。每段最多 9 张，勾选顺序就是 <span class="mono">&lt;Picture 1/2/3…&gt;</span>
-      的编号（段内从 1 重编，所以提示词不用改）。
+      把客户给的所有素材传进来，点 <b>AI 自动分配</b> —— 它会逐张看懂素材，
+      再按每段文案分镜匹配，并且<b>给每段写一句理由</b>。不满意就在下面改，
+      改哪段都行。<b>没建清单时整片只用起始静帧那一张</b>，跟以前完全一样。
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
       <input type="file" id="matFile" accept="image/*" multiple style="display:none">
-      <button class="btn sm primary" id="btnMatUpload">${ico('plus')} 上传本套素材</button>
+      <button class="btn sm primary" id="btnMatAI">${ico('spark')} AI 自动分配</button>
+      <button class="btn sm" id="btnMatUpload">${ico('plus')} 上传素材</button>
       <button class="btn sm" id="btnMatRefresh">${ico('refresh')} 刷新</button>
-      <span class="hint" id="matUpSub"></span>
+      <span class="hint" id="matUpSub">${files.length ? files.length + ' 张' : ''}${aiAt ? ' · AI 上次分配于 ' + esc(aiAt) : ''}</span>
     </div>
+    ${aiNotes.length ? `<div class="mat-notes">${aiNotes.map(n => '· ' + esc(n)).join('<br>')}</div>` : ''}
 
     <div class="sec-title">本套素材文件（${files.length}）</div>
     <div class="mat-list">${fileRows}</div>
@@ -1320,6 +1328,18 @@ async function renderMaterials() {
   };
 
   $('#btnMatRefresh').onclick = () => renderMaterials();
+  // AI 自动分配：逐张看图打标 + 按分镜匹配。第一次要调视觉模型，20 秒上下，
+  // 所以必须挂忙碌锁 —— 不然人以为按钮坏了（见 busyBtn 那条注释）。
+  $('#btnMatAI').onclick = () => busyBtn(
+    $('#btnMatAI'), 'AI 看懂素材中…', async () => {
+      const r = await api('assets-match',
+        { body: { ip: state.ip, set: state.setId } });
+      if (r.error) { toast('分配失败：' + r.error); return; }
+      const n = Object.keys(r.segments || {}).length;
+      const tag = (r.notes || []).length ? `（${r.notes.length} 条提醒）` : '';
+      toast(`已分配 ${n} 段${tag}`);
+      await renderMaterials();
+    });
   $('#btnMatUpload').onclick = () => $('#matFile').click();
   $('#matFile').onchange = async e => {
     const list = [...(e.target.files || [])];
@@ -3240,7 +3260,20 @@ function bind() {
     if (e.target.closest('#runAgain')) {
       // 失败后点这个 = 接着跑：from 指向失败那一步，且**不带 force** ——
       // 已完成的步骤由 pipeline 按产物自动跳过，不会把 GPU 时间再烧一遍。
-      if (run.retry) return void await startExec({ ...run.retry, confirm: true });
+      if (run.retry) {
+        // ★ 自动学习闭环的「记」那一半：重跑前先问一句为什么。
+        //   不问的话，这次学费白交 —— 下一次照样踩同一个坑。
+        //   填不填都不阻断重跑（留空 = 这次不记）。
+        const why = await askText(
+          '这版哪里不满意？',
+          '写一句原因，会记进这个 IP 的返工记录；以后出稿 AI 会主动避开。留空就不记。',
+          '');
+        if (why && why.trim()) {
+          api('learn-add', { body: { ip: state.ip, kind: '重跑',
+            reason: why.trim(), set: state.setId } });
+        }
+        return void await startExec({ ...run.retry, confirm: true });
+      }
       if (run.payload) return void await startExec({ ...run.payload, confirm: true });
       return;
     }
