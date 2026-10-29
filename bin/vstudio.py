@@ -943,6 +943,8 @@ def cmd_prompts(a):
     for k in ("show", "gen", "optimize", "dry", "json", "to_en", "force"):
         if getattr(a, k, False):
             argv.append("--" + k.replace("_", "-"))
+    if getattr(a, "tier", ""):
+        argv += ["--tier", a.tier]
     if a.seg is not None:
         argv += ["--set", str(a.seg)]
     if a.text:
@@ -953,6 +955,22 @@ def cmd_prompts(a):
 def cmd_algo(a):
     """自适应参数预览：给定片长/档位，算帧数网格、段数、留白、配音增益"""
     import studio_algo as A
+    # ★ 档位优先：段数/单段上限都随档位变（fast 与 std 可能差一段），
+    #   只给 mp 容易和出片用的档位对不上，预览就成了假预览。
+    mp = a.mp
+    tname = (getattr(a, "tier", "") or "").strip()
+    if tname:
+        try:
+            cfg = json.load(open(os.path.join(ROOT, "config", "pipeline.json"),
+                                encoding="utf-8"))
+            t = (cfg.get("tiers") or {}).get(tname)
+            if not t:
+                die(f"没有这个档位：{tname}（可选 fast / pilot / std / high）")
+            mp = float(t.get("mp", mp))
+        except SystemExit:
+            raise
+        except Exception as ex:
+            die(f"读档位失败：{ex}")
     sec = a.sec
     if sec is None:
         e = resolve_ip(a.ip)
@@ -975,11 +993,12 @@ def cmd_algo(a):
             die(f"没给 --sec 也找不到文案：{base}")
         n = len(re.sub(r"\s", "", open(txt, encoding="utf-8-sig").read()))
         sec = n / 3.85
-    p = A.plan(sec, a.mp, target_segs=a.segs)
+    p = A.plan(sec, mp, target_segs=a.segs)
     if a.json:
         print(json.dumps(p, ensure_ascii=False, indent=2))
         return
-    print(f"{a.mp}MP → {p['res'][0]}x{p['res'][1]}（实际 {p['real_mp']}MP）"
+    print(f"{mp}MP{'（档位 ' + tname + '）' if tname else ''}"
+          f" → {p['res'][0]}x{p['res'][1]}（实际 {p['real_mp']}MP）"
           f"{'  [快速档]' if p['fast'] else ''}")
     print(f"  片长 {sec:.1f}s  留白 前 {p['pad_head']}s / 后 {p['pad_tail']}s"
           f"  → 对齐后 {p['padded_sec']}s")
@@ -1279,6 +1298,8 @@ def main():
     p.add_argument("--to-en", dest="to_en", action="store_true",
                    help="把中文分镜译成 prompts.en.json（★出片只认这份英文）")
     p.add_argument("--force", action="store_true", help="与 --to-en 同用：强制重译")
+    p.add_argument("--tier", default="",
+                   help="按哪个出片档位算段数（fast/pilot/std/high）；★段数依赖档位，先定档再出提示词")
     p.set_defaults(func=cmd_prompts)
 
     p = sub.add_parser("algo", help="自适应参数预览（帧数/段数/留白）")
@@ -1286,6 +1307,7 @@ def main():
     p.add_argument("set")
     p.add_argument("--sec", type=float, help="片长秒（不给则按文案字数估）")
     p.add_argument("--mp", type=float, default=1.26)
+    p.add_argument("--tier", default="", help="按档位取 mp（fast/pilot/std/high），优先于 --mp")
     p.add_argument("--segs", type=int)
     p.set_defaults(func=cmd_algo)
 

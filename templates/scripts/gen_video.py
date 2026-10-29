@@ -82,7 +82,13 @@ SEED = int(os.environ.get("SEED", "881208001"))
 PILOT_RAW = (os.environ.get("PILOT") or "").strip().lower()
 PILOT = bool(PILOT_RAW) and PILOT_RAW not in ("0", "false", "off")
 PILOT_SPEC = PILOT_RAW if PILOT else ""
-TARGET_SECS = int(os.environ.get("TARGET_SECS", "5"))   # 目标段数
+# ★ 名字曾经骗人：这串数字是「目标**段数**」，不是「每段多少秒」。
+#   2026-10-30 就有人（我）照字面传了 TARGET_SECS=8 想“每段 8 秒”，结果出了 8 段。
+#   新名 TARGET_SEGS 优先，老名 TARGET_SECS 继续兼容（外部脚本/旧命令不要立刻炸）。
+TARGET_SEGS = int(os.environ.get("TARGET_SEGS") or os.environ.get("TARGET_SECS") or "5")
+if os.environ.get("TARGET_SECS") and not os.environ.get("TARGET_SEGS"):
+    print("  ℹ TARGET_SECS 是旧名，含义是「目标段数」不是秒数；新名 TARGET_SEGS（本片按段数 "
+          f"{TARGET_SEGS} 走）", file=sys.stderr)
 
 # ★ 2026-10-28 晚按用户截图定板：ref2va 底座 + DMD 4step 蒸馏 LoRA + Sage 注意力
 #   换掉原来的 fused_refdelta_turbo8 + nvfp4 CLIP。三点必须一起改，缺一个就白跑：
@@ -840,7 +846,7 @@ def cut_quality(segs, cues, tol=0.25, audio=None, energy=True):
     ★ 为什么必须查（2026-10-27 加）
     重叠帧从 22 改到 5 之后，`maxd = MAXLEN-OVERLAP` 变宽了，但 DP 的均分目标
     `ideal = (total-OVERLAP)*i/n` 也跟着变 → 段数不变时切点会整体平移。
-    S03 实测：OVERLAP=5 且 TARGET_SECS=5（默认）→ 5 段，
+    S03 实测：OVERLAP=5 且 TARGET_SEGS=5（默认）→ 5 段，
     帧 187（7.79s）**切在半句上**，偏离最近停顿 528ms。
     这类问题 DRY 只打印分段表是看不出来的（表里数字全都"合法"），
     必须拿停顿窗口逐点比对，否则要等片出来听感发虚才发现。
@@ -962,7 +968,7 @@ def print_cut_quality(segs, cues):
                        if prevL >= MAXLEN else f"±3 格内无格点落在停顿")
                 print(f"      接缝{idx} 帧{c} 改不动：{why} → 这一段只能这样，"
                       f"或换段数/换 SEG_DURS")
-        print(f"      → 换段数最省事：TARGET_SECS=+1/-1；也可 SEG_DURS 直接给各段秒数")
+        print(f"      → 换段数最省事：TARGET_SEGS=+1/-1；也可 SEG_DURS 直接给各段秒数")
         return False
     return True
 
@@ -1510,6 +1516,12 @@ def _load_seg_en():
             row[k] = v
         if row:
             out[i] = row
+    if out and min(out) < 1:
+        # 段号基准是 1（人写给人看的）。0 起会让整份分镜错位一段，
+        # 而错位的画面「看起来也像在讲」，最难查 —— 宁可不出片。
+        sys.exit(f"✗ prompts.en.json 的段号 i 必须从 1 开始（当前最小是 {min(out)}）\n"
+                 f"  → {p}\n"
+                 f"  修：vstudio prompts <IP> <套次> --to-en --force 重新生成一遍")
     if out:
         print(f"  提示词闭环：采纳 {os.path.basename(p)} 的 {len(out)} 段英文分镜")
         _warn_stale(p, d)
@@ -1560,7 +1572,12 @@ def build_prompt(i, segs, cues, audio_sec):
     start, end = segs[i]
     # 本段若有英文分镜（prompts.en.json），就用它覆盖默认的表情/手势描述。
     # 没有 en 时 pv 就是 PV 本身 —— 走的是改之前那条完全相同的路。
-    en = SEG_EN.get(i) or {}
+    #
+    # ★★ i 是 0 起的循环下标，prompts.en.json 的 "i" 是 1 起的段号（人写给人看的），
+    #   这里必须 +1。2026-10-30 实跑抓到：原来写 SEG_EN.get(i)，导致全是错位一段 ——
+    #   段1 取不到分镜（静默用默认描述）、段2 用了段1 的分镜、最后一段的分镜永远用不上。
+    #   表现是「画面跟台词差半句」，日志一片绿，极难查。
+    en = SEG_EN.get(i + 1) or {}
     pv = dict(PV) if en else PV
     if en:
         pv["expression"] = en.get("expression_en") or PV["expression"]
@@ -1777,9 +1794,9 @@ def timeline(segs, cues, audio_sec, total_sec, offset=0, full=None, frame_base=0
 
     ★ 为什么需要这三个：
     ① offset：PILOT=3 只把第 3 段切成 `segs[-1:]` 交给这里，如果下标从 0 重新数，
-       `i==0` 就会命中「段1 的缓推镜头」，`SEG_EN.get(0)` 会取到**段1 的英文分镜**，
-       素材也取段1那张 —— 「只测第 3 段」测出来的是「段1的提示词 + 段3的时间轴」，
-       等着看末段劣化永远等不到。
+       `i==0` 就会命中「段1 的缓推镜头」，素材也取段1那张 —— 「只测第 3 段」
+       测出来的是「段1的提示词 + 段3的时间轴」，等着看末段劣化永远等不到。
+       （英文分镜按段号取，键是 1 起的，见 build_prompt 里的 +1。）
     ② frame_base：插件硬校验「第 1 段必须从第 0 帧开始、段间无缝且重叠对齐」
        （minimax_h3_finite_segments.py:461）。不平移的话 PILOT=2 直接被拒：
        「Segment 1 must advance in time without gaps」—— 这个功能以前就是坏的。
@@ -1823,6 +1840,11 @@ def timeline(segs, cues, audio_sec, total_sec, offset=0, full=None, frame_base=0
         for c in vclips:
             print(f"   参考视频 {c['id']}（{c['referenceMode']}）"
                   f" {c['start']}s 起、{c['duration']}s")
+        # ★ 2026-10-30 实测：拿一条**已经烧好字幕**的成片当参考视频，模型会照着
+        #   参考画面自己在片子里「画」字（位置还不一定对，可能跑到画面顶部），
+        #   再叠一层正式字幕 → 双层重影。这不是代码错，是素材选错，但片子交出去就是废的。
+        print("   ⚠ 参考视频请用**无字幕的原始素材**：模型会照着参考画面自己生成文字，"
+              "带字的素材会跟正式字幕叠成重影（水印/台标同理）")
 
     return {
         "version": 10, "fps": FPS, "globalPrompt": "",
@@ -2005,7 +2027,7 @@ def main():
     # 段数自适应：默认目标段数排出来的切点若有落在半句上的，就近换个段数重排。
     # 为什么必须做：OVERLAP 从 22 改 5 后 DP 的均分目标变了，段数不变时切点会平移。
     # S03 实测默认 5 段 → 帧 187 切在半句上；改 6 段 → 5/5 全落在停顿。
-    # 用 SEG_FIXED=1 可关掉自适应（手动锁定 TARGET_SECS）。
+    # 用 SEG_FIXED=1 可关掉自适应（手动锁定 TARGET_SEGS）。
     # ★ SEG_OVERRIDE 优先级最高：手动指定分段，完全不做均分。
     #   自动分段是「等长均分 + 切点吸向停顿」，遇到「这段要长、那段要短」的业务需求
     #   就无解 —— 它会为了长度接近而牺牲切点位置。手动模式直接按你给的表走。
@@ -2049,7 +2071,7 @@ def main():
         # 搜索范围 ±4：1.33MP 下 S03 的最优解是 TARGET 5→8（delta=+3），
         # 只搜 ±2 会漏掉。段数再往上加对成片没好处（段越短越容易露馅），故封 ±4。
         for delta in (0, 1, -1, 2, -2, 3, -3, 4, -4):
-            cand_n = TARGET_SECS + delta
+            cand_n = TARGET_SEGS + delta
             if cand_n < 2:
                 continue
             try:
@@ -2063,15 +2085,36 @@ def main():
                 best = (score, cand, cand_n)
             if not bad:
                 break
-        if best and best[2] != TARGET_SECS:
-            print(f"   段数自适应：TARGET_SECS {TARGET_SECS} → {best[2]}（原段数会让切点落在半句上）")
-        segs = best[1] if best else plan_segments(total, cues, TARGET_SECS)
+        if best and best[2] != TARGET_SEGS:
+            print(f"   段数自适应：TARGET_SEGS {TARGET_SEGS} → {best[2]}（原段数会让切点落在半句上）")
+        segs = best[1] if best else plan_segments(total, cues, TARGET_SEGS)
         tot = validate(segs)
     else:
-        segs = plan_segments(total, cues, TARGET_SECS)
+        segs = plan_segments(total, cues, TARGET_SEGS)
         tot = validate(segs)
 
     print(f"{TAG}: 音频 {audio_sec:.2f}s → 输出 {total} 帧 / {total_sec:.3f}s / {len(segs)} 段")
+    # ★★ 英文分镜段数必须与实际出片段数一致，不一致就明确报警。
+    #   以前是 `SEG_EN.get(i) or {}` —— 少了的段静默退回默认描述，画面跟台词对不上，
+    #   日志一片绿，人只会觉得「越到后面越不对」却查不出为什么（2026-10-30 实跑抓到：
+    #   出 3 段、只有 2 段提示词，因为提示词是按「45 字」切的，跟出片段数是两套算法）。
+    if SEG_EN:
+        # 注意基准：SEG_EN 的键是**1 起的段号**（prompts.en.json 的 "i"），
+        # segs 是 0 起的下标 —— 两边比之前必须先 +1，否则永远误报。
+        _need = set(range(1, len(segs) + 1))
+        _missing = sorted(_need - set(SEG_EN))
+        _extra = sorted(set(SEG_EN) - _need)
+        if _missing or _extra:
+            print(f"  ⚠ 英文分镜段数对不上：实际出 {len(segs)} 段，"
+                  f"prompts.en.json 有 {len(SEG_EN)} 段")
+            if _missing:
+                print(f"    第 {','.join(map(str, _missing))} 段没有对应分镜 → 会退回默认描述"
+                      f"（画面与台词不符）")
+            if _extra:
+                print(f"    prompts.en.json 第 {','.join(map(str, _extra))} 段用不上，被忽略")
+            print(f"    修：vstudio prompts <IP> <套次> --gen --tier <本档位> "
+                  f"然后 --to-en --force")
+            print(f"    （段数由档位决定：同一份文案 fast / std 可能差一段）")
     # ★ 每次都必须明确打印「用的是谁的脸」——多 IP 下这是唯一的防混用护栏
     print(f"   静帧 {os.path.basename(STILL_SRC)}")
     if not os.path.isfile(STILL_SRC):

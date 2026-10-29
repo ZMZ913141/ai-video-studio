@@ -103,9 +103,11 @@ def cues_from_srt(path):
     return out
 
 
-def split_by_text(txt, target_chars=45):
-    """没有 SRT 时按句读粗略切段。"""
+def split_by_text(txt, target_chars=45, n_segs=0):
+    """没有 SRT 时按句读粗略切段。给了 n_segs 就切**恰好** n 段。"""
     parts = re.split(r"(?<=[。！？!?；;])", txt)
+    if n_segs and int(n_segs) > 0:
+        return [(0.0, 0.0, s) for s in _split_n(txt, int(n_segs))]
     out, buf = [], ""
     for p in parts:
         buf += p
@@ -117,8 +119,85 @@ def split_by_text(txt, target_chars=45):
     return [(0.0, 0.0, s) for s in out] or [(0.0, 0.0, txt)]
 
 
-def build_segments(ip_root, setname, target_seg_secs=8.0):
-    """按字幕时间轴把文案切成段（每段约 target_seg_secs 秒）。"""
+def _split_n(txt, n):
+    """把文本切成**恰好 n 段**，切点尽量落在标点上。
+
+    ★ 为什么必须「恰好 n 段」：出片段数是 studio_algo.plan() 按音频帧数/MAXLEN
+      算出来的。这里要是按字数随手切，就会出现「出 3 段、只有 2 段提示词」——
+      第 3 段静默退回默认描述，画面跟台词对不上，而且不报错。
+      2026-10-30 实跑 S02（78 字 / 20.75s）抓到：algo 算 3 段，这里只切出 2 段。
+    """
+    n = max(1, int(n or 1))
+    txt = (txt or "").strip()
+    if n == 1 or not txt:
+        return [txt]
+    parts = [p for p in re.split(r"(?<=[。！？!?；;，,、])", txt) if p.strip()]
+    if len(parts) < n:
+        # 句读不够 n 个：按字符硬均分（分镜是给模型看的，不必跟字幕行对齐）
+        size = -(-len(txt) // n)
+        out = [txt[i * size:(i + 1) * size] for i in range(n)]
+        return [x for x in out if x.strip()]
+    total, out, cur, acc, gi = len(txt), [], "", 0, 1
+    for p in parts:
+        cur += p
+        acc += len(p)
+        if gi < n and acc >= total * gi / n - 2:
+            out.append(cur)
+            cur, gi = "", gi + 1
+    if cur.strip():
+        out.append(cur)
+    return out
+
+
+def _split_cues_n(cues, n):
+    """按时间把 cue 序列切成恰好 n 段，切点落在 cue 边界（不切断半句）。"""
+    if not cues:
+        return []
+    n = max(1, int(n or 1))
+    if n == 1:
+        return [(cues[0][0], cues[-1][1], "".join(c[2] for c in cues))]
+    total = cues[-1][1] - cues[0][0]
+    segs, cur, t0, gi = [], [], cues[0][0], 1
+    for c in cues:
+        cur.append(c)
+        if gi < n and c[1] - cues[0][0] >= total * gi / n:
+            segs.append((t0, c[1], "".join(x[2] for x in cur)))
+            cur, t0, gi = [], c[1], gi + 1
+    if cur:
+        segs.append((t0, cur[-1][1], "".join(x[2] for x in cur)))
+    return segs
+
+
+def _default_mp():
+    """提示词段数必须跟出片一致，段数取决于档位分辨率 → 读 pipeline.json 的默认档。"""
+    try:
+        cfg = json.load(open(CFG_PATH, encoding="utf-8"))
+        tier = (cfg.get("defaults") or {}).get("tier", "std")
+        return float(((cfg.get("tiers") or {}).get(tier) or {}).get("mp", 1.26))
+    except Exception:
+        return 1.26
+
+
+def _cps(ip_root):
+    """语速（字/秒）：ip.json 里可覆盖，默认 3.85（TTS 实测均值）。"""
+    try:
+        ip = json.load(open(os.path.join(ip_root, "ip.json"), encoding="utf-8"))
+        v = (ip.get("text") or {}).get("cps") or ip.get("cps")
+        if v:
+            return float(v)
+    except Exception:
+        pass
+    return 3.85
+
+
+def build_segments(ip_root, setname, target_seg_secs=8.0, mp=None, target_segs=None):
+    """把文案切成**与出片段数一致**的段落。
+
+    ★ 段数只认 studio_algo.plan() 这一个算法（出片侧也用它）。这里另搞一套
+      「按 45 字切」的旧逻辑会让两边对不上 —— 见 _split_n 的注释。
+    时长来源：有 SRT 用真实时长，没有就按字数 / 语速估。
+    """
+    import studio_algo as A
     dirs = V.set_dirs(ip_root, setname)
     srt = None
     for pat in (os.path.join(dirs["07"], "*.srt"), os.path.join(dirs["05"], "*.srt")):
@@ -127,16 +206,7 @@ def build_segments(ip_root, setname, target_seg_secs=8.0):
             srt = fs[0]
             break
     cues = cues_from_srt(srt)
-    if cues:
-        segs, cur, t0 = [], [], cues[0][0]
-        for c in cues:
-            cur.append(c)
-            if c[1] - t0 >= target_seg_secs:
-                segs.append((t0, c[1], "".join(x[2] for x in cur)))
-                cur, t0 = [], c[1]
-        if cur:
-            segs.append((t0, cur[-1][1], "".join(x[2] for x in cur)))
-        return segs
+
     txtp = None
     for pat in ("*字幕文本*.txt", "*.txt", "*.md"):
         fs = [f for f in sorted(glob.glob(os.path.join(dirs["05"], pat)))
@@ -144,10 +214,28 @@ def build_segments(ip_root, setname, target_seg_secs=8.0):
         if fs:
             txtp = fs[0]
             break
-    if not txtp:
+    txt = ""
+    if txtp:
+        txt = re.sub(r"\s+", "", open(txtp, encoding="utf-8-sig").read())
+
+    if cues:
+        sec = cues[-1][1]
+    elif txt:
+        sec = len(txt) / _cps(ip_root)
+    else:
         return []
-    txt = re.sub(r"\s+", "", open(txtp, encoding="utf-8-sig").read())
-    return split_by_text(txt)
+
+    try:
+        p = A.plan(sec, float(mp) if mp is not None else _default_mp(),
+                   target_segs=target_segs,
+                   target_seg_secs=float(target_seg_secs))
+        n = int(p["segs"])
+    except Exception:
+        n = max(1, int(round(sec / max(1.0, float(target_seg_secs)))) or 1)
+
+    if cues:
+        return _split_cues_n(cues, n)
+    return [(0.0, 0.0, s) for s in _split_n(txt, n)]
 
 
 # ---------------- LLM ----------------
@@ -419,9 +507,10 @@ def cmd_show(e, setname, as_json):
         print(f"    {s.get('prompt','')}")
 
 
-def do_gen(e, setname, optimize=False, dry=False, as_json=False):
+def do_gen(e, setname, optimize=False, dry=False, as_json=False, mp=None):
     ip_root = e["path"]
-    segs = build_segments(ip_root, setname)
+    # ★ 段数必须跟出片一致：mp 决定单段上限 → 决定段数。不给就用 pipeline.json 的默认档。
+    segs = build_segments(ip_root, setname, mp=mp)
     if not segs:
         sys.exit("✗ 切不出段：05_文案/<套次> 里没有文案 txt，也没有 SRT")
     cfg = load_cfg()
@@ -557,6 +646,9 @@ def main(argv=None):
                     help="把中文分镜译成 prompts.en.json（★出片只认这份英文）")
     ap.add_argument("--force", action="store_true",
                     help="与 --to-en 同用：不管中文稿有没有变都重译一次")
+    ap.add_argument("--tier", default="",
+                    help="按哪个出片档位算段数（fast/pilot/std/high）；不给就读 pipeline.json 的默认档。"
+                         "★ 段数依赖档位：先定档位再出提示词，否则段数会对不上")
     a = ap.parse_args(argv)
 
     e = V.resolve_ip(a.ip)
@@ -576,7 +668,13 @@ def main(argv=None):
         if not ok:
             sys.exit(1)
     elif a.gen or a.optimize:
-        do_gen(e, a.set, optimize=a.optimize, dry=a.dry, as_json=a.json)
+        mp = None
+        if a.tier:
+            t = (load_cfg().get("tiers") or {}).get(a.tier)
+            if not t:
+                sys.exit(f"✗ 没有这个档位：{a.tier}（可选 fast / pilot / std / high）")
+            mp = float(t.get("mp", 1.26))
+        do_gen(e, a.set, optimize=a.optimize, dry=a.dry, as_json=a.json, mp=mp)
     else:
         cmd_show(e, a.set, a.json)
 

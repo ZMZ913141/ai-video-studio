@@ -115,7 +115,7 @@
         "AUDIO": "{audio}",
         "TAG": "{jid}",
         "MP": "{mp}",
-        "TARGET_SECS": "{segs}",
+        "TARGET_SEGS": "{segs}",
         "OVERLAP": "{overlap}",
         "PILOT": "{pilot}",
         "DRY": "{dry}",

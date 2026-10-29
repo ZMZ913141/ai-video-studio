@@ -81,6 +81,10 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 # 音色参考：只收纯音频。视频里虽然也有音轨，但这里要的是「拿来就能当参考音」的东西，
 # 混进 mp4 会让后面 TTS 预处理多一层不确定性。
 AUDIO_EXT = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac", ".opus"}
+# 音色参考音的「逐字稿」：零样本克隆必须「音频 + 同一句的文字」成对，
+# gen_tts.py 第 52-58 行读的就是这个（voice.ref_text / ref_text_file）。
+# 上传时跟音频一样是建档素材，单独成一类，别跟图片/音频混。
+TEXT_EXT = {".txt", ".md"}
 # 参考视频（H3 videoClips）：跟 gen_video.py 里的 VID_EXT 保持一致，
 # 两处必须同一套——界面放过去、出片那边不认，是最冤的一种失败。
 VIDEO_EXT = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
@@ -1050,9 +1054,18 @@ def build_exec(b, want_result=False):
         need_set()
         argv = ["bin/vstudio.py", "prompts", ip, setname,
                 "--gen" if kind == "prompts-gen" else "--optimize"]
+        # ★ 段数由档位决定（fast 与 std 同一份文案可能差一段）。
+        #   不传档位就只能按 pipeline.json 默认档算，跟人实际要跑的档位对不上，
+        #   于是出片时第 N 段没有分镜、静默退回默认描述。界面选了档位就带上。
+        _t = (b.get("tier") or "").strip()
+        if _t:
+            if _t not in ("fast", "pilot", "std", "high"):
+                raise ValueError(f"不认识的档位：{_t}")
+            argv += ["--tier", _t]
         if b.get("dry"):
             argv.append("--dry")
-        return (argv, ("生成提示词 " if kind == "prompts-gen" else "优化提示词 ") + setname,
+        return (argv, ("生成提示词 " if kind == "prompts-gen" else "优化提示词 ") + setname
+                      + (f"·{_t}档" if _t else ""),
                 1 if b.get("dry") else 2, False)
 
     if kind == "prompts-en":
@@ -2106,22 +2119,29 @@ class Handler(BaseHTTPRequestHandler):
             # --to 是"只跑到这里为止"，不是"从这之后重做"，两者别混
             return self._json({"cmdline":
                 f"python3 bin/vstudio.py pipeline {ip} {setname} --tier fast --dry"})
-        if kind not in table:
-            # ★ 别再手写第二张表了：prompts-en 就是这么漏的
-            #   （build_exec 认它、cmdline 表不认 → 前端一点报「未知命令模板」）。
-            #   这里从 build_exec 反推一条能用的命令行，保证两边不会各说各话。
-            #   ★ 要把整个 body 透传，别只挑 kind/ip/set —— 批量这类动作还带着
-            #     topics/count/dry，漏了就会拼出「选题和数量都没填」的空命令。
-            try:
-                argv, label, _tier, _ = build_exec(dict(body))
-                if argv:
-                    return self._json({"cmdline": " ".join(argv),
-                                       "note": "这条命令由执行器推导（不在手写表里）"})
-            except Exception as e:
-                # 透出真实原因，别只说「未知命令模板」——那等于让人猜
-                return self._bad(f"这个动作不能拼成命令行：{e}")
-            return self._bad("未知命令模板")
-        return self._json({"cmdline": table[kind]})
+        # ★ 优先走执行器：命令行拼装**只能有一份真源**（build_exec）。
+        #   手写表天然会漏参数 —— prompts-en 漏过一次，prompts-gen 的 --tier
+        #   又漏了一次（界面选了 fast、命令行里没有，等于没选）。
+        #   真跑走的也是 build_exec，这里和它同源才不会「给人看的命令 ≠ 实际执行的命令」。
+        _err = None
+        try:
+            argv, label, _tier, _ = build_exec(dict(body))
+            if argv:
+                return self._json({"cmdline": " ".join(argv),
+                                   "note": "由执行器推导（与真实执行同一条拼装逻辑）"})
+        except Exception as e:
+            _err = e
+            # ★ 参数级错误（档位不认识 / 缺 set / 数量没填）必须当场报出来，
+            #   不能回落手写示例 —— 否则「预览说能跑、真跑报错」又成两张皮。
+            _m = str(e)
+            if any(k in _m for k in ("不认识", "缺少", "必须", "没填", "不合法", "只能是")):
+                return self._bad(f"这个动作不能拼成命令行：{_m}")
+        if kind in table:
+            # 执行器本来就没有命令行（只读动作）→ 才回落手写示例
+            return self._json({"cmdline": table[kind]})
+        if _err:
+            return self._bad(f"这个动作不能拼成命令行：{_err}")
+        return self._bad("未知命令模板")
 
     # ---------- 字体 ----------
     def _api_fonts(self, get):
@@ -2744,10 +2764,11 @@ class Handler(BaseHTTPRequestHandler):
             mime = str(f.get("mime") or "")
             kind = ("image" if mime.startswith("image/") or ext in IMAGE_EXT else
                     "audio" if mime.startswith("audio/") or ext in AUDIO_EXT else
-                    "video" if mime.startswith("video/") or ext in VIDEO_EXT else "")
+                    "video" if mime.startswith("video/") or ext in VIDEO_EXT else
+                    "text" if (mime.startswith("text/") or ext in TEXT_EXT) else "")
             data = f.get("data") or b""
             if not kind:
-                rejected.append({"name": raw_name, "why": "不是图片 / 音频 / 视频"})
+                rejected.append({"name": raw_name, "why": "不是图片 / 音频 / 视频 / 逐字稿txt"})
                 continue
             if not data:
                 rejected.append({"name": raw_name, "why": "空文件"})
@@ -2829,7 +2850,8 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             uids.append(uid)
             kind = str(m.get("kind") or "")
-            role = str(m.get("role") or ("ref" if kind == "audio" else "portrait"))
+            role = str(m.get("role") or ("ref_text" if kind == "text"
+                                         else "ref" if kind == "audio" else "portrait"))
             ext = os.path.splitext(saved)[1].lower()
 
             if kind == "audio":
@@ -2856,12 +2878,28 @@ class Handler(BaseHTTPRequestHandler):
                     shutil.copy2(src, dest)
                 except Exception:
                     continue
+            elif kind == "text":
+                # 逐字稿：跟参考音成对，落到 02_素材真值/<short>_声音参考_逐字稿.txt，
+                # 内容同时写进 ip.json 的 voice.ref_text（gen_tts.py 直接读它做克隆）。
+                # ★ 必须同时读内容：只落文件不写 ref_text 的话，跑 TTS 时若有人用
+                #   环境变量或旧版脚本，就会拿到空逐字稿，克隆跑偏还不报错。
+                dest = os.path.join(outdir, "%s_声音参考_逐字稿.txt" % short)
+                try:
+                    shutil.copy2(src, dest)
+                except Exception:
+                    continue
             else:
                 continue
 
-            moved.append({"kind": kind, "role": role,
-                          "dest_name": os.path.basename(dest),
-                          "rel": os.path.relpath(dest, root)})
+            ent = {"kind": kind, "role": role,
+                   "dest_name": os.path.basename(dest),
+                   "rel": os.path.relpath(dest, root)}
+            if kind == "text":
+                try:
+                    ent["text"] = open(dest, encoding="utf-8-sig").read().strip()
+                except Exception:
+                    ent["text"] = ""
+            moved.append(ent)
 
         # 入库后清掉暂存：里面是客户原始素材，不该在缓存里留副本
         for uid in set(uids):
@@ -2885,6 +2923,14 @@ class Handler(BaseHTTPRequestHandler):
             elif m["kind"] == "audio":
                 cfg.setdefault("voice", {})
                 cfg["voice"]["ref_audio"] = m["rel"]
+            elif m["kind"] == "text":
+                cfg.setdefault("voice", {})
+                cfg["voice"]["ref_text_file"] = m["rel"]
+                if m.get("text"):
+                    cfg["voice"]["ref_text"] = m["text"]
+                    cfg["voice"]["_ref_text_note"] = (
+                        "必须与 ref_audio 是同一句，否则音色克隆跑偏。"
+                        "建档时由上传的逐字稿写入；改音频必须同步改这里或重传逐字稿。")
         with open(cp, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
 
@@ -2896,6 +2942,9 @@ class Handler(BaseHTTPRequestHandler):
         missing = []
         if not voice.get("ref_audio"):
             missing.append("音色参考音")
+        elif not (voice.get("ref_text") or voice.get("ref_text_file")):
+            # 有参考音却没同一句的逐字稿 —— TTS 克隆会跑偏，建档当下就要点破
+            missing.append("参考音的逐字稿txt")
         if not (voice.get("tts") or {}).get("instruction"):
             missing.append("音色语气指令")
         if not visual.get("still"):

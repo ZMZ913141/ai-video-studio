@@ -16,7 +16,11 @@
 set -uo pipefail
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PORTFILE="${TMPDIR:-/tmp}/vstudio-ui.json"
+# ★ 纸条位置必须跟服务端写的一致（ui_server.py 的 PORTFILE = .cache/ui.port.json）。
+#   以前这里读的是 /tmp/vstudio-ui.json —— 服务端早搬走了，脚本还读老地方，
+#   于是 --status/--stop 永远看不见已有实例（重启、换终端、/tmp 被清之后尤甚），
+#   再点一次启动就又起一个，端口一路顺延，人对着旧页面改半天没反应。
+PORTFILE="$BASE/.cache/ui.port.json"
 LOGDIR="$BASE/.cache/ui"
 LOG="$LOGDIR/server.log"
 

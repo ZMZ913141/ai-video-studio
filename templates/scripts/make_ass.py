@@ -277,15 +277,25 @@ if __name__ == "__main__":
         if _ov:
             print("  字号覆盖（本 IP 的 ip.json）：" +
                   " ".join(f"{k} {v['from']}→{v['to']}" for k, v in _ov.items()))
-        # ★ 字号溢出会让字幕被切掉/压边。以前 ip.json 的字号是死的所以看不出来，
-        #   现在真生效了，就必须在烧之前拦下来（2026-10-29 实测：老王抄了 87，
-        #   而它出片 544 宽，安全区只有 438px，87×7 字就 454px → 必溢出）。
+        # ★ 字号溢出会让字幕被切掉/压边，所以必须在烧之前查。
+        #   但「查到就 exit 2」会把整条流水线停在这一步 —— 只是字幕样式而已，
+        #   试片/低分辨率尤其容易撞（2026-10-30 实跑 S02 fast：52 号字在 544 宽要 465px，
+        #   安全区只有 438px，视频/音频/配乐全都做好了，就卡在字幕上）。
+        #   默认改成「自动降到安全字号 + 明确告警」，定板值仍留在 ip.json 不动；
+        #   要严格失败（正式片验收）就 STRICT_FONT=1。
         _ok, _msg, _suggest = S.check_font_fit()
         if not _ok:
-            print(f"\n✗ {_msg}", file=sys.stderr)
-            print(f"  建议字号 ≤ {_suggest}（按安全区 {S.SAFE_RIGHT - S.SAFE_LEFT}px 反算）", file=sys.stderr)
-            print("  改 ip.json 的 subtitle.fs_cue，或把它设成 null 用引擎定板值。\n", file=sys.stderr)
-            sys.exit(2)
+            _strict = (os.environ.get("STRICT_FONT") or "").strip().lower() \
+                not in ("", "0", "false", "off", "no")
+            if _strict:
+                print(f"\n✗ {_msg}", file=sys.stderr)
+                print(f"  建议字号 ≤ {_suggest}（按安全区 {S.SAFE_RIGHT - S.SAFE_LEFT}px 反算）", file=sys.stderr)
+                print("  改 ip.json 的 subtitle.fs_cue，或把它设成 null 用引擎定板值。\n", file=sys.stderr)
+                sys.exit(2)
+            print(f"  ⚠ {_msg}", file=sys.stderr)
+            print(f"    → 本片自动降到 {_suggest} 号（ip.json 定板值没动，正式片不受影响）。"
+                  f"要严格失败请设 STRICT_FONT=1", file=sys.stderr)
+            S.FS_CUE = _suggest
         print(f"  字幕画布 {W_}x{H_}  正文字号 {S.FS_CUE}  标题 {S.FS_TITLE}")
     tag, srt, out = sys.argv[1], sys.argv[2], sys.argv[3]
     ev, warns = build(tag, srt, out)

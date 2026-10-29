@@ -158,12 +158,20 @@ function setRunState(st, extra) {
 async function startExec(payload, opts = {}) {
   let r = await api('exec', { body: payload });
   if (r._needConfirm) {
-    const ok = await confirmBox('这一步要花点东西，确认跑？', `
+    // ★ 确认按钮文案随动作走：写文案 / 写提示词这类只是调 LLM，喊「跑」像要烧 GPU，
+    //   小白探针时差点误点取消。出片 / 批量这种真烧显卡的，叫「开始跑」才对得上分量。
+    const lbl = (r.label || '');
+    let yesText = '开始跑';
+    if (/写篇|起草|文案/i.test(lbl)) yesText = '就写这份';
+    else if (/提示词|prompt/i.test(lbl)) yesText = '就生成';
+    else if (/音色|tts|配音/i.test(lbl)) yesText = '就试这版';
+    else if (/定帧|sample/i.test(lbl)) yesText = '就跑这张';
+    const ok = await confirmBox('这一步要花点东西，确认？', `
       <div><b>${esc(r.label || '')}</b></div>
       ${r.why ? `<div class="hint" style="margin-top:8px">${esc(r.why)}</div>` : ''}
       <div class="hint" style="margin-top:8px">${esc(r.note || '')}</div>
-      <div class="hint" style="margin-top:8px">跑起来之后日志就在右下角，随时能停。</div>`,
-      '开始跑');
+      <div class="hint" style="margin-top:8px">日志在右下角运行抽屉，随时能停。</div>`,
+      yesText);
     if (!ok) return null;
     r = await api('exec', { body: { ...payload, confirm: true } });
   }
@@ -761,9 +769,22 @@ function renderPrompts() {
         <span class="tag">每段都带，不必重复写</span></div>
         <div class="tx">${esc(state.cfg.pipeline.global_prompt.prefix)}</div></div>` : '';
 
-  if (!segs.length) { box.innerHTML = warn + gp + '<div class="empty">文件里没找到分段</div>'; return; }
+  // ★ 段数随档位变：同一份文案 fast / std 可能差一段。段数对不上时，
+  //   多出来的段会静默退回默认描述（画面跟台词不符），所以这里必须让人看见
+  //   「按哪个档算的段」，并且生成时就带着这个档位下去。
+  const tierRow = `<div class="hint" style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span>按</span>
+      <select id="prTier" style="width:auto">
+        ${[['std', '正式 std（1.26MP）'], ['fast', '快速 fast（0.5MP 试片）'],
+           ['pilot', '样片 pilot（只出第 1 段）']].map(([v, l]) =>
+          `<option value="${v}" ${(state.prTier || 'std') === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+      </select>
+      <span>档算段数（现在是 ${segs.length} 段）。换档位后要重新「AI 生成」，段数才会跟着变。</span>
+    </div>`;
 
-  box.innerHTML = warn + gp + segs.map((raw, i) => {
+  if (!segs.length) { box.innerHTML = warn + tierRow + gp + '<div class="empty">文件里没找到分段</div>'; return; }
+
+  box.innerHTML = warn + tierRow + gp + segs.map((raw, i) => {
     const s = typeof raw === 'string' ? { prompt: raw } : raw;
     const n = s.i ?? (i + 1);
     const gi = gmap[String(n)] || {};
@@ -802,6 +823,11 @@ function renderPrompts() {
       </div>
     </div>`;
   }).join('');
+
+  // 选了档位就记住：面板重绘（切套次/刷新）后不该把人的选择弹回去。
+  // genPrompts 里虽然也读 DOM，但那是「点生成的那一刻」，切走再回来就丢了。
+  const ts = $('#prTier');
+  if (ts) ts.addEventListener('change', e => { state.prTier = e.target.value; });
 }
 
 async function savePromptSeg(n) {
@@ -2604,7 +2630,13 @@ function showScriptResult(r) {
     await refreshSet();
     // 让新稿子直接落到眼皮底下：切到「创作」组，滚到需求台
     openMidTab('create');
-    $('#briefBox')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // ★ scrollIntoView 也要可选链：某些嵌入 webview / jsdom 没有这个方法，
+    //   写死调用会在「写进这套片子」成功后抛异常、打断后续刷新（实测踩到）。
+    //   滚动只是锦上添花，不该让它拖垮整条落盘流程。
+    const bb = $('#briefBox');
+    if (bb && typeof bb.scrollIntoView === 'function') {
+      bb.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
   };
 }
 
@@ -2633,7 +2665,10 @@ async function genPrompts(kind) {
       `05_文案/${dir}/ 里没有 txt，07_成片 里也没有 srt。`
       + `提示词是照着文案逐段切的 —— 先把文案放进去，再点这里。`, 'err');
   }
-  await startExec({ kind, ip: state.ip, set: state.setId }, {
+  // ★ 带上档位：段数由档位决定，不带就只能按默认档算，跟实际出片档位对不上。
+  const tier = ($('#prTier') && $('#prTier').value) || state.prTier || 'std';
+  state.prTier = tier;
+  await startExec({ kind, ip: state.ip, set: state.setId, tier }, {
     then: async d => { if (d.state === 'done') { await loadPrompts(); renderPrompts(); } },
   });
 }
@@ -2917,13 +2952,15 @@ function showNewCard() {
     <div class="hint" style="margin-bottom:8px">
       人像参考图会被看图写成外貌真值；音色音频会被<b>实测</b>基频 / 语速 / 响度
       —— 不是让模型「听一遍」，路由里没有音频输入通道，
-      硬听只会编出一段假音色，而后面 TTS 会照着假描述去克隆。
+      硬听只会编出一段假音色，而后面 TTS 会照着假描述去克隆。<br>
+      <b>音色音频请配一份逐字稿 txt</b>（就是那段录音念的原话，一行一句）——
+      零样本克隆要「音频 + 同一句文字」成对，缺了逐字稿克隆会跑偏。
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <button class="btn sm" id="ncPick">${ico('plus')} 选择文件</button>
-      <span class="hint" id="ncPickSub">图片 png/jpg/webp · 音频 wav/mp3/flac/m4a，可多选</span>
+      <span class="hint" id="ncPickSub">图片 png/jpg/webp · 音频 wav/mp3/flac/m4a · 逐字稿 txt/md，可多选</span>
     </div>
-    <input type="file" id="ncFile" multiple accept="image/*,audio/*" hidden>
+    <input type="file" id="ncFile" multiple accept="image/*,audio/*,.txt,.md,text/*" hidden>
     <div id="ncFiles" class="mat-list"></div>
 
     <label class="field" style="margin-top:10px"><span>其它介绍（补充上面没说到的）</span>
@@ -2999,11 +3036,25 @@ function renderNewCardFiles() {
       ${f.kind === 'image'
         ? `<img class="mth" loading="lazy" src="${previewSrc(f.path)}"
                 onerror="this.style.display='none'">`
+        : f.kind === 'text'
+        ? `<span class="mk" style="background:#8b7cf6">文</span>`
         : `<span class="mk audio">音</span>`}
       <span class="mn" title="${esc(f.name)}">${esc(f.name)}</span>
       <span class="ms">${humanSize(f.size)}</span>
       <button class="btn icon sm" data-rm="${i}" title="移除">${ico('close')}</button>
     </div>`).join('');
+  // 有参考音却没逐字稿（或反之）：点破配对，别让人以为传了音频就完事
+  const hasAudio = files.some(f => f.kind === 'audio');
+  const hasText = files.some(f => f.kind === 'text');
+  if (hasAudio && !hasText) {
+    box.insertAdjacentHTML('beforeend',
+      `<div class="hint" style="color:var(--warn,#e3a008);margin-top:4px">
+        ${ico('alert')} 传了音色音频，还差一份「逐字稿 txt」（那段录音念的原话）。</div>`);
+  } else if (hasText && !hasAudio) {
+    box.insertAdjacentHTML('beforeend',
+      `<div class="hint" style="color:var(--warn,#e3a008);margin-top:4px">
+        ${ico('alert')} 逐字稿要配对应的「音色音频」才有用。</div>`);
+  }
   $$('#ncFiles [data-rm]').forEach(b => {
     b.onclick = () => {
       s.files.splice(+b.dataset.rm, 1);
@@ -3012,7 +3063,7 @@ function renderNewCardFiles() {
       if (sub) {
         sub.textContent = s.files.length
           ? `已传 ${s.files.length} 个`
-          : '图片 png/jpg/webp · 音频 wav/mp3/flac/m4a，可多选';
+          : '图片 png/jpg/webp · 音频 wav/mp3/flac/m4a · 逐字稿 txt/md，可多选';
       }
     };
   });
@@ -3113,7 +3164,8 @@ function showNewCardDraft(r, rawText) {
           uid: nc.uid || '',
           saved: f.saved,
           kind: f.kind,
-          role: f.kind === 'audio' ? 'ref' : (f.role || 'portrait'),
+          role: f.kind === 'audio' ? 'ref'
+              : f.kind === 'text' ? 'ref_text' : (f.role || 'portrait'),
         })),
       }
     });
@@ -3285,7 +3337,8 @@ function showNewCardManual(prefill, fromDraft) {
           uid: nc.uid || '',
           saved: f.saved,
           kind: f.kind,
-          role: f.kind === 'audio' ? 'ref' : (f.role || 'portrait'),
+          role: f.kind === 'audio' ? 'ref'
+              : f.kind === 'text' ? 'ref_text' : (f.role || 'portrait'),
         })),
       }
     });
@@ -3785,7 +3838,10 @@ function bind() {
       // 需求台和声音面板同在「创作」组，切组后滚到文案输入处。
       openMidTab('create');
       const st = $('#scriptText');
-      if (st) { st.scrollIntoView({ behavior: 'smooth', block: 'center' }); st.focus({ preventScroll: true }); }
+      if (st) {
+        if (typeof st.scrollIntoView === 'function') st.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (typeof st.focus === 'function') { try { st.focus({ preventScroll: true }); } catch (_) { try { st.focus(); } catch (_) {} } }
+      }
       return;
     }
     if (e.target.closest('#btnTtsRedoAudio') || e.target.closest('#btnTtsRedoAll')) {
@@ -3799,7 +3855,7 @@ function bind() {
         toast('这套还没有文案', '先去需求台写一句，或让 AI 起一稿，再回来配音', 'err');
         openMidTab('create');
         const st = $('#scriptText');
-        if (st) st.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (st && typeof st.scrollIntoView === 'function') st.scrollIntoView({ behavior: 'smooth', block: 'center' });
         return;
       }
       await saveTtsInstr(true);          // 「改了没生效」的头号成因：改了不存就重抽

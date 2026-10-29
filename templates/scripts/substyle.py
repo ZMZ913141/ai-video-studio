@@ -149,12 +149,23 @@ def font_of(kind):
 #   应用时机：**set_size() 之后**。因为 set_size 会按分辨率把字号等比缩放，
 #   先覆盖再缩放 = 覆盖值被缩掉，等于没覆盖。
 _IP_OVERRIDE = {}       # {"fs_cue": 87, ...}
+# ip.json 的字号是**在哪个分辨率下定板的**（subtitle.base_res，默认引擎基准）。
+# ★ 2026-10-30 修：以前这里没有 base 概念，ip.json 的 52 被当绝对像素硬塞 ——
+#   主号卡里明明写着 base_res [768,1376] 和「按 w/768 等比缩放」，
+#   代码却完全不理。结果 std(864) 上字比设计值偏小、fast(544) 上直接溢出到流水线报错。
+_IP_BASE_RES = (BASE_W, BASE_H)
 
 
 def load_ip_overrides(start=None):
-    """从本 IP 的 ip.json 读字号覆盖。找不到就什么都不改（行为与从前一致）。"""
-    global _IP_OVERRIDE
+    """从本 IP 的 ip.json 读字号覆盖。找不到就什么都不改（行为与从前一致）。
+
+    ★ 同时读 subtitle.base_res：那些字号是在 base_res 下定的（ip.json 里通常写着
+      [768,1376] 并有「按 w/768 等比缩放」的注释）。跨分辨率时必须按 base_res 缩放，
+      否则 std 上偏小、fast 上溢出。没有 base_res 就按引擎基准算。
+    """
+    global _IP_OVERRIDE, _IP_BASE_RES
     _IP_OVERRIDE = {}
+    _IP_BASE_RES = (BASE_W, BASE_H)
     try:
         from ip_guard import find_ip_json
         path, root = find_ip_json(start)
@@ -164,6 +175,14 @@ def load_ip_overrides(start=None):
         with open(path, encoding="utf-8") as f:
             data = _j.load(f)
         sub = data.get("subtitle") or {}
+        _br = sub.get("base_res") or sub.get("base_w")
+        if isinstance(_br, (list, tuple)) and len(_br) >= 2:
+            try:
+                bw, bh = int(_br[0]), int(_br[1])
+                if bw > 0 and bh > 0:
+                    _IP_BASE_RES = (bw, bh)
+            except (TypeError, ValueError):
+                pass
         for key, name in (("fs_cue", "FS_CUE"), ("fs_title", "FS_TITLE"),
                           ("fs_sub", "FS_SUB"), ("fs_cta", "FS_CTA"),
                           ("fs_tag", "FS_TAG"), ("outline", "OUT_CUE")):
@@ -178,19 +197,29 @@ def load_ip_overrides(start=None):
                 _IP_OVERRIDE[name] = v
     except Exception:
         _IP_OVERRIDE = {}
+        _IP_BASE_RES = (BASE_W, BASE_H)
     return _IP_OVERRIDE
 
 
 def apply_ip_overrides():
-    """把 ip.json 的字号覆盖应用到当前常量（必须在 set_size 之后调）。"""
+    """把 ip.json 的字号覆盖应用到当前常量（必须在 set_size 之后调）。
+
+    ★ 值先按 ip.json 的 base_res → 当前分辨率的几何比缩放，再赋值。
+      这样「定板值」的语义才是对的：std 与 fast 的字幕视觉大小一致，
+      fast 试片也不会因为 52 号字在 544 宽里放不下而把整条流水线卡住。
+    """
     if not _IP_OVERRIDE:
         return {}
+    bw, bh = _IP_BASE_RES or (BASE_W, BASE_H)
+    rg = ((W / bw) * (H / bh)) ** 0.5      # 与 set_size 同一套几何平均
     g = globals()
     applied = {}
     for name, v in _IP_OVERRIDE.items():
-        if name in g and g[name] != v:
-            applied[name] = {"from": g[name], "to": v}
-            g[name] = v
+        target = int(round(v * rg)) if rg > 0 else v
+        target = max(1, target)
+        if name in g and g[name] != target:
+            applied[name] = {"from": g[name], "to": target}
+            g[name] = target
     return applied
 
 # ---------- 字号安全检查 ----------

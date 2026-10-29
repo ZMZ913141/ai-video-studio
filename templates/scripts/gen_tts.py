@@ -58,7 +58,8 @@ if os.environ.get("REF_TEXT") is None:
         REF_TEXT = open(_tf, encoding="utf-8").read().strip()
 INSTR = os.environ.get("INSTR") or IP.get("voice.tts.instruction") or ""
 MODEL = IP.get("voice.tts.model") or "int8 hybrid (recommended)"
-CHARS_PER_SEC = 3.85          # S01/S02 实测
+CHARS_PER_SEC = 3.85          # ★ 含标点字数/秒（S01/S02 实测）：78 字含标点 → 20.3s，实测 20.0s。
+                              #   念字口径（spoken()，去标点）约 3.30 字/s —— 两者别混用。
 
 # TTS 配方：档案里有就按档案，没有才用脚本内默认值
 _T = IP._d.get("voice", {}).get("tts", {})
@@ -162,10 +163,14 @@ def main():
     txt_path, out_dir = sys.argv[1], sys.argv[2]
     tag = sys.argv[sys.argv.index("--tag") + 1] if "--tag" in sys.argv else "S03"
     text = read_text(txt_path)
-    n = spoken(text)
-    est = n / CHARS_PER_SEC
+    n = spoken(text)                              # 真正念出来的字（不含标点）
+    total = len(re.sub(r"\s", "", text))          # 含标点 = 与 pipeline 估片长同一口径
+    est = total / CHARS_PER_SEC
 
-    print(f"文案 {n} 字   预估 {est:.1f}s")
+    # ★ 口径必须统一：spoken() 去掉了标点，却拿 3.85（这是**含标点**字数/秒）去除，
+    #   必然低估约 14%。实测 S02：66 念字/3.85=17.1s，实际 20.0s，于是每次跑都白报
+    #   一条「时长偏离预估 +2.8s，检查是否有长停顿或漏读」——假警报比没警报更坏。
+    print(f"文案 {total} 字（念 {n} 字）  预估 {est:.1f}s")
     # ★ 每次都必须明确打印「用的是谁的声音」——多 IP 下这是唯一的防混用护栏
     print(f"音色参考 {os.path.basename(REF_SRC)}   逐字稿「{REF_TEXT}」")
     if not os.path.isfile(REF_SRC):

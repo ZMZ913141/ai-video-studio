@@ -148,6 +148,7 @@ class Pipeline:
         self.mode = mode
         self.dry = dry
         self.force = force
+        self.force_from = ""      # run() 里设成 --from 的步骤名（那一步强制重做）
         self.opt_segs = segs
         self.opt_grid = grid
         self.verbose = verbose
@@ -372,7 +373,7 @@ class Pipeline:
         # ★ 但「产物在」不等于「产物还有效」：上游变了它就必须重做。
         #   最典型的就是留白：加了 0.27s 前导静音后，旧 SRT 整体偏 0.27s，
         #   看着还在、其实已经对不上嘴了 —— 这类错不会报错，只会交付出错位的片。
-        if out and not self.force and not self.dry:
+        if out and not self.force and not self.dry and sid != self.force_from:
             hit = newest(out)
             stale = None
             if hit:
@@ -572,6 +573,12 @@ class Pipeline:
             sys.exit(f"✗ --to {end} 不在步骤里（可选 {'/'.join(ids)}）")
         i0 = ids.index(start) if start else 0
         i1 = ids.index(end) + 1 if end else len(steps)
+        # ★★ --from X 的语义是「从 X 开始**重做**」，不是「从 X 开始判断跳过」。
+        #   以前只决定遍历起点，X 的产物还在就 ⏭ 跳过 —— 于是界面的
+        #   「只重做配音」按钮点了等于空转：日志一片绿，音频还是旧的，
+        #   用户改完语气听半天以为没生效（2026-10-30 真跑抓到）。
+        #   现在只强制 X 这一步，后面的步骤靠产物 mtime 链式触发重做。
+        self.force_from = (start or "").strip()
         self.seed_from_disk()
 
         p = self.log["plan"]
