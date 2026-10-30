@@ -67,7 +67,9 @@ SR = 48000
 
 
 # ══════════════════════════════════════════ 路 1：本地合成（原方案）
-BPM = 88.0
+# ★ 节奏不该焊死：88 BPM 是「温暖抒情口播」的默认值，快节奏带货 / 严肃财经都不合适。
+#   走 env BGM_BPM 覆盖，默认保持不变（已交付的片子不受影响）。
+BPM = float(os.environ.get("BGM_BPM") or 88.0)
 BEAT = 60.0 / BPM
 BAR = 4 * BEAT
 _SYNTH_SEED = 20261027
@@ -167,7 +169,7 @@ def build(total):
 
 
 def src_synth(total, cfg, log):
-    log("本地合成 88 BPM 温暖器乐（不占 GPU）")
+    log("本地合成 %g BPM 温暖器乐（不占 GPU）" % BPM)
     a = build(total)
     peak = np.max(np.abs(a)) or 1.0
     return (a / peak * 0.92).astype(np.float32), SR

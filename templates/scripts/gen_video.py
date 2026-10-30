@@ -1451,10 +1451,16 @@ DEFAULT_PROMPT_VARS = {
     #   ⚠️ 主号 ip.json 已把前三个显式写成旧值，DRY 逐字节不变（有 golden 可 diff）。
     "posture": 'his posture',
     "rest_pose": 'settled and relaxed, hands resting low and still',
-    "pose_verb": 'sits',
+    # ★ 默认必须是「不表态」：坐着写 sits、站着写 stands，引擎不替客户选姿势。
+    "pose_verb": 'is',
     "lap_ref": 'his lap',
-    "seated_where": 'seated in the room of the reference still',
+    # ★ 原来默认 'seated in the room of the reference still' —— 等于「所有人都是坐着讲」。
+    #   坐着讲的 IP 自己写 seated，站着讲的写 standing，别让引擎替客户决定姿势。
+    "seated_where": 'in the room of the reference still',
     "where_of_still": 'in the room shown',
+    # ★ <d> 标记里的语种标签。主号/珠珠是中文口播，但引擎不该把 [Chinese] 焊死 ——
+    #   给英文或粤语 IP 出片时，这一处会让口型对不上（标记语言与实际发音不一致）。
+    "lang_tag": 'Chinese',
     "above_head": (
         'the background above him continuing exactly as it does in <Picture 1>'
     ),
@@ -1753,7 +1759,7 @@ def build_prompt(i, segs, cues, audio_sec):
         # ⚠️ 但要说清楚：**它并不能阻止字幕被画进画面**（2026-10-27 实测无效）。
         #    详见 SKILL.md §3「出片后必须先抽帧看画面有没有字」。
         acts.append(f"At {ts(max(0.0, t - t0))} the presenter (S1) speaks: "
-                    f"<d>[Chinese]{txt}</d> {g}. ")
+                    f"<d>[$lang_tag]{txt}</d> {g}. ")
     if not acts:
         acts.append("He speaks the line carried in on the locked voice while holding the same steady framing. ")
 

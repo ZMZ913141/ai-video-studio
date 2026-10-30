@@ -53,6 +53,10 @@ from difflib import SequenceMatcher
 API = "http://127.0.0.1:8188"
 CI = "/cfu/ComfyUI"
 IN_DIR = f"{CI}/input/minimax_h3_timeline_director"
+# ★ 识别语种不该焊死：给英文/粤语 IP 出片时，写死 Chinese 会识别成"音近汉字"，
+#   出来一整篇莫名其妙的字幕，而且时间轴看着还"对"（因为它是按声学切的）。
+#   默认仍取 Chinese（本体系的客户都是中文口播），要改走 env 或 ip.json 的 subtitle.asr_lang。
+ASR_LANG = os.environ.get("ASR_LANG") or "Chinese"
 
 PUNCT = "，。？！、；：,.;:!?…—～「」“”‘’（）()"
 NOISE = re.compile(f"[\\s{PUNCT}]")
@@ -171,7 +175,7 @@ def asr_segments(src, gap=0.12):
             "model": "Qwen/Qwen3-ASR-0.6B-hf",
             "precision": "bf16", "attention": "auto",
             "forced_aligner": "Qwen/Qwen3-ForcedAligner-0.6B-hf",
-            "language": "Chinese", "hints": "",
+            "language": ASR_LANG, "hints": "",
             "output_format": "none", "output_path": "",
             "split_mode": "split_by_pause",
             "max_gap_sec": float(gap),

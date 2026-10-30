@@ -1300,9 +1300,9 @@ wrong, the money is wasted.
 HARD RULES:
 1. English only. Not one Chinese character - the model renders stray Chinese as visible
    text burned into the picture.
-2. Positive statements only. Never use no/not/never/without/avoid. To say "no glasses",
-   write "He wears no glasses" -> WRONG; write "His face is unobstructed, his eyes clearly visible."
-   The image model does not reliably obey negation, so describe what IS there.
+2. Positive statements only. Never use no/not/never/without/avoid.
+   The image model does not reliably obey negation, so describe what IS there:
+   for anything that should be absent, name what is visible in its place instead.
 3. Only things visible in a photo: face shape, hair, facial features, clothing, framing,
    lens, lighting, background objects. Never abstract praise ("professional", "trustworthy")
    - convert it into concrete visible detail.

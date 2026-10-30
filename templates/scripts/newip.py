@@ -96,7 +96,7 @@ BASE_TEMPLATE = {
             "depth_top_k": 50, "depth_top_p": 1.0, "max_new_tokens": 1504,
             "warmup_frames": 0, "stitch_reference": "none",
             "decode_mode": "cuda_graphs", "seed": 42,
-            "_todo": "这些是从洁斌抄来的起始值，必须用本 IP 已知素材重新定板"
+            "_todo": "这些是引擎中性起始值（不是为任何 IP 定过的），必须用本 IP 已知素材重新定板"
         }
     },
     "visual": {
@@ -110,7 +110,18 @@ BASE_TEMPLATE = {
         "overlap": None,
         "sampler": None,
         "second_pass": {"enabled": None, "model": None},
-        "_todo": "全部按本 IP 实测重算。跨 IP 只借算法，不借参数。"
+        # ★ 这三项**必须**按本 IP 定板。漏了不会报错，只会让片子悄悄继承上一个客户的设定：
+        #   · gender      → 决定骨架里 he/his 的归一。漏填 = 全篇男性说法，
+        #                   女性 IP 的提示词会被写成 "He ... his hair"，人还是那个人，动作描述全错。
+        #   · prompt_vars → 决定「谁 / 在哪 / 穿什么 / 什么姿态」。
+        #                   漏填 = 引擎中性默认（人物和场景交给 <Picture 1>，
+        #                   但姿态、服装、环境描述都是通用版）。
+        #   · posture / pose_verb / seated_where 三个尤其要显式写（站/坐/躺），
+        #                   否则模型在段与段之间会漂姿势 —— 2026-10-31 珠珠卡实测踩到。
+        "gender": None,
+        "prompt_vars": {},
+        "_todo": ("全部按本 IP 实测重算。跨 IP 只借算法，不借参数。"
+                  "gender 必填（male/female）；prompt_vars 至少写 posture / pose_verb / seated_where。")
     },
     "subtitle": {
         "base_res": None, "fs_cue": None, "fs_title": None, "outline": None,
@@ -248,7 +259,7 @@ def build(parent, name, tag, space, dry=False, aliases=None):
         print(f"\n✗ 不能建在 {target}")
         print(f"  那里是「{ex.get('name')}」的工作区，属于独立体系。")
         print(f"  原因：{ex.get('reason', '不纳入本建档体系')}")
-        print("  珠珠那类独立 IP 有她自己的目录树和规则文档，本体系不纳管、不放文件。")
+        print("  这类独立 IP 有自己的目录树和规则文档，本体系不纳管、不放文件。")
         return 1
 
     print(f"\n将创建：{target}")
@@ -324,7 +335,7 @@ def build(parent, name, tag, space, dry=False, aliases=None):
 
 def main():
     ap = argparse.ArgumentParser(description="新建 IP 工作区")
-    ap.add_argument("--name", help="IP 名（如 陈洁斌主号）")
+    ap.add_argument("--name", help="IP 名（如：某某 / 某某品牌）")
     ap.add_argument("--tag", help="套次前缀（如 S / Z / M）")
     ap.add_argument("--space", help="资料库空间名")
     ap.add_argument("--parent", default="/cfu", help="建在哪（默认 /cfu）")
@@ -335,7 +346,7 @@ def main():
     name = a.name
     if not name:
         print("\n新建 IP 工作区\n")
-        name = ask("IP 名（例：陈洁斌主号 / 雅太社）")
+        name = ask("IP 名（例：某某 / 某某品牌）")
     if not name:
         print("✗ 必须有 IP 名")
         return 1

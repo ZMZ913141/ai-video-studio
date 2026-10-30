@@ -164,8 +164,11 @@ def scan_file(path, names, assets):
                 hits.append((i, "R2", "「存在就跳过」的写文件：换了素材不生效（必须判 mtime/md5）",
                              ln.strip()[:90]))
         # R3：固定落地文件名
-        m = re.match(r"\s*([A-Z][A-Z0-9_]*_NAME)\s*=\s*[\"'][^\"']+\.(wav|mp3|png|jpg)[\"']", ln)
-        if m:
+        # ★ 只认**纯字面量**：`REF_NAME = "ref_%s.wav" % _h` 是按内容哈希命名的正确写法，
+        #   正则原来只看引号里有没有扩展名，把带格式化的模板也报了出来 ——
+        #   假警告会让人习惯性忽略这一栏，真出问题时反而看不见。
+        m = re.match(r"\s*([A-Z][A-Z0-9_]*_NAME)\s*=\s*[\"']([^\"']+\.(?:wav|mp3|png|jpg))[\"']\s*$", ln)
+        if m and "%" not in m.group(2) and "{" not in m.group(2):
             hits.append((i, "R3", "%s 是字面量文件名 —— 多 IP 会互相覆盖（应按 IP/内容区分）" % m.group(1),
                          ln.strip()[:90]))
     return hits
