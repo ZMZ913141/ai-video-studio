@@ -196,41 +196,157 @@ def apply_hl(text, keys, color_only=False):
     return "".join(out), used
 
 
+# ---------------- 没有人工 DESIGN 时的兜底 ----------------
+# 2026-10-30 用户反馈「原本是有加高级版的标题的」。查出来是**结构问题**：
+# DESIGN 是按 S01/S02 一套一套硬编码的字典，T01/T02 这种 `--topics` 现写文案的
+# 临时套次根本不在里面 → d = {} → 开场标题 / 关键词花字 / 结尾 CTA 三样全落空，
+# 整个 ASS 只剩单调的 Cue 一行行往下滚。批量出片越多，这个缺口越明显。
+# 下面用规则从文案里长出一份，够不上人工的水准，但比「什么都没有」强得多。
+NUM_UNIT = re.compile(
+    r"[0-9一二三四五六七八九十百千万两]+"
+    r"(?:条|秒|分钟|个钟头|个小时|小时|天|年|块|元|万|千|月|号|位|次|遍|倍|张|句|单)")
+
+CTA_WORDS = ("私信", "评论", "主页", "关注", "下单", "回复", "留言", "找我", "戳")
+
+# 标题里值得变色的锚点（钩子里没有数字时，至少有一个词是亮的）
+TITLE_ANCHORS = ("其实", "不是", "为什么", "值不值", "别", "先", "千万不要", "劝")
+
+
+def auto_design(cues):
+    """从 SRT 反推一份「心动设计」。返回结构与 DESIGN 的条目一致。
+
+    规则保守，宁少勿多：
+    - 标题用第 1 句、副标用第 2 句 —— 短视频的钩子本来就是这两句，
+      强行另行提炼只会写出不搭的句子。
+    - 花字只挑**数字+量词**（剪映模板的标配），全片 4~6 处，不碰形容词。
+    - CTA 找含转化动词的那一条。
+    """
+    texts = [c["text"] for c in cues]
+    if not texts:
+        return {}
+
+    def cut(s, n):
+        s = strip_punct(s)
+        return s if len(s) <= n else s[:n]
+
+    main = cut(texts[0], 10)
+    sub = cut(texts[1], 14) if len(texts) > 1 and texts[1] != texts[0] else ""
+
+    hl, seen = {}, set()
+    for t in texts:
+        # 每条只挑**一个**（最长的那个）：一条里给两个词上色，眼睛不知道看哪，
+        # 等于没有花字。实测 T01「拍一条视频三个钟头」会同时命中「一条」和
+        # 「三个钟头」，染成两段，读起来像乱码。
+        best = None
+        for m in NUM_UNIT.finditer(t):
+            w = m.group(0)
+            if len(w) < 2 or w in seen:
+                continue
+            # 「一条」「一个」「一次」这类没信息量，跳过；「一个月」「十五秒」留着
+            if w[0] in "1一" and len(w) <= 2:
+                continue
+            if best is None or len(w) > len(best):
+                best = w
+        if best:
+            hl[best] = "数字"
+            seen.add(best)
+        if len(hl) >= 6:
+            break
+
+    cta = [i for i, t in enumerate(texts, 1) if any(w in t for w in CTA_WORDS)]
+    d = {"hl": hl, "cta_cues": cta[:1]}
+    if main:
+        d["hook"] = (main, sub)
+        anchors = [a for a in TITLE_ANCHORS if a in main]
+        if anchors:
+            d["hl_title"] = [anchors[0]]
+        if sub:
+            sub_anchors = [a for a in TITLE_ANCHORS if a in sub]
+            if sub_anchors:
+                d["hl_sub"] = [sub_anchors[0]]
+    return d
+
+
 def build(tag, srt_path, out_ass, dur=None):
     cues = parse_srt(srt_path)
-    d = DESIGN.get(tag, {})
+    d = DESIGN.get(tag) or {}
+    auto = {}
+    if not d.get("hook"):
+        # 没人工设计（或人工漏了 hook）→ 用规则兜底，并在日志里说清楚，
+        # 免得以后有人以为「字幕本来就没标题」。
+        auto = auto_design(cues)
+        d = {**auto, **d}
+        if auto.get("hook"):
+            print(f"  · {tag} 没有人工 DESIGN → 自动生成钩子标题「{auto['hook'][0]}」"
+                  f"、花字 {len(auto.get('hl') or {})} 处、CTA {len(auto.get('cta_cues') or [])} 条",
+                  file=sys.stderr)
     ev = []
     total = dur or (cues[-1]["t1"] + 0.4)
 
     # ---- 1. 开场钩子（前 2.6s，压在画面上部空白区）----
+    hook_txt = set()
     if d.get("hook"):
         main, sub = d["hook"]
         m2, _ = apply_hl(main, d.get("hl_title", []), color_only=True)
         ev.append(S.dialog(2, 0.0, min(2.6, total), "Title",
                            "{" + S.pop(7, 114) + "}" + m2))
+        hook_txt.add(strip_punct(main))
         if sub:
             s2, _ = apply_hl(sub, d.get("hl_sub", []), color_only=True)
             ev.append(S.dialog(2, 0.20, min(2.6, total), "Sub",
                                "{" + S.pop(5, 108) + "}" + s2))
+            hook_txt.add(strip_punct(sub))
 
     # ---- 2. 正文逐条 ----
     hl_keys = list(d.get("hl", {}).keys())
-    cta_idx = set(d.get("cta_cues", []))
+    cta_idx = set(d.get("cta_cues", [])) & set(range(1, len(cues) + 1))
+    if d.get("cta_cues") and not cta_idx:
+        # ⚠ DESIGN 里的 cta_cues 是**按当时的字幕条数**硬编码的。文案改短之后
+        #   这个下标就指到空气里了，而且不报错 —— 表现为「正式片一直没有结尾
+        #   CTA 强调」。S02 就是：DESIGN 写 [16]，实际只有 9 条。
+        #   越界就按转化词重新找，并明确告警，别让它继续静默失效。
+        found = [i for i, c in enumerate(cues, 1)
+                 if any(w in c["text"] for w in CTA_WORDS)]
+        if found:
+            cta_idx = {found[-1]}
+            print(f"  ⚠ {tag} 的 cta_cues={d['cta_cues']} 越界（共 {len(cues)} 条）→ "
+                  f"按转化词改判第 {found[-1]} 条「{cues[found[-1] - 1]['text'][:14]}」",
+                  file=sys.stderr)
+        else:
+            print(f"  ⚠ {tag} 的 cta_cues={d['cta_cues']} 越界（共 {len(cues)} 条），"
+                  f"且没找到含 {'/'.join(CTA_WORDS[:4])} 的条 → 本片无 CTA 强调",
+                  file=sys.stderr)
     warns = []
+    used_hl = set()     # 每个关键词**全片只染一次**
+    skipped_title = 0
     for i, c in enumerate(cues, 1):
         style = "CTA" if i in cta_idx else "Cue"
         body = norm_lines(c["text"])       # 多行 cue → \N
+        # 钩子期间（前 2.6s）如果这条字幕就是标题那句话，别再在底部重复一遍 ——
+        # 实测 T01 开场是「你觉得分身贵」在屏幕上方（大标题）和下方（字幕）同时出现，
+        # 一句话看两遍，比没有标题更难看。
+        if i not in cta_idx and c["t0"] < 2.7 and strip_punct(c["text"]) in hook_txt:
+            skipped_title += 1
+            continue
         if i in cta_idx:
             # CTA 不套花字，整条都已经是重点
             txt = "{" + S.pop(6, 112) + "}" + body
         else:
-            decorated, used = apply_hl(body, hl_keys)
+            # ⚠ 只用还没染过的词。否则同一个词在相邻两条里重复出现时会连染两遍
+            #   （T01「就是十二个钟头」/「这十二个钟头」连着两条都紫了，很闹）。
+            #   全篇只染 4~6 处是设计初衷，重复染等于把花字当成默认样式。
+            keys = [k for k in hl_keys if strip_punct(k) not in used_hl]
+            decorated, used = apply_hl(body, keys)
             if used:
+                used_hl.update(used)
                 txt = "{" + S.fade_only() + "}" + decorated
             else:
                 txt = body
         ev.append(S.dialog(1, c["t0"], c["t1"], style, txt))
 
+    if skipped_title:
+        print(f"  · 开场标题已承担 {skipped_title} 条同文字幕，它们不再上屏（避免一句话看两遍）",
+              file=sys.stderr)
     S.write_ass(out_ass, ev)
     return ev, warns
 
