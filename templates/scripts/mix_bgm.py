@@ -53,7 +53,7 @@ EBU R128 实测四条成片：S01 −28.8 / S02 −27.1 / S03 −26.4 / S04 −2
 
 用法
 ====
-  mix_bgm.py <视频> <配乐wav> <输出mp4> [配乐比人声低几 LU]
+  mix_bgm.py <视频> <配乐wav> <输出mp4> [配乐比人声低几 LU，默认 15]
   VO_NORM=0/1  VO_TARGET=-26.8  VO_GAIN=+3.7  VO_FX=0/1
   BGM_ABS_DB=-12（强制绝对增益，跳过自动）  BGM_DUCK=1/0  鸭子压缩
   LUFS_NORM=0/1  LUFS_I=-16  LUFS_TP=-1.5  LUFS_LRA=11
@@ -67,10 +67,34 @@ EBU R128 实测四条成片：S01 −28.8 / S02 −27.1 / S03 −26.4 / S04 −2
 再按 -6 dB 垫进去，等于配乐还压人声 9.4 LU，整片响度被音乐主导，
 归一之后人声反而更小。用户听到的就是「BGM 大声、人声小」。
 
-现在改成**相对关系**：第 4 个参数是「配乐要比人声低多少 LU」（默认 13），
+现在改成**相对关系**：第 4 个参数是「配乐要比人声低多少 LU」（默认 15），
 增益 = (人声 LUFS − 配乐 LUFS) − offset，两边都实测，跟素材响度无关。
 再叠一层 sidechaincompress（鸭子压缩）：人一说话，配乐自动再退 6~9 dB，
 句间自动回弹 —— 这是广播级做法，比单纯拉低配乐清楚得多。
+
+------------------------------------------------------------------
+⑤ 2026-10-30 用户反馈「BGM 音量影响到人声了」—— ④ 的算法是**假的**
+------------------------------------------------------------------
+④ 里那个「人声 LUFS」量的是**处理链之前**的原始人声，而 ② 的 acompressor
+会把整片压掉一大截（T01 实测 −22.7 → −32.9 LUFS，吃了 10.2 LU；
+同一段代码在 T02 上只吃 2.6 LU，在 S02 上吃 0.1 LU —— 全看语音的峰值因数）。
+
+于是名义上「配乐低 13 LU」，实际算出来是 13 −（被吃掉的量）：
+  T01 → 实际只低 0.9 LU（用户听到的就是「两个声音一样响」）
+  T02 → 低 10.4 LU
+  S02 → 低 12.9 LU
+
+修法两条，缺一不可：
+1. **配乐增益按「处理之后」的人声算**（vo_chain_lufs），VO_FX 吃多少都不影响比例。
+2. **整片归一改成只对人声归一**（③ 挪到人声链末尾，混完不再 loudnorm）。
+   原来混完再归一，loudnorm 是按「整段平均」补增益的：人声停顿处只剩配乐，
+   被当成安静段多补几 dB，配乐又往上飘一截。只对人声归一就没这问题。
+   混音后的整体响度只会比目标略高一点（人声 −16 + 配乐 −31 ≈ −15），符合平台标准。
+
+实测（T01，说话段 vs 停顿处的电平差 = 真实信噪比）：
+  修复前 5.3 dB（配乐比人声还响）→ 修复后 13 LU 时 13.9 dB / 17 LU 时 16.9 dB
+**判「够不够清楚」看这个差值，不看 LUFS。** <8 dB 基本听不清，<12 开始糊，
+专业口播一般在 15~20 dB。`audio_check.py` 已改成量同一个指标。
 """
 import json
 import os
@@ -109,24 +133,63 @@ def file_lufs(path):
         return None
 
 
-def resolve_bgm_gain(vid, bgm, offset_db):
+def vo_chain_lufs(vid, vo_gain, vo_fx):
+    """量「①音量对齐 + ②VO_FX」**之后**的人声响度。
+
+    ★★ 2026-10-30 修「BGM 盖人声」的根因就在这一层 ★★
+    `acompressor` 会把整片电平压掉 10 dB 以上（实测 T01：−22.56 → −34.68 LUFS，
+    因为检测器看瞬时峰值，人声峰值因数有 20 dB，远超阈值）。
+    而配乐增益原来拿 `file_lufs(vid)`（**处理前**）去算：
+      配乐落到 −22.56 − 13 = −35.56 LUFS，人声实际在 −34.68 LUFS
+      → 配乐只比人声低 0.9 LU，等于两个声音一样响。
+    用户听到的「BGM 影响到人声了」就是这么来的。
+    现在配乐一律相对**处理之后**的人声算，VO_FX 吃多少都不影响比例。
+
+    返回 loudnorm 的测量字典（input_i / input_tp / input_lra /
+    input_thresh / target_offset），后面 ③ 直接拿它做两遍归一。
+    """
+    I = os.environ.get("LUFS_I", "-16")
+    TP = os.environ.get("LUFS_TP", "-1.5")
+    LRA = os.environ.get("LUFS_LRA", "11")
+    af = (f"volume={vo_gain:+.1f}dB,{vo_fx}highpass=f=75,"
+          f"loudnorm=I={I}:TP={TP}:LRA={LRA}:print_format=json")
+    p = subprocess.run([FF, "-nostdin", "-hide_banner", "-nostats", "-i", vid,
+                        "-af", af, "-f", "null", "-"],
+                       capture_output=True, text=True)
+    m = re.search(r'\{\s*"input_i"[\s\S]*?\n\}', p.stderr)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None
+
+
+def resolve_bgm_gain(vo_chain_lufs, bgm, offset_db, vo_final_lufs):
     """返回 (增益dB, 说明)。配乐相对人声垫底，不用固定绝对值。
 
     为什么要自动：配乐素材的响度差得很远（S05 实测 −12.3 LUFS，
     有些舒缓钢琴只有 −24）。固定 -6 dB 在响素材上等于没垫，在轻素材上等于没有配乐。
-    人声每套也不一样（−30.5 ~ −26.8），所以两边都得实测。
+    人声每套也不一样，所以两边都得实测。
+
+    ⚠️ `vo_chain_lufs` 必须是**人声处理链之后**的响度（见 vo_chain_lufs），
+    传原始视频的 LUFS 会把 VO_FX 的 10 dB 压缩量算漏，配乐直接骑到人声头上。
+    ⚠️ `vo_final_lufs` 是人声**最终**会落到的响度（③ 归一之后）。
+    配乐要跟着这个走 —— 因为两边最后会被同一段归一增益一起抬，
+    只有「都按终值算」才能保证交付出来的比例真的是 offset。
     """
     if os.environ.get("BGM_ABS_DB"):
         g = float(os.environ["BGM_ABS_DB"])
         return g, f"BGM_ABS_DB 手动指定 {g:+.1f} dB（跳过自动）"
-    vo = file_lufs(vid)
+    vo = vo_chain_lufs
     bg = file_lufs(bgm)
     if vo is None or bg is None:
         g = -float(offset_db)
         return g, f"⚠ 量不到响度（人声 {vo} / 配乐 {bg}），退回固定 −{offset_db:g} dB"
-    want = vo - float(offset_db)          # 配乐该落到的绝对响度
+    want = float(vo_final_lufs) - float(offset_db)   # 配乐该落到的绝对响度
     g = max(-45.0, min(6.0, want - bg))
-    return g, (f"人声 {vo:.1f} LUFS / 配乐 {bg:.1f} LUFS → 配乐压到 {want:.1f} LUFS"
+    return g, (f"人声处理后 {vo:.1f} → 交付 {float(vo_final_lufs):.1f} LUFS / "
+               f"配乐 {bg:.1f} LUFS → 配乐压到 {want:.1f} LUFS"
                f"（低 {float(offset_db):g} LU），施加 {g:+.1f} dB")
 
 
@@ -161,42 +224,14 @@ def resolve_vo_gain(vid):
     return g, f"人声 {rms:.1f} dBFS（目标 {tgt:.1f}）→ 施加 {g:+.1f} dB"
 
 
-def loudnorm_measure(src, bgm, fc):
-    """loudnorm 第一遍：只测量，不输出文件。返回 measured_* 字典。
-
-    为什么必须两遍：单遍模式是「边测边改」，遇到响度起伏大的段落会跑偏；
-    两遍（先测后应用 + linear=true）才是 ffmpeg 官方推荐的做法。
-    """
-    I = os.environ.get("LUFS_I", "-16")
-    TP = os.environ.get("LUFS_TP", "-1.5")
-    LRA = os.environ.get("LUFS_LRA", "11")
-    # ⚠ 两个坑都踩过：
-    #   1) loudnorm 必须写进**同一个** filter_complex，不能用 `-af` 追加 ——
-    #      ffmpeg 报「Simple and complex filtering cannot be used together」。
-    #   2) filter_complex 的输出必须显式 `-map`，ffmpeg 7 起不再自动映射，
-    #      不写就是「amix has an unconnected output」。
-    fg = fc + f";[mix]loudnorm=I={I}:TP={TP}:LRA={LRA}:print_format=json[meas]"
-    # ⚠ 两个输入都要给：滤镜链里引用了 [1:a]（配乐），只给 -i src 会报
-    #   "Invalid file index 1"，而报错又被 try/except 吞掉，看起来像「测量失败」。
-    p = subprocess.run([FF, "-nostdin", "-hide_banner", "-nostats", "-i", src, "-i", bgm,
-                        "-filter_complex", fg, "-map", "[meas]",
-                        "-f", "null", "-"], capture_output=True, text=True)
-    if p.returncode != 0:
-        print("  ⚠ loudnorm 测量退出码非 0：", p.stderr.strip()[-300:])
-    # JSON 块在 stderr 里，但**不在末尾**——后面还跟着 `[out#0/null ...]` 那行，
-    # 所以不能用 `$` 锚定（第一次写就栽在这里：正则不匹配 → 静默退回单遍模式）。
-    m = re.search(r'\{\s*"input_i"[\s\S]*?\n\}', p.stderr)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return None
-
-
 def main():
     vid, bgm, dst = sys.argv[1], sys.argv[2], sys.argv[3]
     offset = sys.argv[4] if len(sys.argv) > 4 else "13"
+
+    I = os.environ.get("LUFS_I", "-16")
+    TP = os.environ.get("LUFS_TP", "-1.5")
+    LRA = os.environ.get("LUFS_LRA", "11")
+    lufs = os.environ.get("LUFS_NORM", "1") != "0"
 
     vo_gain, why = resolve_vo_gain(vid)
     print("  ① 人声对齐:", why, flush=True)
@@ -206,11 +241,45 @@ def main():
     print("  ② 人声处理:", "压缩抬句尾 + 去浑浊 + 抬辅音" if use_fx else "VO_FX=0 跳过",
           flush=True)
 
-    bgm_gain, bgm_why = resolve_bgm_gain(vid, bgm, offset)
-    print(f"  ②b 配乐电平: {bgm_why}（{bgm_gain:+.1f} dB）", flush=True)
+    # ③ 先量**处理之后**的人声，再决定配乐电平 —— 顺序反了就会算出假比例。
+    #    （VO_FX 的压缩量有 10 dB 以上，按处理前的电平算配乐 = 配乐骑到人声头上）
+    m = vo_chain_lufs(vid, vo_gain, vo_fx)
+    if m is None:
+        print("  ⚠ 量不到人声处理后的响度，配乐按固定 −13 dB 垫", flush=True)
+        vo_chain = None
+        vo_final = None
+    else:
+        vo_chain = float(m["input_i"])
+        vo_final = float(I) if lufs else vo_chain
+        print(f"  ②b 人声处理后 {vo_chain:.1f} LUFS"
+              f"（处理前 {file_lufs(vid):.1f}，处理链吃掉 "
+              f"{file_lufs(vid) - vo_chain:+.1f} LU）"
+              f" → 交付 {vo_final:.1f} LUFS", flush=True)
+
+    bgm_gain, bgm_why = resolve_bgm_gain(
+        vo_chain, bgm, offset, vo_final if vo_final is not None else -14.0)
+    print(f"  ②c 配乐电平: {bgm_why}", flush=True)
+
+    # 人声链：对齐 → 处理 → **只对人声**归一。
+    # ★ 归一放在这里、而不是混完再归一，是这次修复的核心：
+    #   混完再归一，loudnorm 会把「人声停顿处（只剩配乐）」当成安静段去补增益，
+    #   配乐比人声多抬好几 dB；只对人声归一，配乐的绝对电平是自己算的，不受影响。
+    ln_vo = ""
+    if lufs and m:
+        ln_vo = (f",loudnorm=I={I}:TP={TP}:LRA={LRA}:linear=true"
+                 f":measured_I={m['input_i']}:measured_TP={m['input_tp']}"
+                 f":measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}"
+                 f":offset={m['target_offset']},aresample=48000")
+        print(f"  ③ 人声响度归一: 处理后 {m['input_i']} LUFS → {I} LUFS"
+              f"（偏移 {float(m['target_offset']):+.1f} LU）", flush=True)
+    else:
+        print("  ③ 人声响度归一: 跳过（LUFS_NORM=0 或测量失败）", flush=True)
+    vo_chain_filter = f"volume={vo_gain:+.1f}dB,{vo_fx}highpass=f=75{ln_vo}"
 
     # 鸭子压缩：人声一说话，配乐再退一截；说话间隙回弹。
-    # 阈值 0.05 ≈ −26 dBFS，正好是人声的句子电平；ratio 4 约退 6~9 dB。
+    # 阈值 0.05 ≈ −26 dBFS。人声已归一到 −16 LUFS（说话段约 −18 dBFS），
+    # 所以在阈值之上约 8 dB，ratio 4 → 退 6 dB。人声没归一（LUFS_NORM=0）时
+    # 这个阈值可能失准，可用 BGM_DUCK=0 关掉。
     # ⚠ 必须 asplit：同一路音频不能被两个消费者直接引用，ffmpeg 会报
     #   "Filter has an unconnected output" 或者干脆只喂给第一个。
     duck = os.environ.get("BGM_DUCK", "1") != "0"
@@ -220,46 +289,26 @@ def main():
         #   "Filter asplit has an unconnected output" 并拒绝整个图 —— 2026-10-28 踩过。
         fc = (
             f"[1:a]volume={bgm_gain:+.1f}dB,highpass=f=90,lowpass=f=11000[bg];"
-            # ① 先对齐到固定基准 → ② 再做压缩（阈值是绝对值，顺序反了压缩量就漂）
-            f"[0:a]volume={vo_gain:+.1f}dB,{vo_fx}highpass=f=75,asplit=2[vo][vok];"
+            f"[0:a]{vo_chain_filter},asplit=2[vo][vok];"
             f"[bg][vok]sidechaincompress=threshold=0.05:ratio=4:attack=15:release=400"
             f":makeup=1[bgd];"
             f"[vo][bgd]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]"
         )
-        print("  ②c 鸭子压缩: 开（人声一响配乐自动退）", flush=True)
+        print("  ④ 鸭子压缩: 开（人声一响配乐自动退）", flush=True)
     else:
         fc = (
             f"[1:a]volume={bgm_gain:+.1f}dB,highpass=f=90,lowpass=f=11000[bg];"
-            f"[0:a]volume={vo_gain:+.1f}dB,{vo_fx}highpass=f=75[vo];"
+            f"[0:a]{vo_chain_filter}[vo];"
             f"[vo][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]"
         )
-        print("  ②c 鸭子压缩: 关", flush=True)
+        print("  ④ 鸭子压缩: 关", flush=True)
 
-    lufs = os.environ.get("LUFS_NORM", "1") != "0"
-    ln = ""
-    if lufs:
-        I = os.environ.get("LUFS_I", "-16")
-        TP = os.environ.get("LUFS_TP", "-1.5")
-        LRA = os.environ.get("LUFS_LRA", "11")
-        m = loudnorm_measure(vid, bgm, fc)
-        if m:
-            ln = (f"loudnorm=I={I}:TP={TP}:LRA={LRA}:linear=true"
-                  f":measured_I={m['input_i']}:measured_TP={m['input_tp']}"
-                  f":measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}"
-                  f":offset={m['target_offset']}")
-            print(f"  ③ 响度归一: 实测 {m['input_i']} LUFS → 目标 {I} LUFS"
-                  f"（偏移 {float(m['target_offset']):+.1f} LU）", flush=True)
-        else:
-            ln = f"loudnorm=I={I}:TP={TP}:LRA={LRA}"
-            print(f"  ③ 响度归一: 测量失败，退回单遍模式（目标 {I} LUFS）", flush=True)
-    else:
-        print("  ③ 响度归一: LUFS_NORM=0 跳过", flush=True)
-
-    # ⚠ 归一化后再挂 alimiter 会**反而把电平顶上去**：alimiter 默认 level=true
-    #   会先自动把输入电平抬到 limit 附近，实测解码后样本峰值冲到 +1.9 dBFS（削波）。
-    #   loudnorm 的 TP= 本身就是真峰值限制器，归一化后不需要再限幅。
-    full = fc + (f";[mix]{ln}[a]" if ln else
-                 f";[mix]alimiter=limit=0.95:level=disabled[a]")
+    # ⚠ 混完**不再**做 loudnorm：那会按「整段平均」补增益，把停顿处的配乐一起抬上来
+    #   （就是这次「BGM 盖人声」的另一半原因）。人声已经到 −16，配乐按它反算，
+    #   混音后的整体只会比 −16 略高一点，符合平台标准。
+    # ⚠ alimiter 必须 level=disabled：默认 level=true 会先把输入抬到 limit 附近，
+    #   实测解码后峰值冲到 +1.9 dBFS（削波）。
+    full = fc + ";[mix]alimiter=limit=0.891:level=disabled[a]"
     cmd = [FF, "-nostdin", "-y", "-i", vid, "-i", bgm,
            "-filter_complex", full, "-map", "0:v", "-map", "[a]",
            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest",
@@ -268,6 +317,8 @@ def main():
     if p.returncode != 0:
         print(p.stderr.decode()[-1200:])
         sys.exit(1)
+    print("  ⓑ 交付响度:", end=" ", flush=True)
+    print(f"{file_lufs(dst)} LUFS", flush=True)
     print("OK", dst, os.path.getsize(dst), flush=True)
 
 

@@ -176,7 +176,7 @@
     {
       "id": "mix",
       "stage": "后期",
-      "desc": "人声对齐 + 混配乐 + 整片响度归一到 -16 LUFS",
+      "desc": "人声对齐 + 混配乐（配乐按处理后人声反算）+ 人声归一到 -16 LUFS",
       "py": "numpy",
       "script": "{scripts}/mix_bgm.py",
       "argv": [

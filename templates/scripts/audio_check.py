@@ -38,6 +38,15 @@ def db(v):
     return 20 * np.log10(max(v, 1e-9))
 
 
+def win_db(x, n=960):
+    """每 n 个采样（20ms @48k）一个 RMS 电平（dBFS），用来按窗挑「说话处」。"""
+    m = len(x) // n
+    if m == 0:
+        return np.zeros(0)
+    b = x[:m * n].reshape(m, n).astype(np.float64)
+    return 20 * np.log10(np.maximum(np.sqrt((b ** 2).mean(axis=1)), 1e-9))
+
+
 def auto_pauses(ref, win=0.12, rel_db=-38.0, min_gap=0.30):
     """从**原声**自动找句间停顿，别再硬编码时间点。
 
@@ -91,19 +100,33 @@ def main():
         print(f"  {'停顿合计':12s}  {db(rms(ca)):7.1f}  {db(rms(cb)):7.1f}  "
               f"{db(rms(ca))-db(rms(cb)):+5.1f} dB")
         d = db(rms(ca)) - db(rms(cb))
-        # 人声基准：默认量参考音频。但 `mix_bgm.py` 现在会按系列目标做人声响度
-        # 对齐（VO_NORM），交付人声可能与参考音频差几 dB；
-        # 此时必须用 `--voice-db` 传交付后的真实人声电平，否则「差」会虚高。
+        # ★ 2026-10-30 修：人声基准**必须量成片自己的说话段**，不能量参考音频。
+        #   参考音频是 VO_FX 之前的电平（T01：−24.4 dBFS），成片里人声经过压缩
+        #   +归一后在 −16 dBFS 上下，差 8 dB；再拿它当基准，判据就形同虚设 ——
+        #   实测「配乐比人声响 4 dB」的成片居然能判过。
+        wa, wb = win_db(a), win_db(b)
+        L = min(len(wa), len(wb))
+        talk = wb[:L] > -38.0
         vd = None
         if "--voice-db" in sys.argv:
             vd = float(sys.argv[sys.argv.index("--voice-db") + 1])
-        voice = vd if vd is not None else db(rms(b))
-        src = "（--voice-db 指定）" if vd is not None else "（量自参考音频）"
+        if vd is not None:
+            voice = vd
+            src = "（--voice-db 指定）"
+        elif talk.sum() > 0:
+            voice = 20 * np.log10(max(float(np.sqrt(np.mean(10 ** (wa[:L][talk] / 10.0)))), 1e-9))
+            src = "（量自成片说话段，与停顿处同口径）"
+        else:
+            voice = db(rms(b))
+            src = "（退回参考音频）"
+        gap = voice - db(rms(ca))
         # 停顿处应比原声高（原声接近静），但必须**明显低于人声段**，否则会盖住说话。
-        print(f"\n  停顿处配乐电平 {db(rms(ca)):.1f} dBFS"
-              f"   人声段 {voice:.1f} dBFS {src}   差 {db(rms(ca))-voice:+.1f} dB")
+        # 10 dB 是可懂度底线：2026-10-30 实测 5.3 dB 时用户直接反馈「BGM 影响人声」，
+        # 13.9 dB 听感清楚，专业口播一般 15~20 dB。
+        print(f"\n  停顿处配乐 {db(rms(ca)):.1f} dBFS"
+              f"   说话段 {voice:.1f} dBFS {src}   配乐低 {gap:.1f} dB")
         print("\n结论：" + ("✅ 有配乐，且落在人声下方"
-                          if d > 3 and db(rms(ca)) - voice < -10
+                          if d > 3 and gap >= 10
                           else "⚠️ 有配乐但偏高，可能盖人声"
                           if d > 3
                           else "❌ 基本无配乐（停顿处与原声接近）"))
