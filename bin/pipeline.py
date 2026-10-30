@@ -403,6 +403,26 @@ class Pipeline:
         print(f"    查它上次怎么死的：bash {ROOT}/bin/comfy_supervisor.sh status")
         return False
 
+    def _mp_file(self):
+        return os.path.join(V.set_dirs(self.root, self.set)["08"], "_step_mp.json")
+
+    def _step_mp(self):
+        try:
+            with open(self._mp_file(), encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception:
+            return {}
+
+    def _save_step_mp(self, sid):
+        d = self._step_mp()
+        d[sid] = float(self.ctx.get("mp") or 0)
+        try:
+            os.makedirs(os.path.dirname(self._mp_file()), exist_ok=True)
+            with open(self._mp_file(), "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+
     def run_step(self, st):
         sid = st["id"]
         rec = {"id": sid, "stage": st.get("stage"), "desc": st.get("desc", ""),
@@ -413,6 +433,19 @@ class Pipeline:
         cmd, env, out, miss = self.step_cmd(st)
         rec["cmd"] = " ".join(cmd)
         rec["env"] = env or None
+
+        # ★ 换档位（分辨率变了），有些产物必须作废重做 —— 但它们的依赖文件没变：
+        #   ass 只依赖 srt，video 只依赖 audio+srt，光看 mtime 会一路跳过。
+        #   2026-10-30 实测：fast 出的 ASS（37 号字）被 std 直接复用，
+        #   864×1536 的片子上挂了个小字号 —— 日志全绿，只有盯着画面才看得出来。
+        _res_stale = None
+        if st.get("res_sensitive") and not self.dry:
+            _cur = float(self.ctx.get("mp") or 0)
+            _prev = self._step_mp().get(sid)
+            if _cur and _prev and abs(float(_prev) - _cur) > 1e-6:
+                _res_stale = (float(_prev), _cur)
+                print(f"  ↻ {sid} 重做（档位分辨率变了：{_prev}MP → {_cur}MP，"
+                      f"旧产物是别的档位出的，直接复用会出错）")
 
         if miss:
             # 变量没解析通常是因为**上一步还没跑**（产物路径要等它出来）。
@@ -432,7 +465,8 @@ class Pipeline:
         # ★ 但「产物在」不等于「产物还有效」：上游变了它就必须重做。
         #   最典型的就是留白：加了 0.27s 前导静音后，旧 SRT 整体偏 0.27s，
         #   看着还在、其实已经对不上嘴了 —— 这类错不会报错，只会交付出错位的片。
-        if out and not self.force and not self.dry and sid != self.force_from:
+        if out and not self.force and not self.dry and sid != self.force_from \
+                and not _res_stale:
             hit = newest(out)
             stale = None
             if hit:
@@ -569,6 +603,9 @@ class Pipeline:
             else:
                 rec["status"] = "ok"
                 rec["out"] = hit
+                if st.get("res_sensitive"):
+                    # 记下这份产物是哪个分辨率出的，下次换档位才知道该作废
+                    self._save_step_mp(sid)
                 if st.get("set_var") and hit:
                     self.ctx[st["set_var"]] = hit
                 print(f"  ✓ {sid} 完成"

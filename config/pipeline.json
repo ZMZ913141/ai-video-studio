@@ -107,6 +107,7 @@
     },
     {
       "id": "video",
+      "res_sensitive": true,
       "needs_comfy": true,
       "stage": "视频",
       "desc": "H3 出片（分段由脚本按停顿 DP 自适应）",
@@ -194,6 +195,7 @@
     },
     {
       "id": "ass",
+      "res_sensitive": true,
       "stage": "字幕",
       "desc": "SRT → 剪映质感 ASS（开场标题/关键词花字/结尾 CTA）",
       "py": "std",
