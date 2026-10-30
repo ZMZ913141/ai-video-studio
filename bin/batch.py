@@ -302,6 +302,19 @@ def main(argv=None):
     root = e["path"]
     tag = e.get("tag", "S")
 
+    # ★ --force 闸门（与 bin/pipeline.py 同一条规则，别只在一处拦）：
+    #   批量会把队列里**每一条**都整链重做，在交付档案上跑一次就是顶掉一批已交付成片。
+    #   想试批量请建/用 sandbox 档案（名字以 _ 开头）；真要重做就显式声明知道后果。
+    if a.force and not V.is_sandbox(e) and not os.environ.get("FORCE_OK"):
+        raise SystemExit(
+            f"✗ 拒绝在【交付档案 {e['name']}】上批量跑 --force（会逐条重做，顶掉已交付成片）。\n"
+            f"  想试批量请用 sandbox 档案（名字以 _ 开头）；确实要重做：\n"
+            f"      FORCE_OK=1 python3 bin/vstudio.py batch {ip} --queue <队列> --force"
+        )
+    # 到这一步说明已经确认过（命令行给过 FORCE_OK），透传给子进程，避免每条再问一次
+    if a.force:
+        os.environ["FORCE_OK"] = "1"
+
     if a.limit:
         items = items[:a.limit]
 

@@ -101,6 +101,37 @@ def resolve_ip(name, quiet=False):
     die(f"总册里没有「{name}」。现有 IP：{', '.join(e.get('name','?') for e in reg.get('ips',[]))}", quiet=quiet)
 
 
+def is_sandbox(entry):
+    """这个档案是不是「试验场」。
+
+    为什么要有这个概念（2026-10-30）
+    --------------------------------
+    档案库里原本只有一个**交付档案**（陈洁斌主号），于是所有验证性真跑都直接落在
+    客户档案上：`--force` 一跑，已交付的成片就被新产物顶掉（旧版挪废品站，
+    但客户手里那版已经对不上了）。
+
+    判定：**名字以 `_` 开头**（如 `_sandbox`）即为试验场；card.json 里显式写
+    `"sandbox": true` 也算。这样一眼能认出来，不需要额外维护名单。
+    """
+    if not entry:
+        return False
+    name = entry.get("name", "") or ""
+    if name.startswith("_"):
+        return True
+    path = entry.get("path") or ""
+    if os.path.basename(os.path.normpath(path or "")).startswith("_"):
+        return True
+    try:
+        card_p = os.path.join(path, "card.json")
+        if os.path.isfile(card_p):
+            with open(card_p, encoding="utf-8") as f:
+                if json.load(f).get("sandbox") is True:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def opus_dirs(ip_root):
     """读 ip.json 的 01~08 目录名，读不到就用默认"""
     default = {"01": "01_人设与规范", "02": "02_素材真值", "03": "03_生产脚本",
@@ -993,6 +1024,10 @@ def cmd_pipeline(a):
     for k in ("dry", "force", "reseed", "json"):
         if getattr(a, k, False):
             argv.append("--" + k)
+    # i_know 是布尔但标志名带连字符（--i-know），上面的循环拼不出，单独转发。
+    # ★ 漏转发的后果很隐蔽：闸门明明给了开关，人加了却还是被拒，看着像闸门坏了。
+    if getattr(a, "i_know", False):
+        argv.append("--i-know")
     sys.exit(pipeline.main(argv) or 0)
     # pipeline.main 内部 sys.exit，这里只是兜底
 
@@ -1358,6 +1393,12 @@ def main():
     p.add_argument("--dry", action="store_true")
     p.add_argument("--force", action="store_true",
                    help="已有产物也重做（不看输入变没变）")
+    # ★ 与 bin/pipeline.py 的 --i-know 成对：在交付档案上用 --force 要显式确认。
+    #   （这份参数表和 bin/pipeline.py 里那份是**重复定义**，改一处别忘了改另一处
+    #    —— 2026-10-30 加这个开关时就被咬过一次：只在 pipeline.py 加，
+    #    vstudio.py 转发时报 unrecognized arguments。）
+    p.add_argument("--i-know", dest="i_know", action="store_true",
+                   help="在交付档案上用 --force 的确认开关：我知道会顶掉已交付成片")
     p.add_argument("--seed", type=int, help="指定种子，复现某一次的画面")
     p.add_argument("--reseed", action="store_true",
                    help="换一个新种子（同一套提示词再赌一次画面）")

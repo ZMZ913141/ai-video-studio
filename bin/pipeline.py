@@ -850,6 +850,8 @@ def main(argv=None):
     ap.add_argument("--dry", action="store_true")
     ap.add_argument("--force", action="store_true",
                     help="已有产物也重跑（不看输入有没有变，一律重做）")
+    ap.add_argument("--i-know", dest="i_know", action="store_true",
+                    help="在**交付档案**上用 --force 时的确认开关：我知道会顶掉已交付成片")
     ap.add_argument("--seed", type=int, default=None,
                     help="指定种子：同一个种子能复现同一次的画面")
     ap.add_argument("--reseed", action="store_true",
@@ -869,6 +871,20 @@ def main(argv=None):
         if not hit:
             sys.exit(f"✗ {e['name']} 没有这套：{a.set}（现有 {' / '.join(sets) or '无'}）")
         a.set = hit[0]
+
+    # ★ --force 的闸门：它「不看输入变没变，一律重做」，对**交付档案**是破坏性的 ——
+    #   已交付的成片会被新产物顶掉（旧的挪去废品站，但客户手里那版已经对不上了）。
+    #   2026-10-30 起因：为了拿真实数据做验证，`--force` 直接跑在客户档案上，
+    #   把 11:24 那版已交付成片顶掉了。测试就该在 sandbox 档案里做。
+    #   真要在正式档案上重跑，显式加 FORCE_OK=1（或 --i-know）表示「我知道后果」。
+    if a.force and not V.is_sandbox(e) and not (a.i_know or os.environ.get("FORCE_OK")):
+        sys.exit(
+            f"✗ 拒绝在【交付档案 {e['name']}】上跑 --force。\n"
+            f"  --force 会无视「输入有没有变」重做全部步骤，已交付的成片会被顶掉。\n"
+            f"  想试管线请建/用 sandbox 档案（名字以 _ 开头，如 _sandbox）；\n"
+            f"  确实要在正式档案上重做，请显式声明你知道后果：\n"
+            f"      FORCE_OK=1 python3 bin/vstudio.py pipeline {a.ip} {a.set} --tier {tier} --force"
+        )
 
     p = Pipeline(e, a.set, cfg, tier=tier, mode=a.mode, dry=a.dry,
                  force=a.force, segs=a.segs, grid=a.grid,

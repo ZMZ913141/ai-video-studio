@@ -30,6 +30,13 @@
         "陈洁斌",
         "陈洁斌主号"
       ]
+    },
+    {
+      "name": "_sandbox",
+      "path": "/cfu/ai视频档案库/_sandbox",
+      "tag": "T",
+      "space": "试验场",
+      "aliases": []
     }
   ],
   "excluded": [
