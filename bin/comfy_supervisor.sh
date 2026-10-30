@@ -163,7 +163,9 @@ forensics() {
     printf '%s\n' "$k" | sed 's/^/      /'
     case "$k" in
       *"Xid"*)   say "  ↳ 诊断：GPU 层故障（Xid）。最常见是**换模型瞬间**显存/上下文顶到边。" ;;
-      *"Killed process"*) say "  ↳ 诊断：内核 OOM。先看 comfy_guard.py oom，再考虑降并发/减模型。" ;;
+      # 措辞注意：批量是**排队**不是并发，这里不存在「降并发」这回事。
+      # 真会撞 OOM 的是「一边出片一边又提交别的重活」——出片期间别再跑验收/重编码。
+      *"Killed process"*) say "  ↳ 诊断：内核 OOM。先看 comfy_guard.py oom；**出片期间别再并行提交别的重活**（验收/重编码/又一条出片），再考虑减模型。" ;;
     esac
   else
     say "  ↳ 内核日志无记录：不是 OOM、不是 GPU 故障 → 大概率是终端关闭或外部 kill"

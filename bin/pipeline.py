@@ -192,6 +192,11 @@ class Pipeline:
         if t is None:
             sys.exit(f"✗ 没有这个档位：{tier}（可选 {', '.join(cfg.get('tiers', {}))}）")
         self.tier_cfg = t
+        # ★ 不能让人选了 high 还以为拿到了更高画质 —— 它现在就是 std 的马甲。
+        #   静默等同 = 骗人；这里必须明说，并指出真想提画质该动哪两个参数。
+        if tier == "high" and (t.get("note") or "").find("占位") >= 0:
+            print("⚠️  档位 high 目前是**占位档**，参数与 std 完全相同，出的片不会有更高画质。"
+                  "\n    要真的提画质：改 video.mp（分辨率）或 video.second_pass.high_steps（二采步数）。")
         d = cfg.get("defaults", {})
         self.ctx = {
             "jid": self.jid,

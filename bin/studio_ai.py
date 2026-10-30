@@ -33,6 +33,8 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+# ★ 必须在上面 sys.path 之后：本文件也会被 importlib 从文件路径加载（那时没有 bin/）
+from filebak import bak_path  # noqa: E402
 
 # 人设材料最多喂多少字。整本圣经 17KB 全塞进去会挤掉真正需要的指令，
 # 而且越靠后的内容模型越容易忽略 —— 宁可按优先级截断。
@@ -568,7 +570,7 @@ def save_script(result, ip, setname):
     path = script_text_path(e["path"], setname)
     bak = None
     if os.path.exists(path) and open(path, encoding="utf-8").read().strip():
-        bak = path + ".bak." + _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak = bak_path(path)
         import shutil as _sh
         _sh.copy2(path, bak)
     # ★ 落盘前最后一道闸：重复的话进 TTS 会被念两遍。

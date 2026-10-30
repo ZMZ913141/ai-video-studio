@@ -44,6 +44,11 @@ ROOT = os.path.dirname(BIN_DIR)
 # 让 server 能直接 import 同目录的 studio_ai / prompt_guard（只读调用，不复制逻辑）
 if BIN_DIR not in sys.path:
     sys.path.insert(0, BIN_DIR)
+# ★ 同目录 import 必须写在上面那句 sys.path 之后，不能放进顶部 import 区：
+#   本文件既被 `python3 bin/ui_server.py` 直接跑（那时 sys.path[0] 就是 bin/），
+#   也被 .uitest/ 用 importlib 从文件路径加载（那时 sys.path 里没有 bin/）。
+#   写成顶部 import 的话，后者会 ModuleNotFoundError —— 2026-10-30 加 filebak 时踩到过。
+from filebak import bak_path  # noqa: E402
 UI_DIR = os.path.join(ROOT, "ui")
 ARCHIVE = os.environ.get("STUDIO_ARCHIVE") or "/cfu/ai视频档案库"
 CACHE_DIR = os.path.join(ROOT, ".cache", "ui")
@@ -105,10 +110,18 @@ READ_ACTIONS = {
     "status", "algo", "guard", "llm", "prompts", "pipeline",
 }
 
+# ---------- 出片档位 ----------
+# high 曾经是个**占位档**：config/pipeline.json 里它和 std 的参数一模一样（mp 都是 1.26），
+# 选它不会得到更高画质 —— 界面摆一个「更高画质」的选项、实际输出没差别，是假选项。
+# 2026-10-30 从下拉里拿掉了；但旧 ip.json 里可能已经写了 "high"，
+# 所以**校验仍然接受**它（真跑到时按 std 处理，见 pipeline.py），不让人改配置改到报错。
+TIERS_CHOOSABLE = ("fast", "pilot", "std")            # 界面能选的
+TIERS_ACCEPTED = ("fast", "pilot", "std", "high")     # 校验放行的（含历史遗留）
+
 # ---------- 可写配置（第二层=高级，需二次确认） ----------
 #   全局层 config/pipeline.json
 GLOBAL_WRITABLE = {
-    "defaults.tier":              {"tier": 1, "type": "str",   "label": "默认出片档位", "enum": ["fast", "pilot", "std", "high"]},
+    "defaults.tier":              {"tier": 1, "type": "str",   "label": "默认出片档位", "enum": list(TIERS_CHOOSABLE)},
     "defaults.crf":               {"tier": 1, "type": "int",   "label": "默认 CRF", "min": 12, "max": 28},
     "defaults.maxline":           {"tier": 1, "type": "int",   "label": "字幕每行字数", "min": 6, "max": 20},
     "defaults.overlap":           {"tier": 1, "type": "int",   "label": "重叠帧", "min": 0, "max": 30},
@@ -898,7 +911,7 @@ def build_exec(b, want_result=False):
             argv = ["bin/vstudio.py", "batch", ip, "--count", str(count)]
         tier = (b.get("tier") or "").strip()
         if tier:
-            if tier not in ("fast", "pilot", "std", "high"):
+            if tier not in TIERS_ACCEPTED:
                 raise ValueError(f"不认识的档位：{tier}")
             argv += ["--tier", tier]
         if b.get("dry"):
@@ -914,7 +927,7 @@ def build_exec(b, want_result=False):
         argv = ["bin/vstudio.py", "pipeline", ip, setname]
         tier = (b.get("tier") or "").strip()
         if tier:
-            if tier not in ("fast", "pilot", "std", "high"):
+            if tier not in TIERS_ACCEPTED:
                 raise ValueError(f"不认识的档位：{tier}")
             argv += ["--tier", tier]
         for k in ("from", "to"):
@@ -1059,7 +1072,7 @@ def build_exec(b, want_result=False):
         #   于是出片时第 N 段没有分镜、静默退回默认描述。界面选了档位就带上。
         _t = (b.get("tier") or "").strip()
         if _t:
-            if _t not in ("fast", "pilot", "std", "high"):
+            if _t not in TIERS_ACCEPTED:
                 raise ValueError(f"不认识的档位：{_t}")
             argv += ["--tier", _t]
         if b.get("dry"):
@@ -2266,7 +2279,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "new": node, "unchanged": True,
                                "msg": "当前值和基线一样，不用改"})
 
-        bak = target + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak = bak_path(target)
         shutil.copy2(target, bak)
         parts = key.split(".")
         cur = cur_data
@@ -2299,7 +2312,7 @@ class Handler(BaseHTTPRequestHandler):
                 with open(path, encoding="utf-8") as f:
                     old = f.read()
             if old.strip():
-                bak = path + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                bak = bak_path(path)
                 shutil.copy2(path, bak)
                 trim_backups(path)          # 只留最近几份，旧的进 _旧备份/
             with open(path, "w", encoding="utf-8") as f:
@@ -2383,7 +2396,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with open(path, encoding="utf-8") as f:
                     if f.read().strip():
-                        bak = path + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                        bak = bak_path(path)
                         shutil.copy2(path, bak)
                         trim_backups(path)
             except Exception:
@@ -2461,7 +2474,7 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.exists(cp):
             return self._bad("这张卡没有 card.json")
         card = load_json(cp) or {}
-        bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak = bak_path(cp)
         try:
             shutil.copy2(cp, bak)
         except Exception:
@@ -3128,7 +3141,7 @@ class Handler(BaseHTTPRequestHandler):
         old = data["visual"].get(role)
         rel = os.path.join("02_素材真值", os.path.basename(name))
         data["visual"][role] = rel
-        bak = target + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak = bak_path(target)
         shutil.copy2(target, bak)
         write_json_atomic(target, data)
         append_changelog("ip", ip, target, "visual." + role, old, rel, actor="ui-assets")
@@ -3300,7 +3313,7 @@ class Handler(BaseHTTPRequestHandler):
         if not moved:
             return self._bad("没有可用的图片或视频文件")
 
-        bak = mp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak = bak_path(mp)
         if os.path.isfile(mp):
             shutil.copy2(mp, bak)
         try:
@@ -3414,7 +3427,7 @@ class Handler(BaseHTTPRequestHandler):
 
         mp = self._materials_path(root, full)
         os.makedirs(os.path.dirname(mp), exist_ok=True)
-        bak = mp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak = bak_path(mp)
         old_doc = {}
         if os.path.isfile(mp):
             shutil.copy2(mp, bak)
@@ -3781,7 +3794,7 @@ class Handler(BaseHTTPRequestHandler):
             if replaced:
                 with open(fp, encoding="utf-8") as f:
                     if f.read().strip():
-                        bak = fp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                        bak = bak_path(fp)
                         shutil.copy2(fp, bak)
             with open(fp, "w", encoding="utf-8") as f:
                 f.write(text.rstrip() + "\n")
@@ -3855,7 +3868,7 @@ class Handler(BaseHTTPRequestHandler):
             target = os.path.join(root, "ip.json")
             data = load_json(target) or {}
             old = ((data.get("voice") or {}).get("tts") or {}).get("instruction")
-            bak = target + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+            bak = bak_path(target)
             try:
                 shutil.copy2(target, bak)
             except Exception:
@@ -3897,7 +3910,7 @@ class Handler(BaseHTTPRequestHandler):
             old = data.get("trial")
             data["trial"] = {"mode": mode, "enabled": enabled}
             try:
-                shutil.copy2(target, target + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S"))
+                shutil.copy2(target, bak_path(target))
             except Exception:
                 pass
             write_json_atomic(target, data)
@@ -4250,7 +4263,7 @@ class Handler(BaseHTTPRequestHandler):
                 # ★ 只改这一个字段，不整份替换 —— _ai 的分配理由天然保住
                 old = (doc.get(field) or {}).get(seg)
                 doc.setdefault(field, {})[seg] = arr
-                bak = mp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                bak = bak_path(mp)
                 if os.path.isfile(mp):
                     shutil.copy2(mp, bak)
                 tmp = mp + ".tmp"
@@ -4269,7 +4282,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = load_json(cp) if os.path.exists(cp) else {}
                 old = data.get(field)
                 data[field] = value
-                bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                bak = bak_path(cp)
                 shutil.copy2(cp, bak)
                 write_json_atomic(cp, data)
                 append_changelog("ip", ip, cp, f"card.{field}", old, value, actor="dialogue")
@@ -4279,7 +4292,7 @@ class Handler(BaseHTTPRequestHandler):
                 cp = os.path.join(root, "card.json")
                 data = load_json(cp) if os.path.exists(cp) else {}
                 data.setdefault("habits", []).append(params.get("text"))
-                bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                bak = bak_path(cp)
                 shutil.copy2(cp, bak)
                 write_json_atomic(cp, data)
                 append_changelog("ip", ip, cp, "card.habits", None, params.get("text"), actor="dialogue")
@@ -4289,7 +4302,7 @@ class Handler(BaseHTTPRequestHandler):
                 cp = os.path.join(root, "card.json")
                 data = load_json(cp) if os.path.exists(cp) else {}
                 data.setdefault("redlines", []).append(params.get("text"))
-                bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                bak = bak_path(cp)
                 shutil.copy2(cp, bak)
                 write_json_atomic(cp, data)
                 append_changelog("ip", ip, cp, "card.redlines", None, params.get("text"), actor="dialogue")
@@ -4299,7 +4312,7 @@ class Handler(BaseHTTPRequestHandler):
                 cp = os.path.join(root, "card.json")
                 data = load_json(cp) if os.path.exists(cp) else {}
                 data.setdefault("needs", {}).update({params.get("key"): params.get("value")})
-                bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                bak = bak_path(cp)
                 shutil.copy2(cp, bak)
                 write_json_atomic(cp, data)
                 append_changelog("ip", ip, cp, "card.needs", None, params.get("key"), actor="dialogue")
@@ -4317,7 +4330,7 @@ class Handler(BaseHTTPRequestHandler):
                     cur = cur.setdefault(p, {})
                 old = cur.get(parts[-1])
                 cur[parts[-1]] = value
-                bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                bak = bak_path(cp)
                 shutil.copy2(cp, bak)
                 write_json_atomic(cp, data)
                 append_changelog("ip", ip, cp, f"ip.{key}", old, value, actor="dialogue")
@@ -4335,7 +4348,7 @@ class Handler(BaseHTTPRequestHandler):
                 if os.path.exists(fp):
                     with open(fp, encoding="utf-8") as f:
                         if f.read().strip():
-                            bak = fp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                            bak = bak_path(fp)
                             shutil.copy2(fp, bak)
                 with open(fp, "w", encoding="utf-8") as f:
                     f.write(text.rstrip() + "\n")
@@ -4386,7 +4399,7 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 old = data.get("trial")
                 data["trial"] = {"mode": mode, "enabled": enabled}
-                bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+                bak = bak_path(cp)
                 shutil.copy2(cp, bak)
                 write_json_atomic(cp, data)
                 append_changelog("ip", ip, cp, "trial", old, data["trial"], actor="dialogue")
@@ -4483,7 +4496,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._bad("真值文件不存在")
 
         # 备份（用户规矩：从不用破坏性删除，这里也留后路）
-        bak = target + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak = bak_path(target)
         shutil.copy2(target, bak)
 
         data = load_json(target)

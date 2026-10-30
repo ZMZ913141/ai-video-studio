@@ -42,6 +42,8 @@ from datetime import datetime
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(BIN_DIR)
 sys.path.insert(0, BIN_DIR)
+# ★ 必须在上面 sys.path 之后：本文件也会被 importlib 从文件路径加载（那时没有 bin/）
+from filebak import bak_path  # noqa: E402
 
 # 什么动作值得记一条。全是「上一次没做对」的信号。
 KINDS = {
@@ -258,7 +260,7 @@ def apply(ip, items):
     if not added:
         return 0, None
     data["habits"] = cur + added
-    bak = cp + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak = bak_path(cp)
     if os.path.isfile(cp):
         shutil.copy2(cp, bak)
     else:
