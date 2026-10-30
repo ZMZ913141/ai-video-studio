@@ -281,20 +281,18 @@ def build(tag, srt_path, out_ass, dur=None):
     if d.get("hook"):
         main, sub = d["hook"]
         m2, _ = apply_hl(main, d.get("hl_title", []), color_only=True)
+        s2 = apply_hl(sub, d.get("hl_sub", []), color_only=True)[0] if sub else ""
         _hd = min(S.HOOK_DUR, total)
         if S.TITLE_FX:
-            ev.extend(S.cinematic_title(m2, 0.0, _hd))
-            if sub:
-                ev.append(S.title_rule(0.0, _hd))
+            # 风格与字体正交：风格管光/线/排版（title_style），字体单独选（font_title）。
+            ev.extend(S.build_title(S.title_style(), m2, 0.0, _hd, sub=s2))
         else:
             ev.append(S.dialog(2, 0.0, _hd, "Title",
                                "{" + S.pop(7, 114) + "}" + m2))
+            if s2:
+                ev.append(S.dialog(2, 0.20, _hd, "Sub", "{" + S.pop(5, 108) + "}" + s2))
         hook_txt.add(strip_punct(main))
         if sub:
-            s2, _ = apply_hl(sub, d.get("hl_sub", []), color_only=True)
-            _sub_fx = "{" + S.sub_in() + "}" if S.TITLE_FX \
-                else "{" + S.pop(5, 108) + "}"
-            ev.append(S.dialog(2, 0.20, _hd, "Sub", _sub_fx + s2))
             hook_txt.add(strip_punct(sub))
 
     # ---- 2. 正文逐条 ----
@@ -406,6 +404,11 @@ def _apply_ip_fonts():
         v = sub.get(key)
         if v:
             os.environ[env] = str(v)
+    # 标题风格同样可由本 IP 指定（subtitle.title_style）：
+    # 风格和字体正交 —— 一个管光/线/排版，一个管字形，可以任意组合。
+    ts = sub.get("title_style") or sub.get("style")
+    if ts:
+        os.environ["SUB_TITLE_STYLE"] = str(ts)
     return sub
 
 

@@ -106,6 +106,8 @@ C_GOLD = "004BC2FF"        # #FFC24B 暖金（关键词/数字）
 C_ORANGE = "002E8AFF"      # #FF8A2E 橙金（CTA）
 C_DARK = "00140E08"        # #080E14 近黑棕（描边）
 C_WARM = "00EAF2F5"        # #F5F2EA 暖米白（副文案）
+C_COOL = "00FFE500"        # #FFE500(BGR) = #00E5FF 青蓝（霓虹风冷光）
+C_COOL_DEEP = "00B26A00"   # #006AB2 深青（霓虹风描边，比近黑更贴冷色系）
 
 # ---------- 描边 / 阴影 ----------
 # 实测：白衬衫亮度 180，任何亮色对比度都 <2.1:1 —— 靠颜色救不回来。
@@ -271,7 +273,13 @@ TITLE_MARGIN_V = 150        # 标题顶部下移，避开系统状态栏
 def ass_head():
     """生成 ASS 头。**必须是函数**：模块级 f-string 会在 import 时把当时的
     常量固化下来，之后 set_size() 改了 W/H/字号，头里还是旧值（实测踩过：
-    调了 set_size(896,1568)，写出的 ass 仍是 PlayResX: 768 / 字号 52）。"""
+    调了 set_size(896,1568)，写出的 ass 仍是 PlayResX: 768 / 字号 52）。
+
+    ★ Stamp 样式（BorderStyle=3）：文字背后自动填一块实心底框，Outline 当 padding。
+      这是 ASS 原生的「标签/印章」能力。**不要**改成 \\p1 画矩形 ——
+      libass 会把 drawing 坐标按样式字号缩放（实测 396 units 只画出 150px 宽，
+      加 \\fs 覆盖也不生效），换分辨率必错。
+    """
     return f"""[Script Info]
 ScriptType: v4.00+
 Title: 陈洁斌主号 字幕标题
@@ -289,6 +297,7 @@ Style: Title,{font_of("title")},{FS_TITLE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H7
 Style: Sub,{font_of("cue")},{FS_SUB},&H{C_WARM},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,3,0,1,3,2,8,{SAFE_LEFT},{SAFE_LEFT},{int(round(330*H/BASE_H))},1
 Style: CTA,{font_of("cue_b")},{FS_CTA},&H{C_WHITE},&H000000FF,&H{C_ORANGE},&H90000000,0,0,0,0,100,100,2,0,1,6,3,2,60,60,{int(round(300*H/BASE_H))},1
 Style: Tag,{font_of("cue")},{FS_TAG},&H{C_GOLD},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,4,0,1,3,0,8,{SAFE_LEFT},{SAFE_LEFT},{int(round(200*H/BASE_H))},1
+Style: Stamp,{font_of("title")},{FS_TITLE},&H{C_DARK},&H000000FF,&H{C_GOLD},&H00000000,0,0,0,0,100,100,2,0,3,22,0,8,{SAFE_LEFT},{SAFE_LEFT},{TITLE_MARGIN_V},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -429,20 +438,22 @@ def cinematic_title(text, t0, t1):
     return lines
 
 
-def title_rule(t0, t1, y=None):
-    """主副标之间的金色细线（杂志排版的 rule line，矢量画线）。
+def title_rule(t0, t1, y=None, color=None, half_w=None, h=2, layer=3,
+               fad=(320, 200), style="Sub"):
+    """杂志排版的 rule line（矢量画线，比「——」字符稳，不依赖字形/字体回退）。
 
-    2px 高的暖金短线，比「——」字符稳（不依赖字形/字体回退）。
-    分隔出「主标 → 细线 → 副标」三级层级，杂志感和影视片头感都靠它。
-    y 默认落在主标底与副标顶之间（按最大号标题推算）。
+    分隔出「主标 → 细线 → 副标」的层级。参数化是为了让不同风格复用：
+    magazine 用双线（上线长、下线短），cinematic 用单线。
     """
+    if color is None:
+        color = C_GOLD
     if y is None:
         y = TITLE_MARGIN_V + int(round(_title_fs("四") * 1.30))
-    w = int(round(W * 0.09))
-    return dialog(3, t0, t1, "Sub",
-        "{\\an5\\pos(%d,%d)\\bord0\\shad0\\1c&H%s&\\fad(320,200)"
-        "\\p1}m %d 0 l %d 0 l %d 2 l %d 2{\\p0}"
-        % (W // 2, y, C_GOLD, -w, w, w, -w))
+    w = int(round(W * (half_w if half_w is not None else 0.09)))
+    return dialog(layer, t0, t1, style,
+        "{\\an5\\pos(%d,%d)\\bord0\\shad0\\1c&H%s&\\fad(%d,%d)"
+        "\\p1}m %d 0 l %d 0 l %d %d l %d %d{\\p0}"
+        % (W // 2, y, color, fad[0], fad[1], -w, w, w, h, -w, h))
 
 
 def sub_in():
@@ -454,6 +465,216 @@ def sub_in():
     fsp0 = int(round(FS_SUB * 0.30))
     return ("\\fad(200,120)\\fsp%d\\blur2"
             "\\t(80,520,\\fsp6\\blur0)" % fsp0)
+
+
+# ================= 标题风格库（全 IP 通用，可挑可选） =================
+# 每套风格是一个函数 (text, t0, t1, sub) → Dialogue 行列表。
+# 字体独立于风格：风格管「光/线/排版」，字体由 ip.json 的 font_title 单独选，
+# 两者正交 —— 换字体不该改风格，换风格也不该动字体。
+#
+# 挑选方式：title_preview.py --list-styles / --compare-all 出对比图给人挑；
+# 定板写进 ip.json 的 subtitle.title_style（引擎默认 DEFAULT_TITLE_STYLE）。
+DEFAULT_TITLE_STYLE = "cinematic"
+
+
+def _motion(fs, fsp_end=2, ms=460, fsc=96, fade=(140, 100)):
+    """统一的入场动画：字距收拢 + 模糊聚焦 + 极轻放大。"""
+    fsp0 = int(round(fs * 0.30))
+    return (fs, "\\fs%d\\fsp%d\\blur2\\fscx%d\\fscy%d\\fad(%d,%d)"
+                "\\t(0,%d,\\fsp%d\\blur0\\fscx100\\fscy100)"
+            % (fs, fsp0, fsc, fsc, fade[0], fade[1], ms, fsp_end))
+
+
+def _st_cinematic(text, t0, t1, sub=None):
+    """① 电影感（当前定板）：暖金辉光 + 字距收拢 + 金色扫光 + 金细线 + 宽字距副标。
+
+    出处 FootageCrate：Easy Glow 辉光 / tracking-in 收拢 /
+    "sweep an anamorphic streak across a title" 扫光。
+    """
+    lines = []
+    fs = _title_fs(text)
+    fs, motion = _motion(fs)
+    # 辉光层：填充透明 + 粗描边染金 + 大模糊 = 纯光晕
+    gb = int(round(OUT_TITLE * 1.8))
+    lines.append(dialog(2, t0, t1, "Title",
+        "{\\fs%d\\bord%d\\blur8\\shad0\\1a&HFF&\\3c&H%s&\\3a&H38&"
+        "\\fad(280,170)\\t(0,600,\\bord%d\\blur4)}%s"
+        % (fs, gb, GLOW_COLOR, int(round(gb * 0.6)), text)))
+    # 描边层（收细，让辉光露出来）
+    sb = max(4, int(round(OUT_TITLE * 0.7)))
+    lines.append(dialog(3, t0, t1, "Title",
+        "{\\bord%d\\shad0\\1a&HFF&%s}%s" % (sb, motion, text)))
+    # 渐变字芯：上亮白 / 下暖沙（ASS 无真渐变，\clip 二分）
+    y_top = max(0, TITLE_MARGIN_V - 40)
+    y_mid = TITLE_MARGIN_V + int(round(fs * 0.55))
+    y_bot = TITLE_MARGIN_V + int(round(fs * 1.5)) + 40
+    lines.append(dialog(4, t0, t1, "Title",
+        "{\\bord0\\shad0\\1c&H%s&\\blur1\\clip(0,%d,%d,%d)%s}%s"
+        % (C_WHITE, y_top, W, y_mid, motion, text)))
+    lines.append(dialog(5, t0, t1, "Title",
+        "{\\bord0\\shad0\\1c&H%s&\\blur1\\clip(0,%d,%d,%d)%s}%s"
+        % (C_GRAD_BOTTOM, y_mid, W, y_bot, motion, text)))
+    # 扫光层
+    lines.append(_sweep_layer(text, t0, t1, fs, SWEEP_COLOR))
+    lines.append(title_rule(t0, t1, y=TITLE_MARGIN_V + int(round(fs * 1.30))))
+    if sub:
+        lines.append(dialog(2, 0.20, t1, "Sub", "{" + sub_in() + "}" + sub))
+    return lines
+
+
+def _sweep_layer(text, t0, t1, fs, color, band=0.18, t_a=None, t_b=None):
+    r"""移动竖带 \clip 扫光：带子扫过哪里，哪里的字就亮成 color。"""
+    bw = int(round(W * band))
+    y0 = max(0, TITLE_MARGIN_V - 80)
+    y1 = min(H, TITLE_MARGIN_V + int(round(fs * 2.2)) + 80)
+    ta = int(round((t_a if t_a is not None else SWEEP_T0) * 1000))
+    tb = int(round((t_b if t_b is not None else SWEEP_T1) * 1000))
+    return dialog(6, t0, t1, "Title",
+        "{\\fs%d\\bord0\\shad0\\blur2\\1c&H%s&"
+        "\\clip(-%d,%d,0,%d)\\t(%d,%d,\\clip(%d,%d,%d,%d))}%s"
+        % (fs, color, bw, y0, y1, ta, tb, W, y0, W + bw, y1, text))
+
+
+def _st_magazine(text, t0, t1, sub=None):
+    """② 杂志：上下双细线夹住主标（上线长、下线短），无扫光无辉光。
+
+    走的是印刷排版语法 —— 靠「线」和「字距」建立秩序感，不靠光效。
+    适合偏理性/商业/知识类的 IP；比电影感更克制。
+    """
+    lines = []
+    fs = _title_fs(text)
+    fs, motion = _motion(fs, fsp_end=3, ms=560, fsc=98, fade=(200, 140))
+    # 上线（长，主标之上）/ 下线（短，主标之下）
+    lines.append(title_rule(t0, t1, y=max(8, TITLE_MARGIN_V - int(round(fs * 0.24))),
+                            half_w=0.30, h=2, layer=2))
+    lines.append(title_rule(t0, t1, y=TITLE_MARGIN_V + int(round(fs * 1.22)),
+                            half_w=0.13, h=2, layer=2))
+    # 主标：白字 + 收细的描边（杂志体靠线和字距立秩序，不靠粗描边抢眼）
+    lines.append(dialog(3, t0, t1, "Title",
+                        "{\\bord%d%s}%s" % (max(4, int(round(OUT_TITLE * 0.6))),
+                                           motion, text)))
+    if sub:
+        # 副标更宽的字距（\fsp12），像杂志的眉标/导语
+        fsp0 = int(round(FS_SUB * 0.5))
+        lines.append(dialog(2, 0.30, t1, "Sub",
+            "{\\fad(240,150)\\fsp%d\\blur2\\t(120,560,\\fsp12\\blur0)}%s"
+            % (fsp0, sub)))
+    return lines
+
+
+def _st_pure(text, t0, t1, sub=None):
+    """③ 极简：只有白字 + 极细描边 + 字距收拢，没有光效也没有线。
+
+    瑞士国际主义那一路 —— 相信字本身的体量。最耐看，也最不吃画面。
+    画面复杂/背景花的时候反而最稳（光效会和画面打架）。
+    """
+    lines = []
+    fs = _title_fs(text)
+    fs, motion = _motion(fs, ms=520, fsc=98, fade=(160, 120))
+    lines.append(dialog(3, t0, t1, "Title",
+        "{\\bord%d\\shad0%s}%s" % (max(3, int(round(OUT_TITLE * 0.45))), motion, text)))
+    if sub:
+        fsp0 = int(round(FS_SUB * 0.35))
+        lines.append(dialog(2, 0.25, t1, "Sub",
+            "{\\fad(220,140)\\fsp%d\\blur2\\t(100,540,\\fsp8\\blur0)}%s"
+            % (fsp0, sub)))
+    return lines
+
+
+def _st_neon(text, t0, t1, sub=None):
+    """④ 霓虹冷光：青蓝双层辉光 + 白色扫光 + 冷色描边。
+
+    适合科技/夜间/潮流向；冷色辉光在暖色画面上会很跳，慎重。
+    双层辉光 = 大半径低透明的「氛围层」+ 小半径高透明的「边缘层」，
+    这是霓虹质感的常规做法（单层辉光只会糊）。
+    """
+    lines = []
+    fs = _title_fs(text)
+    fs, motion = _motion(fs)
+    # 外层氛围光（大半径、很淡）
+    lines.append(dialog(2, t0, t1, "Title",
+        "{\\fs%d\\bord%d\\blur%d\\shad0\\1a&HFF&\\3c&H%s&\\3a&H58&"
+        "\\fad(300,180)\\t(0,620,\\bord%d\\blur6)}%s"
+        % (fs, int(round(OUT_TITLE * 2.4)), 14, C_COOL,
+           int(round(OUT_TITLE * 1.6)), text)))
+    # 内层边缘光（小半径、亮）
+    lines.append(dialog(3, t0, t1, "Title",
+        "{\\fs%d\\bord%d\\blur3\\shad0\\1a&HFF&\\3c&H%s&\\3a&H18&"
+        "\\fad(260,160)}%s"
+        % (fs, int(round(OUT_TITLE * 0.9)), C_COOL, text)))
+    # 字芯（白 + 冷色描边）
+    lines.append(dialog(4, t0, t1, "Title",
+        "{\\bord%d\\shad0\\3c&H%s&%s}%s"
+        % (max(4, int(round(OUT_TITLE * 0.6))), C_COOL_DEEP, motion, text)))
+    lines.append(_sweep_layer(text, t0, t1, fs, C_WHITE, band=0.14))
+    if sub:
+        fsp0 = int(round(FS_SUB * 0.35))
+        lines.append(dialog(2, 0.25, t1, "Sub",
+            "{\\fad(220,140)\\fsp%d\\blur2\\t(100,540,\\fsp7\\blur0)"
+            "\\1c&H%s&}%s" % (fsp0, C_COOL, sub)))
+    return lines
+
+
+def _st_stamp(text, t0, t1, sub=None):
+    """⑤ 印章/标签：金色实心底块 + 深色字反白，横向展开入场。
+
+    短视频里冲击力最强的一种（像盖章/贴标签），适合强观点、强促销。
+    底框走 ASS 原生的 BorderStyle=3（Stamp 样式）—— 宽度永远贴合文字，
+    不用手算字宽（手算遇到标点/数字/混排就会偏）。
+    """
+    lines = []
+    fs = _title_fs(text)
+    fsp0 = int(round(fs * 0.30))
+    # \fscx 从 18% 弹开到 100%：框和字一起横向生长（\(t 作用在整条行上，
+    # BorderStyle=3 的底框会跟着文字一起缩放，所以框也是「长」出来的）
+    lines.append(dialog(2, t0, t1, "Stamp",
+        "{\\fs%d\\fsp%d\\fscx18\\fad(160,120)"
+        "\\t(0,340,\\fscx100\\fsp2)}%s" % (fs, fsp0, text)))
+    if sub:
+        lines.append(dialog(2, t0 + 0.45, t1, "Sub",
+            "{\\fad(200,140)\\fsp8}%s" % sub))
+    return lines
+
+
+TITLE_STYLES = {
+    "cinematic": ("电影感", "暖金辉光 + 字距收拢 + 金色扫光 + 金细线（FootageCrate 三件套）"),
+    "magazine": ("杂志", "上下双细线夹主标，靠线与字距建立秩序，无光效"),
+    "pure": ("极简", "只有白字 + 细描边 + 收拢，最耐看，不吃画面"),
+    "neon": ("霓虹", "青蓝双层辉光 + 白扫光 + 冷色描边，科技/潮流向"),
+    "stamp": ("印章", "金色底块横向展开 + 深色字反白，冲击力最强"),
+}
+_TITLE_BUILDERS = {
+    "cinematic": _st_cinematic,
+    "magazine": _st_magazine,
+    "pure": _st_pure,
+    "neon": _st_neon,
+    "stamp": _st_stamp,
+}
+
+
+def title_style_list():
+    """[(key, 中文名, 说明)] —— 给预览器/UI 列举用。"""
+    return [(k, v[0], v[1]) for k, v in TITLE_STYLES.items()]
+
+
+def title_style():
+    """当前生效的标题风格：环境变量 SUB_TITLE_STYLE > 引擎定板。
+
+    ip.json 的 subtitle.title_style 由 make_ass._apply_ip_fonts() 写进这个环境变量
+    （和字体同一条路：ip.json 优先级高于引擎默认）。
+    """
+    v = (os.environ.get("SUB_TITLE_STYLE") or "").strip().lower()
+    return v if v in _TITLE_BUILDERS else DEFAULT_TITLE_STYLE
+
+
+def build_title(style, text, t0, t1, sub=None):
+    """按风格名生成开场标题事件（不认识的名字回退到定板风格并告警）。"""
+    fn = _TITLE_BUILDERS.get((style or "").strip().lower())
+    if fn is None:
+        import sys
+        print(f"  ⚠ 未知标题风格 {style!r} → 用 {DEFAULT_TITLE_STYLE}", file=sys.stderr)
+        fn = _TITLE_BUILDERS[DEFAULT_TITLE_STYLE]
+    return fn(text, t0, t1, sub)
 
 
 def fade_only(ms_in=60, ms_out=40):

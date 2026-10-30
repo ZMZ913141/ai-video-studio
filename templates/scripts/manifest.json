@@ -34,7 +34,7 @@
     "make_srt_asr.py": "03_生产脚本",
     "mix_bgm.py": "03_生产脚本",
     "newip.py": "03_生产脚本",
-    "substyle.py": "03_生产脚本",
+    "substyle.py": "03_生产脚本", "title_preview.py": "03_生产脚本",
     "ascii_view.py": "04_验收工具",
     "audio_check.py": "04_验收工具",
     "pause_energy.py": "04_验收工具",
