@@ -231,6 +231,7 @@ systemctl --user status comfyui               # 之后只认这一条
 | 守护明明没在跑，`start` 却说「守护已在运行（锁被占）」 | `exec 9>"$LOCKF"` 加的 `flock` fd **被子进程继承了**：守护自己退出后，ComfyUI 还攥着那把锁 | 已修：起 ComfyUI 的子 shell 里先 `exec 9>&-`。万一又遇到，`for p in /proc/[0-9]*; do ls -l $p/fd \\| grep -q comfy/lock && echo $p; done` 能揪出持有者 |
 | 审计/验收步骤卡了几分钟不结束，ComfyUI 那边也没动静 | 队列里卡着**幽灵任务**（客户端被强杀时，已提交的 prompt 还挂在 `queue_running`），后续任务全在排队 | `curl -s --noproxy '*' http://127.0.0.1:8188/queue` 看，然后 `curl -X POST .../interrupt` 清掉。正常审计 21 条约几十秒，跑到 400s 就是被堵了 |
 | 启动时刷一串 `IMPORT FAILED`（某几个插件报缺依赖） | **多半不是插件坏了**：是同时起了两个 ComfyUI，抢不到 8188 的那个顺手报一串假错然后退出（2026-10-30 用户看到的 SeedVR2 就是这种；活的实例其实把它的 6 个节点都加载了） | `ps -eo args \| grep main.py` 看是不是两个；守护已加**单实例锁 + 端口占用即接管**；别再手敲 `./run.sh`，只用 `comfy_supervisor.sh start` |
+| 听感上 **BGM 把人声盖住了**（音乐和人声差不多响） | 配乐增益是拿**处理链之前**的人声算的，而 `acompressor` 会自己吃掉一大截（T01 实测 −22.7 → −32.9 LUFS，吃 10.2 LU；T02 只吃 2.6、S02 只吃 0.1 —— 全看语音峰值因数）→ 名义「配乐低 13 LU」实际只低 0.9 LU。另一个帮凶：整片 `loudnorm` 放在混音**之后**，会把只剩配乐的停顿段当安静段多补几 dB | 已修：配乐改按**处理之后**的人声反算；归一挪到人声链末尾（只对人声），混完只留 `alimiter`。**验收看「说话段 − 停顿段」的电平差，不看 LUFS**：<8 dB 听不清、<12 开始糊、专业口播 15~20 dB。`audio_check.py` 已改成量这个指标（原来拿参考音频当基准，差 8 dB，「配乐比人声响 4 dB」的片子也能判过）。临时救急：`BGM_ABS_DB=-18` 强制绝对增益，或 `BGM_DUCK=1`（默认开） |
 
 ---
 
