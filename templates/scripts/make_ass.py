@@ -43,24 +43,13 @@ def parse_srt(path):
 # 结构：hook 钩子标题 / subs 副标题 / hl 花字关键词 / cta 结尾行动句
 # 花字的 key 必须能在该条字幕里精确匹配到（不含标点），否则静默跳过并告警。
 DESIGN = {
-    "S01": {
-        "hook": ("全是AI做的", "从长相到声音"),
-        # 钩子标题/副标的金色锚点词：剪映模板的钩子从不整块同色，
-        # 一定有一两个词变色，把眼睛钉在那儿。只给 1 个，多了就散。
-        "hl_title": ["AI"],
-        "hl_sub": ["长相", "声音"],
-        "hl": {
-            "不存在": "数字/反差",
-            "AI做出来": "身份揭露",
-            "不敢出镜": "痛点",
-            "好几千": "价格锚",
-            "来回折腾": "痛点",
-            "二十分钟": "数字承诺",
-            "不用出镜": "核心利益",
-            "分身": "产品词",
-        },
-        "cta_cues": [12],
-    },
+    # ★ S01 的手写配置已于 2026-10-30 移除 —— 它是**旧文案时代**写的：
+    #   hook「全是AI做的」、花字「好几千」「不敢出镜」、cta_cues=[12]。
+    #   文案重排后第 12 条早已从「私信两个字，分身」变成「过不了自己那关」，
+    #   于是 CTA 烧在了一句毫无引导性的台词上。
+    #   ⚠ 关键教训：cta_cues 是**行号硬编码**，文案一改就会错位到别的句子上，
+    #     而且**不告警**（只有越界才告警）——比越界更隐蔽。
+    #   现在 S01 走 auto_design()：按当前真实文案自动生成标题/花字/CTA。
     "S02": {
         "hook": ("不用再折腾", "你只需要10秒录音"),
         "hl_title": ["折腾"],
@@ -315,6 +304,21 @@ def build(tag, srt_path, out_ass, dur=None):
         else:
             print(f"  ⚠ {tag} 的 cta_cues={d['cta_cues']} 越界（共 {len(cues)} 条），"
                   f"且没找到含 {'/'.join(CTA_WORDS[:4])} 的条 → 本片无 CTA 强调",
+                  file=sys.stderr)
+    elif cta_idx:
+        # ⚠ 比越界**更隐蔽**：行号没越界，但文案重排后它已经指向另一句了。
+        #   S01 实例（2026-10-30）：cta_cues=[12] 原本指「私信两个字，分身」，
+        #   文案改稿后第 12 条变成「过不了自己那关」——CTA 烧在一句完全没有
+        #   引导性的台词上，而且一声不响（越界才告警，错位不告警）。
+        _i0 = sorted(cta_idx)[0]
+        if not any(w in cues[_i0 - 1]["text"] for w in CTA_WORDS):
+            found = [i for i, c in enumerate(cues, 1)
+                     if any(w in c["text"] for w in CTA_WORDS)]
+            hint = (f"，疑似应为第 {found[-1]} 条「{cues[found[-1]-1]['text'][:14]}」"
+                    if found else "，且全片没有含转化词的条")
+            print(f"  ⚠ {tag} 的 cta_cues={sorted(cta_idx)} 指向的台词不含转化词"
+                  f"（「{cues[_i0-1]['text'][:14]}」）{hint}"
+                  f"\n    行号硬编码会随文案改稿错位且不告警 —— 建议改走 auto_design",
                   file=sys.stderr)
     warns = []
     used_hl = set()     # 每个关键词**全片只染一次**
