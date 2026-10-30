@@ -1,0 +1,26 @@
+[Unit]
+Description=ComfyUI 出片服务（127.0.0.1:8188，崩溃自动重启 + 死因取证）
+Documentation=file:///home/qmr/github/ai-video-studio/docs/交付SOP.md
+After=network-online.target
+# 不限制重启次数：崩溃风暴由守护脚本自己退避（5s→10s→…→120s），
+# 这里若限流，反而会在第 N 次崩溃后彻底放弃，正是我们要避免的"静默停工"。
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# 用守护脚本而不是直接跑 run.sh：
+#   1) 它记录每次退出的退出码 + 内核日志（Xid / OOM），死因才有据可查
+#   2) 它会等 /system_stats 真的通才算启动成功，而不是"进程在就算好"
+ExecStart=/bin/bash /home/qmr/github/ai-video-studio/bin/comfy_supervisor.sh run
+WorkingDirectory=/cfu/ComfyUI
+Restart=always
+RestartSec=5
+# 停服务时先给 ComfyUI 机会自己收尾（存盘/释放显存），超时再强杀
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:/home/qmr/.cache/comfyui-service.log
+StandardError=append:/home/qmr/.cache/comfyui-service.log
+
+[Install]
+WantedBy=default.target

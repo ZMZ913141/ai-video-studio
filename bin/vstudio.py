@@ -874,16 +874,35 @@ def cmd_status(a):
             rows.append(brief(j))
         out["ips"].append({"name": e["name"], "jobs": rows})
     import urllib.request
+    # ★ 必须绕代理：本机设了 http_proxy，不绕会拿到反代的 502，
+    #   把「服务活着」误报成 down —— 这类假警报比没警报更坏。
+    _op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     svc = {}
     for name, url in (("pipeline", "http://127.0.0.1:8000/health"),
                       ("n8n", "http://127.0.0.1:5678"),
                       ("comfyui", "http://127.0.0.1:8188/system_stats")):
         try:
-            urllib.request.urlopen(url, timeout=3)
+            _op.open(url, timeout=3)
             svc[name] = "up"
         except Exception as ex:
             svc[name] = f"down({type(ex).__name__})"
     out["services"] = svc
+    # 出片服务崩过几次 / 上次怎么死的 —— 只看 up/down 看不出「它在反复崩」
+    _sl = os.path.join(os.path.dirname(BIN_DIR), ".cache", "comfy", "supervisor.log")
+    if os.path.exists(_sl):
+        try:
+            with open(_sl, encoding="utf-8", errors="replace") as f:
+                _txt = f.read()
+            _n = _txt.count("════ ComfyUI 退出")
+            _last = ""
+            if _n:
+                for _ln in _txt.rsplit("════ ComfyUI 退出", 1)[-1].splitlines():
+                    if "退出码" in _ln:
+                        _last = _ln.split("退出码", 1)[1].strip()
+                        break
+            out["comfy_crashes"] = {"count": _n, "last_rc": _last}
+        except OSError:
+            pass
     if a.json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
@@ -894,6 +913,11 @@ def cmd_status(a):
     print("\n服务：")
     for k, v in svc.items():
         print(f"   {k:<10} {v}")
+    cc = out.get("comfy_crashes")
+    if cc and cc.get("count"):
+        print(f"   出片服务崩过 {cc['count']} 次"
+              + (f"，上次退出码 {cc['last_rc']}" if cc.get("last_rc") else "")
+              + "（死因看 bash bin/comfy_supervisor.sh status）")
 
 
 def cmd_pipeline(a):

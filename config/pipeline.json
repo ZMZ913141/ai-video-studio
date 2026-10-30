@@ -39,6 +39,7 @@
   "steps": [
     {
       "id": "tts",
+      "needs_comfy": true,
       "stage": "音频",
       "desc": "文案 → TTS 定板音频（音色来自本 IP 的 ip.json）",
       "py": "std",
@@ -74,6 +75,7 @@
     },
     {
       "id": "srt",
+      "needs_comfy": true,
       "stage": "字幕",
       "desc": "ASR 强制对齐出 SRT（留白后的音频 → 时间轴自动带偏移）",
       "py": "std",
@@ -105,6 +107,7 @@
     },
     {
       "id": "video",
+      "needs_comfy": true,
       "stage": "视频",
       "desc": "H3 出片（分段由脚本按停顿 DP 自适应）",
       "py": "std",

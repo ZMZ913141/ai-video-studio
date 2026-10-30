@@ -32,6 +32,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime
 
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +43,19 @@ import studio_algo as A                      # noqa: E402
 import vstudio as V                          # noqa: E402
 
 CFG_PATH = os.path.join(ROOT, "config", "pipeline.json")
+COMFY_URL = os.environ.get("COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
+
+
+def comfy_alive(timeout=3.0):
+    """ComfyUI 活着吗。★ 必须绕代理：本机设了 http_proxy，
+    不绕会拿到反代的 502，把"活着"误判成"死了"。"""
+    try:
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with op.open(COMFY_URL + "/system_stats", timeout=timeout) as r:
+            return 200 <= r.status < 300
+    except Exception:
+        return False
+
 FF_FALLBACK = "/home/qmr/.workbuddy/binaries/python/envs/default/lib/python3.13/site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2"
 
 
@@ -344,6 +358,50 @@ class Pipeline:
         out = render(st.get("out_glob", ""), self.ctx, miss) or None
         return cmd, env, out, miss
 
+    def gate_comfy(self, st):
+        """要 ComfyUI 的步骤，开工前先确认服务活着。
+
+        为什么放在**执行前**而不是出错后：出片一步要跑十几分钟，跑到一半
+        服务没了，前面所有 GPU 时间全废；而且日志断在半句，人以为在排队。
+        2026-10-30 就是这么白等的 12 分钟（ComfyUI 被 Xid 43 判死，
+        批量任务还在原地轮询一个永远不会来的结果）。
+        """
+        if self.dry or not st.get("needs_comfy"):
+            return True
+        if comfy_alive():
+            return True
+
+        sid = st["id"]
+        print(f"  ✗ ComfyUI 没在跑（{COMFY_URL}）—— {sid} 这一步必须有它")
+        auto = (os.environ.get("COMFY_AUTOSTART") or "1").strip().lower()
+        sup = os.path.join(ROOT, "bin", "comfy_supervisor.sh")
+        if auto not in ("0", "false", "off", "no") and os.path.isfile(sup):
+            print("    尝试自动拉起（守护脚本会先自检 GPU）…")
+            started = False
+            try:
+                r = subprocess.run(["bash", sup, "start"], capture_output=True,
+                                   text=True, timeout=180)
+                msg = ((r.stdout or "") + (r.stderr or "")).strip()
+                if msg:
+                    print("    " + msg.replace("\n", "\n    "))
+                # ★ 守护脚本明确拒绝时（如拿不到 GPU，rc=3）就别再空等 3 分钟
+                started = (r.returncode == 0)
+            except Exception as ex:
+                print(f"    自动拉起失败：{ex}")
+            if started:
+                for _ in range(90):      # 冷启动要加载模型，最多等 3 分钟
+                    if comfy_alive():
+                        print("    ✓ 已拉起，继续")
+                        return True
+                    time.sleep(2)
+                print("    ✗ 等不到就绪")
+
+        print(f"    手动起一次即可（之后它挂了会自己重启）：")
+        print(f"      bash {ROOT}/bin/comfy_supervisor.sh start")
+        print(f"    已经装成系统服务的话：systemctl --user restart comfyui")
+        print(f"    查它上次怎么死的：bash {ROOT}/bin/comfy_supervisor.sh status")
+        return False
+
     def run_step(self, st):
         sid = st["id"]
         rec = {"id": sid, "stage": st.get("stage"), "desc": st.get("desc", ""),
@@ -436,6 +494,14 @@ class Pipeline:
 
         if self.dry:
             rec["status"] = "dry"
+            self.log["steps"].append(rec)
+            return rec
+
+        if not self.gate_comfy(st):
+            rec["status"] = "failed"
+            rec["error"] = f"ComfyUI 不可用（{COMFY_URL}），{sid} 无法开工"
+            rec["t1"] = time.time()
+            rec["sec"] = round(rec["t1"] - rec["t0"], 1)
             self.log["steps"].append(rec)
             return rec
 

@@ -107,7 +107,94 @@ ffmpeg -i <成片> 2>&1 | grep -E "Duration|Stream"
 3. **ComfyUI 活着**
    ```bash
    curl -s --noproxy '*' -m 3 http://127.0.0.1:8188/system_stats -o /dev/null -w "%{http_code}\n"
+   bash bin/comfy_supervisor.sh status     # 更全：守护在不在、重启过几次、上次怎么死的
    ```
+   ★ 流水线自己也会查（`pipeline.json` 里 tts/srt/video 三步标了 `needs_comfy`），
+   服务不在就**开工前**停住并给恢复命令，不会跑十步死在半路。
+
+---
+
+## 二·五、ComfyUI 挂了怎么办 —— 三层防线
+
+### 先说结论：它一定会再挂，所以别指望"不挂"
+
+2026-10-30 真崩了一次，是这类事故的标准长相：
+
+```
+05:22:39  出完最后一条视频（WAN 视频模型还占着显存）
+05:23:44  批量任务紧接着提交 TTS（要换成语音模型）
+05:24:10  内核：NVRM: Xid (PCI:0000:01:00): 43, pid=8910, name=python
+          → python 进程当场消失，没有 Traceback，日志断在半句
+05:24→05:36  流水线还在原地轮询一个永远不会来的结果（白等 12 分钟）
+```
+
+**`rc=0` 的日志是查不出这种事的**——进程被内核/驱动干掉时一个字节都写不出来。
+判读必须看内核：
+
+```bash
+journalctl -k --since "-30min" | grep -iE "Xid|out of memory|Killed process|NVRM"
+```
+
+### 死法对照表（对着这张表看，别猜）
+
+| 证据 | 死法 | 处置 |
+|---|---|---|
+| `NVRM: Xid ... 43`（或 13/31/79） | **GPU 层故障**，最常见于**换模型那一瞬**（视频模型 → TTS 模型） | 用现在的 `run.sh`（已去掉 `--high-ram`、async 流 2→1）；批量时别让「出片」和「TTS」紧挨着抢显存 |
+| 退出码 137 + `Killed process … anon-rss` | **内核 OOM**（RAM 不足，不是显存） | `python3 bin/comfy_guard.py oom`，再 `preflight`；别并发跑两条 |
+| 退出码 129 | **SIGHUP**：启动它的终端被关了 | 别再手敲 `./run.sh` 放前台，用守护/服务 |
+| 退出码 143 | SIGTERM，被正常终止（有人 stop / 注销） | 正常，重启即可 |
+| 内核日志**完全没记录** | 外部 `kill` 或终端关闭 | 同上，改用守护 |
+
+### 三层防线（已全部落地，按"能不能接受一次损失"排序）
+
+**第一层：别崩** — `/cfu/ComfyUI/run.sh` 已改成稳定性优先
+
+```bash
+COMFY_HIGH_RAM=0     # 不让旧模型赖着不卸载（换模型才干净）
+COMFY_ASYNC=1        # 异步卸载流 2 → 1，暂存减半
+COMFY_RESERVE_VRAM=1.0   # 给桌面/系统留 1G，0.5 太抠
+```
+想回高性能：`COMFY_HIGH_RAM=1 COMFY_ASYNC=2 ./run.sh`（会更快，也更容易再崩）。
+原文件留在 `run.sh.bak-20261030-xid43`。
+
+**第二层：崩了自己回来** — 守护进程 / 用户级服务
+
+```bash
+bash bin/comfy_supervisor.sh start     # 后台常驻，关终端也不死；死了 5 秒后自动重启
+bash bin/comfy_supervisor.sh status    # 守护在不在 / 服务活没活 / 重启过几次 / 上次死因
+bash bin/comfy_supervisor.sh logs      # 跟 ComfyUI 输出
+```
+每次死亡它都会把**退出码 + 内核 Xid/OOM + 该从哪一步续跑**写进
+`.cache/comfy/supervisor.log`。这就是"死因取证"。
+
+想彻底不用管（开机就在、崩溃自愈）：
+
+```bash
+bash bin/install-comfy-service.sh             # 装成 systemd 用户服务（一次）
+sudo loginctl enable-linger $USER             # 可选：开机不用登录也起
+systemctl --user status comfyui               # 之后只认这一条
+```
+
+**第三层：崩了不白等** — 流水线侧
+
+- 开工前门禁：`tts / srt / video` 标了 `needs_comfy`，服务不在就**先停**并打印恢复命令
+- 提交/轮询都会快速失败（连续连不上约 1 分钟就报错退出，不再无限重试）
+- 心跳：等超过 1 分钟会打印一行，人能看出"它在排队"还是"它在等死"
+
+### 为什么「AI 自己把 ComfyUI 起回来」做不到
+
+不是不肯，是这个执行环境拿不到显卡，实测四条路全堵：
+
+| 路径 | 实测结果 |
+|---|---|
+| 直接 `run.sh` / `python main.py` | `torch.cuda.is_available() = False`、`devices 0`、`Can't initialize NVML`（seccomp 挡 CUDA 驱动调用）→ 起个没显卡的空壳，提交任务必失败，比不起更误事 |
+| `systemctl --user` | `Failed to connect to user scope bus`（总线不可达） |
+| `crontab` / `at` | `crontabs/root/: 权限不够` |
+| `ssh localhost` 绕出沙箱 | sshd 没监听（`Connection refused`） |
+
+所以守护脚本**先自检 GPU 再决定要不要起**：拿不到就直接说清楚，不会偷偷起个残废服务。
+你只需要在自己的终端执行一次 `bash bin/comfy_supervisor.sh start`（或装成服务），
+之后它自己负责所有重启——**这才是"确保它不挂"的真正形态**。
 
 ---
 
@@ -132,7 +219,8 @@ ffmpeg -i <成片> 2>&1 | grep -E "Duration|Stream"
 | 界面显示 `--gen`，实际按 fast 跑；非法档位也返回成功 | 命令行预览与执行器各写一套 | 已修：预览优先走执行器同一份拼装 |
 | 手工设 `TARGET_SECS=8` 想「每段 8 秒」，结果出了 8 段 | 这个变量是**目标段数**，不是秒数 | 已改名 `TARGET_SEGS`（老名仍兼容，会打一行提示） |
 | 成片字幕出现**双层重影** / 画面顶部莫名多出文字 | 参考视频本身带字（烧过字幕的成片、水印、台标）。模型会照着参考画面**自己重画文字**，位置还可能跑到顶部 | 换**原始无字**素材重出；出片日志会提醒 |
-| TTS/出片**卡十几分钟一个字不打** | ComfyUI 中途崩了（先查内存：还有几十 G 就不是 OOM，就是服务没了） | 已修：轮询连续失败会明确报错退出，不再死等；重启 ComfyUI 后 `--from <那一步>` 接着跑 |
+| TTS/出片**卡十几分钟一个字不打** | ComfyUI 中途崩了（先查内存：还有几十 G 就不是 OOM，就是服务没了） | 已修：开工前门禁 + 轮询连续失败即报错退出；服务用守护进程托管后自己会回来（见「二·五」） |
+| 出片/配音跑到一半服务没了，`system_stats` 返回 **000** | 被 GPU 判死（`Xid 43`，换模型瞬间）或终端被关（`SIGHUP`） | 用 `bin/comfy_supervisor.sh start` 托管；死因看 `.cache/comfy/supervisor.log` |
 
 ---
 

@@ -452,7 +452,7 @@
 出片这类要调模型/显卡的重活，界面<b>只给命令</b>，你复制回终端跑 ——
 不是做不到，是<b>刻意不代跑</b>：看不见它死在哪，比慢更可怕。</p>
 
-<h2>六、八个最常见的坑</h2>
+<h2>六、九个最常见的坑</h2>
 
 <h3>1. 改了中文提示词，画面没变</h3>
 <p>出片只认 <span class="path">prompts.en.json</span>。中文稿只是给人看的。
@@ -533,6 +533,22 @@ ComfyUI 只在最后落一个完整 mp4。所以 <b>video 这一步内部失败�
 （手滑传 8 就会出 8 段）。已改名 <span class="path">TARGET_SEGS</span>，老名仍兼容但会打一行提示。
 完整的交付动作清单见 <span class="path">docs/交付SOP.md</span>。</p>
 
+<h3>9. 出片跑到一半突然不动了，屏幕上再没新字</h3>
+<p>大概率不是「在排队」，是 <b>ComfyUI 这个出片服务自己死了</b>。2026-10-30 真崩过一次：
+出完视频紧接着配音，<b>换模型</b>的那一瞬间被显卡判死（内核记作 <span class="path">Xid 43</span>），
+进程当场消失、一个字都来不及写。以前只能干等，现在不会了。</p>
+<p><b>你只需要记一句话：</b></p>
+<pre><code>bash bin/comfy_supervisor.sh status</code></pre>
+<p>它会直接告诉你：服务活着吗、重启过几次、<b>上次是怎么死的</b>（退出码 + 内核记录都抓好了）。
+要它自己看住服务（死了 5 秒后自动拉起，关掉终端也不影响）：</p>
+<pre><code>bash bin/comfy_supervisor.sh start      # 托管起来
+bash bin/install-comfy-service.sh       # 想更省事：装成开机自启的系统服务</code></pre>
+<div class="card warn">
+<b>别再手敲一条命令放前台跑 ComfyUI</b>
+<p>那样关掉终端窗口它就跟着死（退出码 129）。要么用上面的守护，要么装成服务。
+另外：<b>出片和配音别紧挨着抢显存</b> —— 换模型那一刻最容易崩。</p>
+</div>
+
 <h2>七、常用命令（抄走就用）</h2>
 
 <pre><code>bash bin/start-ui.sh                 # 起网页工作台
@@ -543,6 +559,9 @@ python3 bin/vstudio.py prompts 洁斌 S05 --gen      # 生成提示词
 python3 bin/vstudio.py prompts 洁斌 S05 --optimize # 优化提示词
 python3 bin/vstudio.py prompts 洁斌 S05 --to-en    # 译成英文（出片才认）
 python3 bin/vstudio.py pipeline 洁斌 S05 --from video  # 从失败那步接着跑
+bash bin/comfy_supervisor.sh start   # 看住出片服务（挂了自动重启）
+bash bin/comfy_supervisor.sh status  # 它活着吗/重启过几次/上次怎么死的
+bash bin/install-comfy-service.sh    # 装成开机自启（只需一次）
 </code></pre>
 
 <div class="card">
