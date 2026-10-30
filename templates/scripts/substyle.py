@@ -268,7 +268,50 @@ def check_font_fit(fs_cue=None, max_chars=12):
 
 # ---------- 关键位置 ----------
 CUE_MARGIN_V = 288          # 字幕底边落在 y≈1088，安全区内且不压下巴
-TITLE_MARGIN_V = 150        # 标题顶部下移，避开系统状态栏
+TITLE_MARGIN_V = 150        # 标题顶部下移，避开系统状态栏（top 锚点的基准值）
+
+# ---------- 标题位置（可挑选 / 可编辑） ----------
+# 以前只有「顶部」一种、写死在各层里（改一次要动代码，且各层各算一遍容易散）。
+# 现在锚点 + 偏移两个参数，所有层（辉光/描边/渐变/扫光/金线/副标）统一以
+# title_top() 为基准 → 改位置整体联动，不会散架。
+# 配置入口：ip.json subtitle.title.{anchor, offset}，见 apply_title_cfg()。
+TITLE_ANCHOR = "top"        # top | third | center | lower
+TITLE_OFFSET = 0            # 相对锚点的像素偏移（+ 下移 / - 上移）
+SUB_GAP = 180               # 副标相对主标顶部的间距（基准分辨率，随 H 缩放）
+
+TITLE_ANCHORS = {
+    "top":    "顶部（定板）：压在画面上部空白区，不吃人脸",
+    "third":  "上三分之一：黄金分割线，画面重心更稳",
+    "center": "正中：适合信息型口播、无人物画面的片",
+    "lower":  "下三分之一：接近字幕区，有压字幕风险（慎用）",
+}
+
+
+def title_block_h():
+    """标题块（主标 + 金线 + 副标）的估算高度 —— 居中锚点要用它算顶部。"""
+    return int(round(FS_TITLE * 1.24 * 1.9 + FS_SUB * 1.8))
+
+
+def title_top():
+    """主标顶部的 y（绝对像素）。**所有层都以它为基准**。
+
+    ⚠ 各层不要各自用 TITLE_MARGIN_V 硬算 —— 以前就是这样，改位置要改 N 处，
+      漏一处就会「辉光在原位、字跑掉了」。
+    """
+    if TITLE_ANCHOR == "third":
+        base = int(round(H * 0.30))
+    elif TITLE_ANCHOR == "center":
+        base = int(round((H - title_block_h()) / 2))
+    elif TITLE_ANCHOR == "lower":
+        base = int(round(H * 0.62))
+    else:
+        base = TITLE_MARGIN_V
+    return max(0, min(int(round(H * 0.86)), base + TITLE_OFFSET))
+
+
+def sub_top():
+    """副标顶部：跟主标一起走（间距按分辨率缩放，保持定板不变）。"""
+    return title_top() + int(round(SUB_GAP * H / BASE_H))
 
 def ass_head():
     """生成 ASS 头。**必须是函数**：模块级 f-string 会在 import 时把当时的
@@ -293,11 +336,11 @@ YCbCr Matrix: TV.709
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Cue,{font_of("cue")},{FS_CUE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,1,0,1,{OUT_CUE},{SHA_CUE},2,{SAFE_LEFT},{SAFE_LEFT},{CUE_MARGIN_V},1
 Style: CueB,{font_of("cue_b")},{FS_CUE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,1,0,1,{OUT_CUE},{SHA_CUE},2,{SAFE_LEFT},{SAFE_LEFT},{CUE_MARGIN_V},1
-Style: Title,{font_of("title")},{FS_TITLE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H78000000,0,0,0,0,100,100,2,0,1,{OUT_TITLE},{SHA_TITLE},8,{SAFE_LEFT},{SAFE_LEFT},{TITLE_MARGIN_V},1
-Style: Sub,{font_of("cue")},{FS_SUB},&H{C_WARM},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,3,0,1,3,2,8,{SAFE_LEFT},{SAFE_LEFT},{int(round(330*H/BASE_H))},1
+Style: Title,{font_of("title")},{FS_TITLE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H78000000,0,0,0,0,100,100,2,0,1,{OUT_TITLE},{SHA_TITLE},8,{SAFE_LEFT},{SAFE_LEFT},{title_top()},1
+Style: Sub,{font_of("cue")},{FS_SUB},&H{C_WARM},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,3,0,1,3,2,8,{SAFE_LEFT},{SAFE_LEFT},{sub_top()},1
 Style: CTA,{font_of("cue_b")},{FS_CTA},&H{C_WHITE},&H000000FF,&H{C_ORANGE},&H90000000,0,0,0,0,100,100,2,0,1,6,3,2,60,60,{int(round(300*H/BASE_H))},1
 Style: Tag,{font_of("cue")},{FS_TAG},&H{C_GOLD},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,4,0,1,3,0,8,{SAFE_LEFT},{SAFE_LEFT},{int(round(200*H/BASE_H))},1
-Style: Stamp,{font_of("title")},{FS_TITLE},&H{C_DARK},&H000000FF,&H{C_GOLD},&H00000000,0,0,0,0,100,100,2,0,3,22,0,8,{SAFE_LEFT},{SAFE_LEFT},{TITLE_MARGIN_V},1
+Style: Stamp,{font_of("title")},{FS_TITLE},&H{C_DARK},&H000000FF,&H{C_GOLD},&H00000000,0,0,0,0,100,100,2,0,3,22,0,8,{SAFE_LEFT},{SAFE_LEFT},{title_top()},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -359,6 +402,143 @@ TITLE_FX = os.environ.get("SUB_TITLE_FX", "").strip().lower() \
 # ★ make_ass 的 skipped_title 判定窗口也用这个值（标题承担同文字幕不上屏），
 #   两处必须联动，否则改一处会出现「标题还在、底部又滚一遍同样的话」。
 HOOK_DUR = 3.6
+
+# ===================== 标题：可挑选 / 可编辑的三个维度 =====================
+# 风格（光/线/排版）× 字体（字形）× 动效（怎么出现），加上位置与停留时长。
+# 以前全是写死的常量，改一次要动代码；现在统一收进 TITLE_CFG：
+#   ip.json → subtitle.title.{style,font,motion,anchor,offset,hold,glow,sweep}
+#   环境变量 SUB_TITLE_* 可临时覆盖（预览器用），见 apply_title_cfg()。
+TITLE_CFG = {
+    "style":  None,        # None = 用 DEFAULT_TITLE_STYLE
+    "motion": "tracking",
+    "anchor": "top",
+    "offset": 0,
+    "hold":   None,        # None = 用 HOOK_DUR
+    "glow":   2,           # 0 无辉光 / 1 弱 / 2 定板 / 3 强
+    "sweep":  True,        # 扫光开关
+}
+
+# 入场动效：key → (中文名, 说明)
+TITLE_MOTIONS = {
+    "tracking": ("字距收拢", "电影片头语法：字距从宽收到定板值 + 模糊聚焦，最「贵」"),
+    "fade":     ("淡入",     "只淡入不位移，最克制，任何画面都不会出错"),
+    "pop":      ("弹入",     "剪映式缩放弹入（过冲到 114%），短视频语法"),
+    "rise":     ("上浮",     "从下方 26px 浮上来，温和有呼吸感"),
+    "zoom":     ("推进",     "从 126% 推到 100%，带压迫感，适合强观点"),
+    "wipe":     ("横扫揭示", "从左往右逐字显形（\\clip 横向展开）"),
+    "none":     ("直接出现", "无动画，硬出硬收"),
+}
+
+
+def motion_list():
+    """[(key, 中文名, 说明)] —— 给预览器 / UI 列举用。"""
+    return [(k, v[0], v[1]) for k, v in TITLE_MOTIONS.items()]
+
+
+def motion_tag(kind=None, fs=None, ms=460, no_clip=False, clip=None):
+    """入场动效的 override tag（自带 \\fs，字距起点依赖字号，必须一起给）。
+
+    clip=(x0,y0,x1,y1)：这一层自己还要用 \\clip（比如渐变的上下二分）。
+    一个 Dialogue 里只能有一个 \\clip，硬拼两个就是后者顶掉前者 ——
+    所以带 clip 的层要把「层的静态范围」和「动效的横向展开」**合成一个**：
+    wipe 就从左边界展开到 rect 右边界，别的动效则用固定 rect。
+    ⚠ 早先的做法是「动效带 clip 就降级成淡入」，结果 wipe 在 cinematic 下
+      完全看不出效果（字芯层是完整的，只有描边被裁）—— 挑了等于没挑。
+    """
+    kind = (kind or TITLE_CFG.get("motion") or "tracking").lower()
+    if kind not in TITLE_MOTIONS:
+        kind = "tracking"
+    fs = fs if fs else FS_TITLE
+    fsp0 = int(round(fs * 0.30))
+    # 层的 clip 与动效的 clip 合成一个（见 docstring）
+    cl = ""
+    if clip:
+        cx0, cy0, cx1, cy1 = [int(round(v)) for v in clip]
+        if kind == "wipe":
+            cl = ("\\clip(%d,%d,%d,%d)\\t(0,%d,\\clip(%d,%d,%d,%d))"
+                  % (cx0, cy0, cx0, cy1, ms, cx0, cy0, cx1, cy1))
+        else:
+            cl = "\\clip(%d,%d,%d,%d)" % (cx0, cy0, cx1, cy1)
+    if kind == "none":
+        return "\\fs%d%s" % (fs, cl)
+    if kind == "fade":
+        return "\\fs%d\\fad(%d,%d)%s" % (fs, int(ms * 0.6), int(ms * 0.35), cl)
+    if kind == "pop":
+        return ("\\fs%d\\fscx88\\fscy88\\fad(80,60)"
+                "\\t(0,%d,\\fscx114\\fscy114)\\t(%d,%d,\\fscx100\\fscy100)%s"
+                % (fs, ms, ms, int(ms * 1.7), cl))
+    if kind == "rise":
+        return ("\\fs%d\\move(0,26,0,0)\\fad(0,0,%d,0)"
+                "\\t(0,%d,\\1a&H00&\\3a&H00&)%s" % (fs, ms, ms, cl))
+    if kind == "zoom":
+        return ("\\fs%d\\fscx126\\fscy126\\blur2\\fad(120,80)"
+                "\\t(0,%d,\\fscx100\\fscy100\\blur0)%s" % (fs, ms, cl))
+    if kind == "wipe":
+        if cl:                            # 已和层的 rect 合成，直接用
+            return "\\fs%d\\fad(80,60)%s" % (fs, cl)
+        if no_clip:                       # 该层还要自己拼 clip → 只淡入
+            return "\\fs%d\\fad(%d,%d)" % (fs, int(ms * 0.6), int(ms * 0.35))
+        x0, x1 = SAFE_LEFT, SAFE_RIGHT
+        return ("\\fs%d\\fad(80,60)\\clip(%d,0,%d,%d)"
+                "\\t(0,%d,\\clip(%d,0,%d,%d))"
+                % (fs, x0, x0, H, ms, x0, x1, H))
+    # tracking（定板）
+    return ("\\fs%d\\fsp%d\\blur2\\fscx96\\fscy96\\fad(140,100)"
+            "\\t(0,%d,\\fsp2\\blur0\\fscx100\\fscy100)%s" % (fs, fsp0, ms, cl))
+
+
+_CFG_ENV = {
+    "style":  "SUB_TITLE_STYLE",
+    "motion": "SUB_TITLE_MOTION",
+    "anchor": "SUB_TITLE_ANCHOR",
+    "offset": "SUB_TITLE_OFFSET",
+    "hold":   "SUB_TITLE_HOLD",
+    "glow":   "SUB_TITLE_GLOW",
+    "sweep":  "SUB_TITLE_SWEEP",
+}
+
+
+def apply_title_cfg(cfg=None):
+    """把配置写进 TITLE_CFG（ip.json 的 subtitle.title 或环境变量）。
+
+    改的是模块全局 —— 位置/动效是**全局**概念（一屏只有一个开场标题），
+    不用每个事件传一遍；build_title() 里也可以临时覆盖（预览器批量出图用）。
+    """
+    global TITLE_ANCHOR, TITLE_OFFSET, HOOK_DUR
+    src = {}
+    for k, env in _CFG_ENV.items():
+        v = os.environ.get(env)
+        if v not in (None, ""):
+            src[k] = v
+    if cfg:
+        for k, v in cfg.items():
+            if v not in (None, ""):
+                src[k] = v
+    if "anchor" in src:
+        a = str(src["anchor"]).strip().lower()
+        TITLE_ANCHOR = a if a in TITLE_ANCHORS else "top"
+        TITLE_CFG["anchor"] = TITLE_ANCHOR
+    if "offset" in src:
+        TITLE_OFFSET = int(round(float(src["offset"])))
+        TITLE_CFG["offset"] = TITLE_OFFSET
+    if "motion" in src:
+        m = str(src["motion"]).strip().lower()
+        TITLE_CFG["motion"] = m if m in TITLE_MOTIONS else "tracking"
+    if "glow" in src:
+        TITLE_CFG["glow"] = max(0, min(3, int(float(src["glow"]))))
+    if "sweep" in src:
+        v = src["sweep"]
+        TITLE_CFG["sweep"] = str(v).strip().lower() not in ("0", "off", "false", "no", "none")
+    if "hold" in src:
+        TITLE_CFG["hold"] = float(src["hold"])
+    if "style" in src:
+        TITLE_CFG["style"] = str(src["style"]).strip().lower()
+    return dict(TITLE_CFG)
+
+
+def title_hold():
+    """当前标题停留时长（秒）。"""
+    return TITLE_CFG.get("hold") or HOOK_DUR
 
 GLOW_COLOR = C_GOLD      # 辉光颜色：暖金（和关键词花字同一个金，全片一个强调色系）
 SWEEP_COLOR = "005CD1FF" # 扫光颜色：#FFD15C 亮金。
@@ -486,37 +666,44 @@ def _motion(fs, fsp_end=2, ms=460, fsc=96, fade=(140, 100)):
 
 
 def _st_cinematic(text, t0, t1, sub=None):
-    """① 电影感（当前定板）：暖金辉光 + 字距收拢 + 金色扫光 + 金细线 + 宽字距副标。
+    """① 电影感（当前定板）：暖金辉光 + 入场动效 + 金色扫光 + 金细线 + 宽字距副标。
 
     出处 FootageCrate：Easy Glow 辉光 / tracking-in 收拢 /
     "sweep an anamorphic streak across a title" 扫光。
+    动效/辉光强度/扫光开关都走 TITLE_CFG（可挑选可编辑），不写死在这里。
     """
     lines = []
     fs = _title_fs(text)
-    fs, motion = _motion(fs)
-    # 辉光层：填充透明 + 粗描边染金 + 大模糊 = 纯光晕
-    gb = int(round(OUT_TITLE * 1.8))
-    lines.append(dialog(2, t0, t1, "Title",
-        "{\\fs%d\\bord%d\\blur8\\shad0\\1a&HFF&\\3c&H%s&\\3a&H38&"
-        "\\fad(280,170)\\t(0,600,\\bord%d\\blur4)}%s"
-        % (fs, gb, GLOW_COLOR, int(round(gb * 0.6)), text)))
+    glow = int(TITLE_CFG.get("glow", 2))
+    top = title_top()
+    motion = motion_tag(None, fs)                     # 本体层
+    # 渐变层自己要用 \clip（上下二分）→ 把 rect 交给动效合成，wipe 才真的横向揭示
+    grad_top = motion_tag(None, fs, clip=(0, max(0, top - 40), W,
+                                          top + int(round(fs * 0.55))))
+    grad_bot = motion_tag(None, fs, clip=(0, top + int(round(fs * 0.55)), W,
+                                          top + int(round(fs * 1.5)) + 40))
+    # 辉光层：填充透明 + 粗描边染金 + 大模糊 = 纯光晕（glow=0 时整层不加）
+    if glow > 0:
+        gb = int(round(OUT_TITLE * (1.2 + 0.3 * glow)))     # 2 → ×1.8（定板）
+        blur = (0, 6, 8, 10)[min(glow, 3)]
+        alpha = {1: "60", 2: "38", 3: "20"}[glow]
+        lines.append(dialog(2, t0, t1, "Title",
+            "{\\fs%d\\bord%d\\blur%d\\shad0\\1a&HFF&\\3c&H%s&\\3a&H%s&"
+            "\\fad(280,170)\\t(0,600,\\bord%d\\blur4)}%s"
+            % (fs, gb, blur, GLOW_COLOR, alpha, int(round(gb * 0.6)), text)))
     # 描边层（收细，让辉光露出来）
     sb = max(4, int(round(OUT_TITLE * 0.7)))
     lines.append(dialog(3, t0, t1, "Title",
         "{\\bord%d\\shad0\\1a&HFF&%s}%s" % (sb, motion, text)))
     # 渐变字芯：上亮白 / 下暖沙（ASS 无真渐变，\clip 二分）
-    y_top = max(0, TITLE_MARGIN_V - 40)
-    y_mid = TITLE_MARGIN_V + int(round(fs * 0.55))
-    y_bot = TITLE_MARGIN_V + int(round(fs * 1.5)) + 40
+    # ★ clip 已合进 grad_top / grad_bot 的动效里，这里不要再拼一个 \clip
     lines.append(dialog(4, t0, t1, "Title",
-        "{\\bord0\\shad0\\1c&H%s&\\blur1\\clip(0,%d,%d,%d)%s}%s"
-        % (C_WHITE, y_top, W, y_mid, motion, text)))
+        "{\\bord0\\shad0\\1c&H%s&\\blur1%s}%s" % (C_WHITE, grad_top, text)))
     lines.append(dialog(5, t0, t1, "Title",
-        "{\\bord0\\shad0\\1c&H%s&\\blur1\\clip(0,%d,%d,%d)%s}%s"
-        % (C_GRAD_BOTTOM, y_mid, W, y_bot, motion, text)))
-    # 扫光层
-    lines.append(_sweep_layer(text, t0, t1, fs, SWEEP_COLOR))
-    lines.append(title_rule(t0, t1, y=TITLE_MARGIN_V + int(round(fs * 1.30))))
+        "{\\bord0\\shad0\\1c&H%s&\\blur1%s}%s" % (C_GRAD_BOTTOM, grad_bot, text)))
+    if TITLE_CFG.get("sweep"):
+        lines.append(_sweep_layer(text, t0, t1, fs, SWEEP_COLOR))
+    lines.append(title_rule(t0, t1, y=top + int(round(fs * 1.30))))
     if sub:
         lines.append(dialog(2, 0.20, t1, "Sub", "{" + sub_in() + "}" + sub))
     return lines
@@ -525,8 +712,9 @@ def _st_cinematic(text, t0, t1, sub=None):
 def _sweep_layer(text, t0, t1, fs, color, band=0.18, t_a=None, t_b=None):
     r"""移动竖带 \clip 扫光：带子扫过哪里，哪里的字就亮成 color。"""
     bw = int(round(W * band))
-    y0 = max(0, TITLE_MARGIN_V - 80)
-    y1 = min(H, TITLE_MARGIN_V + int(round(fs * 2.2)) + 80)
+    top = title_top()
+    y0 = max(0, top - 80)
+    y1 = min(H, top + int(round(fs * 2.2)) + 80)
     ta = int(round((t_a if t_a is not None else SWEEP_T0) * 1000))
     tb = int(round((t_b if t_b is not None else SWEEP_T1) * 1000))
     return dialog(6, t0, t1, "Title",
@@ -543,11 +731,12 @@ def _st_magazine(text, t0, t1, sub=None):
     """
     lines = []
     fs = _title_fs(text)
-    fs, motion = _motion(fs, fsp_end=3, ms=560, fsc=98, fade=(200, 140))
+    motion = motion_tag(None, fs, ms=560)
+    top = title_top()
     # 上线（长，主标之上）/ 下线（短，主标之下）
-    lines.append(title_rule(t0, t1, y=max(8, TITLE_MARGIN_V - int(round(fs * 0.24))),
+    lines.append(title_rule(t0, t1, y=max(8, top - int(round(fs * 0.24))),
                             half_w=0.30, h=2, layer=2))
-    lines.append(title_rule(t0, t1, y=TITLE_MARGIN_V + int(round(fs * 1.22)),
+    lines.append(title_rule(t0, t1, y=top + int(round(fs * 1.22)),
                             half_w=0.13, h=2, layer=2))
     # 主标：白字 + 收细的描边（杂志体靠线和字距立秩序，不靠粗描边抢眼）
     lines.append(dialog(3, t0, t1, "Title",
@@ -570,7 +759,7 @@ def _st_pure(text, t0, t1, sub=None):
     """
     lines = []
     fs = _title_fs(text)
-    fs, motion = _motion(fs, ms=520, fsc=98, fade=(160, 120))
+    motion = motion_tag(None, fs, ms=520)
     lines.append(dialog(3, t0, t1, "Title",
         "{\\bord%d\\shad0%s}%s" % (max(3, int(round(OUT_TITLE * 0.45))), motion, text)))
     if sub:
@@ -590,23 +779,27 @@ def _st_neon(text, t0, t1, sub=None):
     """
     lines = []
     fs = _title_fs(text)
-    fs, motion = _motion(fs)
+    glow = int(TITLE_CFG.get("glow", 2))
+    motion = motion_tag(None, fs)
     # 外层氛围光（大半径、很淡）
-    lines.append(dialog(2, t0, t1, "Title",
-        "{\\fs%d\\bord%d\\blur%d\\shad0\\1a&HFF&\\3c&H%s&\\3a&H58&"
-        "\\fad(300,180)\\t(0,620,\\bord%d\\blur6)}%s"
-        % (fs, int(round(OUT_TITLE * 2.4)), 14, C_COOL,
-           int(round(OUT_TITLE * 1.6)), text)))
+    if glow > 0:
+        lines.append(dialog(2, t0, t1, "Title",
+            "{\\fs%d\\bord%d\\blur%d\\shad0\\1a&HFF&\\3c&H%s&\\3a&H58&"
+            "\\fad(300,180)\\t(0,620,\\bord%d\\blur6)}%s"
+            % (fs, int(round(OUT_TITLE * 2.4)), 14, C_COOL,
+               int(round(OUT_TITLE * 1.6)), text)))
     # 内层边缘光（小半径、亮）
-    lines.append(dialog(3, t0, t1, "Title",
-        "{\\fs%d\\bord%d\\blur3\\shad0\\1a&HFF&\\3c&H%s&\\3a&H18&"
-        "\\fad(260,160)}%s"
-        % (fs, int(round(OUT_TITLE * 0.9)), C_COOL, text)))
+    if glow > 0:
+        lines.append(dialog(3, t0, t1, "Title",
+            "{\\fs%d\\bord%d\\blur3\\shad0\\1a&HFF&\\3c&H%s&\\3a&H18&"
+            "\\fad(260,160)}%s"
+            % (fs, int(round(OUT_TITLE * 0.9)), C_COOL, text)))
     # 字芯（白 + 冷色描边）
     lines.append(dialog(4, t0, t1, "Title",
         "{\\bord%d\\shad0\\3c&H%s&%s}%s"
         % (max(4, int(round(OUT_TITLE * 0.6))), C_COOL_DEEP, motion, text)))
-    lines.append(_sweep_layer(text, t0, t1, fs, C_WHITE, band=0.14))
+    if TITLE_CFG.get("sweep"):
+        lines.append(_sweep_layer(text, t0, t1, fs, C_WHITE, band=0.14))
     if sub:
         fsp0 = int(round(FS_SUB * 0.35))
         lines.append(dialog(2, 0.25, t1, "Sub",
@@ -624,12 +817,16 @@ def _st_stamp(text, t0, t1, sub=None):
     """
     lines = []
     fs = _title_fs(text)
-    fsp0 = int(round(fs * 0.30))
-    # \fscx 从 18% 弹开到 100%：框和字一起横向生长（\(t 作用在整条行上，
-    # BorderStyle=3 的底框会跟着文字一起缩放，所以框也是「长」出来的）
-    lines.append(dialog(2, t0, t1, "Stamp",
-        "{\\fs%d\\fsp%d\\fscx18\\fad(160,120)"
-        "\\t(0,340,\\fscx100\\fsp2)}%s" % (fs, fsp0, text)))
+    kind = (TITLE_CFG.get("motion") or "tracking").lower()
+    if kind == "tracking":
+        # 印章的招牌动效（= 默认的字距收拢档）：\fscx 从 18% 弹开到 100%，
+        # 框和字一起横向生长。
+
+        tag = ("\\fs%d\\fsp%d\\fscx18\\fad(160,120)"
+               "\\t(0,340,\\fscx100\\fsp2)" % (fs, int(round(fs * 0.30))))
+    else:
+        tag = motion_tag(kind, fs, ms=380)
+    lines.append(dialog(2, t0, t1, "Stamp", "{%s}%s" % (tag, text)))
     if sub:
         lines.append(dialog(2, t0 + 0.45, t1, "Sub",
             "{\\fad(200,140)\\fsp8}%s" % sub))
@@ -667,14 +864,41 @@ def title_style():
     return v if v in _TITLE_BUILDERS else DEFAULT_TITLE_STYLE
 
 
-def build_title(style, text, t0, t1, sub=None):
-    """按风格名生成开场标题事件（不认识的名字回退到定板风格并告警）。"""
+def _build(style, text, t0, t1, sub=None):
     fn = _TITLE_BUILDERS.get((style or "").strip().lower())
     if fn is None:
         import sys
         print(f"  ⚠ 未知标题风格 {style!r} → 用 {DEFAULT_TITLE_STYLE}", file=sys.stderr)
         fn = _TITLE_BUILDERS[DEFAULT_TITLE_STYLE]
     return fn(text, t0, t1, sub)
+
+
+def build_title(style, text, t0, t1, sub=None, **kw):
+    """按风格名生成开场标题事件。
+
+    kw 覆盖 motion / glow / sweep / anchor / offset：
+    - motion/glow/sweep 是**临时**的（用完还原），预览器要在一条命令里出 N 个
+      方案，不能让前一个的配置漏到后一个。
+    - ★ anchor/offset 必须**持久**：位置不只是事件行里的坐标，还写进 ASS 样式
+      的 MarginV，而样式是 write_ass() 时才拼的（在 build_title 返回**之后**）。
+      如果位置也临时覆盖，等 write_ass 时它已经被还原 → 位置改了但文件没变，
+      四个位置渲染出来一模一样（2026-10-30 实测踩过，最难查的一种错：
+      代码看着对，产物没变）。
+    """
+    global TITLE_ANCHOR, TITLE_OFFSET
+    if not kw:
+        return _build(style, text, t0, t1, sub)
+    _a, _o, _c = TITLE_ANCHOR, TITLE_OFFSET, dict(TITLE_CFG)
+    try:
+        apply_title_cfg(kw)
+        return _build(style, text, t0, t1, sub)
+    finally:
+        TITLE_CFG.clear()
+        TITLE_CFG.update(_c)
+        if "anchor" not in kw:
+            TITLE_ANCHOR = _a
+        if "offset" not in kw:
+            TITLE_OFFSET = _o
 
 
 def fade_only(ms_in=60, ms_out=40):

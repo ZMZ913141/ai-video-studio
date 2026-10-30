@@ -235,8 +235,11 @@ def probe_size(path):
 
 # ---------------- 主流程 ----------------
 
-def build_ass(items, out_dir, video_w, video_h, main, sub, label=True):
-    """items: [(style, font)] → 每个方案一份 ASS。
+def build_ass(items, out_dir, video_w, video_h, main, sub, label=True, hold=None):
+    """items: [(tag, cfg)] → 每个方案一份 ASS。
+
+    cfg 是标题配置的**子集**（style/font/motion/anchor/offset/glow/sweep/hold），
+    走 substyle.build_title(**kw) 临时覆盖 —— 用完自动还原，不会串味到下一条。
 
     标签直接写进 ASS（\an7 左上角），而不是 ffmpeg drawtext ——
     flatpak 里的 ffmpeg 常常没编译 drawtext，失败还静默回退，
@@ -246,20 +249,28 @@ def build_ass(items, out_dir, video_w, video_h, main, sub, label=True):
     S.set_size(video_w, video_h)
     S.load_ip_overrides()
     S.apply_ip_overrides()
+    S.apply_title_cfg()          # 先吃 ip.json / env 的定板，再逐条临时覆盖
+    _hold = hold or S.title_hold()
     asses = []
-    for i, (style, font) in enumerate(items):
+    for i, (tag, cfg) in enumerate(items):
+        cfg = dict(cfg)
+        font = cfg.pop("font", "")
+        # ★ 位置是**持久**全局（要写进 ASS 样式的 MarginV），所以每个方案都必须
+        #   显式带上，否则会残留上一个方案的位置（2026-10-30 踩过）。
+        cfg.setdefault("anchor", S.TITLE_ANCHOR)
+        cfg.setdefault("offset", S.TITLE_OFFSET)
         if font:
             os.environ["SUB_FONT_TITLE"] = font
-        ev = S.build_title(style, main, 0.0, S.HOOK_DUR, sub=sub)
+        style = cfg.pop("style", "") or S.title_style()
+        ev = S.build_title(style, main, 0.0, _hold, sub=sub, **cfg)
         if label:
-            cn = {k: v[0] for k, v in S.TITLE_STYLES.items()}
-            tag = f"{style}·{cn.get(style, '')}" + (f" / {font}" if font else "")
-            ev.append(S.dialog(9, 0.0, S.HOOK_DUR, "Tag",
+            ev.append(S.dialog(9, 0.0, _hold, "Tag",
                 "{\\an7\\pos(26,22)\\fs30\\bord4\\shad0"
                 "\\1c&H00FFFFFF&\\3c&H00101010&}" + tag))
-        p = os.path.join(out_dir, f"_{i}_{style}.ass")
+        safe = re.sub(r"[^0-9A-Za-z一-龥]+", "_", tag)[:40]
+        p = os.path.join(out_dir, f"_{i}_{safe}.ass")
         S.write_ass(p, ev)
-        asses.append((p, style, font))
+        asses.append((p, tag))
     return asses
 
 
@@ -276,23 +287,46 @@ def main():
     ap.add_argument("srt", nargs="?")
     ap.add_argument("--style", action="append", default=[])
     ap.add_argument("--font", action="append", default=[])
+    ap.add_argument("--motion", action="append", default=[],
+                    help="入场动效（可多次 / all）")
+    ap.add_argument("--pos", action="append", default=[],
+                    help="标题位置（可多次 / all）：top third center lower")
+    ap.add_argument("--offset", type=int, default=None,
+                    help="位置微调，像素（+ 下移 / - 上移）")
+    ap.add_argument("--glow", type=int, default=None, help="辉光强度 0-3")
+    ap.add_argument("--sweep", default=None, help="扫光开关 on/off")
+    ap.add_argument("--hold", type=float, default=None, help="标题停留秒数")
+    ap.add_argument("--config", metavar="JSON",
+                    help="从一个配置文件读整套标题参数（ip.json 也行，取 subtitle.title）")
     ap.add_argument("--compare-all", action="store_true")
-    ap.add_argument("--at", default="1.60")
+    ap.add_argument("--at", default="")
     ap.add_argument("--out", default="")
     ap.add_argument("--crop-y", type=int, default=520)
     ap.add_argument("--scale", type=int, default=432)
     ap.add_argument("--apply", metavar="IP_JSON",
-                    help="把选定的风格/字体写进该 ip.json（subtitle.title_style / font_title）")
+                    help="把选定的风格/字体/动效/位置写进该 ip.json（subtitle.title）")
     ap.add_argument("--list-styles", action="store_true")
+    ap.add_argument("--list-motions", action="store_true")
+    ap.add_argument("--list-pos", action="store_true")
     ap.add_argument("--list-fonts", action="store_true")
     ap.add_argument("--top", type=int, default=0)
     ap.add_argument("--no-label", action="store_true")
     a = ap.parse_args()
 
     if a.list_styles:
-        print("可用标题风格（ip.json: subtitle.title_style）：")
+        print("可用标题风格（ip.json: subtitle.title.style）：")
         for k, cn, desc in S.title_style_list():
             print(f"  {k:<10} {cn:<4} {desc}")
+        return
+    if a.list_motions:
+        print("可用入场动效（ip.json: subtitle.title.motion）：")
+        for k, cn, desc in S.motion_list():
+            print(f"  {k:<10} {cn:<6} {desc}")
+        return
+    if a.list_pos:
+        print("可用标题位置（ip.json: subtitle.title.anchor + offset 像素微调）：")
+        for k, desc in S.TITLE_ANCHORS.items():
+            print(f"  {k:<8} {desc}")
         return
     if a.list_fonts:
         fs = list_fonts(a.top)
@@ -312,15 +346,31 @@ def main():
         with open(a.apply, encoding="utf-8") as f:
             d = json.load(f)
         sub_cfg = d.setdefault("subtitle", {})
+        t_cfg = sub_cfg.setdefault("title", {})
+        # 旧字段（subtitle.title_style / font_title）继续兼容，新定板写进 title 块
         if style:
+            t_cfg["style"] = style
             sub_cfg["title_style"] = style
         if font:
+            t_cfg["font"] = font
             sub_cfg["font_title"] = font
+        if a.motion:
+            t_cfg["motion"] = a.motion[0].strip()
+        if a.pos:
+            t_cfg["anchor"] = a.pos[0].strip()
+        if a.offset is not None:
+            t_cfg["offset"] = a.offset
+        if a.glow is not None:
+            t_cfg["glow"] = a.glow
+        if a.sweep is not None:
+            t_cfg["sweep"] = str(a.sweep).strip().lower() not in ("0", "off", "false", "no")
+        if a.hold is not None:
+            t_cfg["hold"] = a.hold
         with open(a.apply, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=2)
-        print(f"✓ 已写回 {a.apply}：title_style={sub_cfg.get('title_style')} "
-              f"font_title={sub_cfg.get('font_title')}")
-        print("  下一步：重跑 ass 步骤或 make_ass.py 重新生成字幕 → 重烧字幕版")
+        print(f"✓ 已写回 {a.apply}：subtitle.title = "
+              + json.dumps(t_cfg, ensure_ascii=False))
+        print("  下一步：make_ass.py 重新生成 ASS → 重烧字幕版")
         return
 
     if not a.video or not a.srt:
@@ -331,26 +381,85 @@ def main():
     heads = parse_srt_head(a.srt, 2)
     main_txt = heads[0] if heads else "标题预览"
     sub_txt = heads[1] if len(heads) > 1 else ""
-    times = [float(x) for x in a.at.split(",") if x.strip()]
 
-    styles = [s.strip() for s in a.style if s.strip()] or ["cinematic"]
-    fonts = [f.strip() for f in a.font if f.strip()]
-    if a.compare_all:
-        styles = [k for k, _, _ in S.title_style_list()]
-    if any(s.lower() == "all" for s in styles):
-        styles = [k for k, _, _ in S.title_style_list()]
-    if any(f.lower() == "all" for f in fonts):
-        fonts = RECOMMENDED_FONTS
+    # ---- 四个可挑维度：风格 / 字体 / 动效 / 位置 ----
+    # 给了多个（或 all）→ 当维度，出对比图；只给一个 → 当基础配置，全场生效。
+    def _dim(vals, universe):
+        v = [x.strip() for x in vals if x.strip()]
+        if any(x.lower() == "all" for x in v):
+            return list(universe), True
+        return v, len(v) > 1
 
-    items = []
-    if fonts:
-        # 指定了字体 → 风格固定（第一个），逐个字体比。
+    motions, m_dim = _dim(a.motion, S.TITLE_MOTIONS.keys())
+    poss, p_dim = _dim(a.pos, S.TITLE_ANCHORS.keys())
+    styles, s_dim = _dim(a.style, S._TITLE_BUILDERS.keys())
+    fonts, f_dim = _dim(a.font, RECOMMENDED_FONTS)
+    if a.compare_all or (not styles and not fonts and not motions and not poss):
+        styles, s_dim = [k for k, _, _ in S.title_style_list()], True
+    if fonts and not styles and not a.style:
         # ★ 比字体时默认用 pure（极简）：cinematic 的辉光/扫光/渐变会把字形
-        #   细节全盖住，8 款字体看起来几乎一样，等于没法挑（实测踩过）。
-        base = a.style[0].strip() if a.style else "pure"
-        items = [(base, f) for f in fonts]
-    else:
-        items = [(s, "") for s in styles]
+        #   细节全盖住，几款字体看起来几乎一样，等于没法挑（实测踩过）。
+        styles, s_dim = ["pure"], False
+
+    base = {}
+    if a.config:
+        import json as _json
+        with open(a.config, encoding="utf-8") as f:
+            cd = _json.load(f)
+        base = ((cd.get("subtitle") or {}).get("title")
+                or cd.get("title") or cd)
+        base = {k: v for k, v in base.items() if v is not None}
+    if a.glow is not None:
+        base["glow"] = a.glow
+    if a.sweep is not None:
+        base["sweep"] = str(a.sweep).strip().lower() not in ("0", "off", "false", "no")
+    if a.offset is not None:
+        base["offset"] = a.offset
+    if a.hold is not None:
+        base["hold"] = a.hold
+    # 单值的维度退化成基础配置（不是「对比」，是「按这个来」）
+    for name, vals, is_dim in (("motion", motions, m_dim), ("anchor", poss, p_dim),
+                               ("style", styles, s_dim), ("font", fonts, f_dim)):
+        if vals and not is_dim:
+            base[name] = vals[0]
+    motions = motions if m_dim else []
+    poss = poss if p_dim else []
+    styles = styles if s_dim else []
+    fonts = fonts if f_dim else []
+
+    dims = [(k, v) for k, v in (("motion", motions), ("anchor", poss),
+                                ("font", fonts), ("style", styles)) if v]
+    combos = [{}]
+    for k, v in dims:
+        combos = [dict(c, **{k: x}) for c in combos for x in v]
+    if len(combos) > 24:
+        print(f"  ⚠ {len(combos)} 个组合太多，只出前 24 个")
+        combos = combos[:24]
+
+    cn_style = {k: v[0] for k, v in S.TITLE_STYLES.items()}
+    cn_motion = {k: v[0] for k, v in S.TITLE_MOTIONS.items()}
+    items = []
+    for c in combos:
+        cfg = dict(base)
+        cfg.update(c)
+        parts = []
+        if c.get("style"):
+            parts.append(f"{c['style']}·{cn_style.get(c['style'], '')}")
+        if c.get("motion"):
+            parts.append(f"动效 {cn_motion.get(c['motion'], c['motion'])}")
+        if c.get("anchor"):
+            parts.append(f"位置 {c['anchor']}")
+        if c.get("font"):
+            parts.append(c["font"])
+        items.append((" · ".join(parts) or "定板", cfg))
+
+    # ---- 时间点 ----
+    # ★ 动效是**时间维度**的东西：只看落定帧根本看不出入场方式（都长一个样）。
+    #   比动效必须抽「入场进行中」这一刻 —— 定板动画 460ms，0.30s 时 fade 已经
+    #   淡完了（和 none 一模一样，实测像素差 0），得早到 0.15s 才看得出区别。
+    times = [float(x) for x in a.at.split(",") if x.strip()]
+    if not times:
+        times = [0.15, 0.45, 1.60] if any(k == "motion" for k, _ in dims) else [1.60]
 
     out_dir = "/cfu/ai视频档案库/陈洁斌主号/08_过程/_标题预览"
     try:
@@ -360,17 +469,16 @@ def main():
         os.makedirs(out_dir, exist_ok=True)
 
     print(f"主标「{main_txt}」 副标「{sub_txt}」  画面 {vw}x{vh}")
-    asses = build_ass(items, out_dir, vw, vh, main_txt, sub_txt)
+    asses = build_ass(items, out_dir, vw, vh, main_txt, sub_txt,
+                      label=not a.no_label, hold=base.get("hold"))
     thumbs = []
-    for (p, style, font) in asses:
+    for (p, tag) in asses:
         for t in times:
-            tag = f"{style}" + (f" / {font}" if font else "")
-            if len(times) > 1:
-                tag += f" @{t}s"
-            raw = os.path.join(out_dir, f"_{abs(hash(tag)) % 100000}.png")
+            label = tag + (f" @{t}s" if len(times) > 1 else "")
+            raw = os.path.join(out_dir, f"_{abs(hash(label)) % 100000}.png")
             render_frame(a.video, p, t, raw, a.crop_y, a.scale, vw)
             thumbs.append(raw)
-            print("  ✓", tag)
+            print("  ✓", label)
 
     # ⚠ cols 必须 ≥2：hstack 的 inputs 参数不接受 1（报 out of range [2-...]）。
     #    只有 1 张图时根本不会进 tile（上面直接返回），所以这里钳到 2 是安全的。

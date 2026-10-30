@@ -282,7 +282,7 @@ def build(tag, srt_path, out_ass, dur=None):
         main, sub = d["hook"]
         m2, _ = apply_hl(main, d.get("hl_title", []), color_only=True)
         s2 = apply_hl(sub, d.get("hl_sub", []), color_only=True)[0] if sub else ""
-        _hd = min(S.HOOK_DUR, total)
+        _hd = min(S.title_hold(), total)
         if S.TITLE_FX:
             # 风格与字体正交：风格管光/线/排版（title_style），字体单独选（font_title）。
             ev.extend(S.build_title(S.title_style(), m2, 0.0, _hd, sub=s2))
@@ -340,7 +340,7 @@ def build(tag, srt_path, out_ass, dur=None):
         # 一句话看两遍，比没有标题更难看。
         # ★ 窗口跟 S.HOOK_DUR 联动：标题停留拉长后，同文判定窗口也要跟着长，
         #   否则标题还没退、底部又滚一遍同样的话。
-        if i not in cta_idx and c["t0"] < S.HOOK_DUR + 0.1 \
+        if i not in cta_idx and c["t0"] < S.title_hold() + 0.1 \
                 and strip_punct(c["text"]) in hook_txt:
             skipped_title += 1
             continue
@@ -404,11 +404,28 @@ def _apply_ip_fonts():
         v = sub.get(key)
         if v:
             os.environ[env] = str(v)
-    # 标题风格同样可由本 IP 指定（subtitle.title_style）：
-    # 风格和字体正交 —— 一个管光/线/排版，一个管字形，可以任意组合。
-    ts = sub.get("title_style") or sub.get("style")
+    # 标题的风格 / 动效 / 位置 / 停留 —— 支持整块配置 subtitle.title.{...}：
+    #   style  光/线/排版的风格（cinematic / magazine / pure / neon / stamp）
+    #   motion 入场动效（tracking / fade / pop / rise / zoom / wipe / none）
+    #   anchor 位置（top / third / center / lower）  offset 像素微调（+下 -上）
+    #   hold   停留秒数   glow 辉光强度 0-3   sweep 扫光开关
+    # ★ 风格和字体正交、动效和位置也正交 —— 四个维度任意组合。
+    #   旧写法（subtitle.title_style 扁平字段）继续兼容。
+    t = sub.get("title") or {}
+    if t.get("font"):
+        os.environ["SUB_FONT_TITLE"] = str(t["font"])
+    ts = t.get("style") or sub.get("title_style") or sub.get("style")
     if ts:
         os.environ["SUB_TITLE_STYLE"] = str(ts)
+    for key, env in (("motion", "SUB_TITLE_MOTION"),
+                     ("anchor", "SUB_TITLE_ANCHOR"),
+                     ("offset", "SUB_TITLE_OFFSET"),
+                     ("hold", "SUB_TITLE_HOLD"),
+                     ("glow", "SUB_TITLE_GLOW"),
+                     ("sweep", "SUB_TITLE_SWEEP")):
+        v = t.get(key)
+        if v is not None:
+            os.environ[env] = str(v)
     return sub
 
 
@@ -420,6 +437,9 @@ if __name__ == "__main__":
     if len(sys.argv) >= 6:
         W_, H_ = int(sys.argv[4]), int(sys.argv[5])
         S.set_size(W_, H_)
+        # ★ 标题的动效/位置必须在 set_size **之后**应用：title_top() 依赖 H，
+        #   先算位置再改分辨率 = 位置被算在旧画布上（和字号那个坑同一个道理）。
+        S.apply_title_cfg()
         # ★ 字号覆盖必须在 set_size 之后 —— set_size 会按分辨率把字号等比缩放，
         #   先覆盖再缩放 = 覆盖值被缩掉，等于没覆盖（2026-10-29 实测）。
         S.load_ip_overrides()
@@ -447,6 +467,8 @@ if __name__ == "__main__":
                   f"要严格失败请设 STRICT_FONT=1", file=sys.stderr)
             S.FS_CUE = _suggest
         print(f"  字幕画布 {W_}x{H_}  正文字号 {S.FS_CUE}  标题 {S.FS_TITLE}")
+    else:
+        S.apply_title_cfg()      # 没给分辨率也要读 ip.json 的动效/位置配置
     tag, srt, out = sys.argv[1], sys.argv[2], sys.argv[3]
     ev, warns = build(tag, srt, out)
     print(f"{tag}: {len(ev)} 条事件 → {out}")

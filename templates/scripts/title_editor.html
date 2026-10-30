@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>开场标题编辑器 · ai-video-studio</title>
+<style>
+  :root{
+    --bg:#12141a; --panel:#1b1e26; --panel2:#232733; --line:#333a48;
+    --fg:#e8eaf0; --dim:#9aa3b2; --acc:#ffc24b; --acc2:#5cd1ff;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f4f5f8; --panel:#ffffff; --panel2:#f0f2f6; --line:#d8dce4;
+      --fg:#1a1d24; --dim:#5f6875; --acc:#c98a10; --acc2:#0d8ab0;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.6 -apple-system,"PingFang SC","微软雅黑",sans-serif}
+  header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;
+         align-items:baseline;gap:12px;flex-wrap:wrap}
+  header h1{margin:0;font-size:17px}
+  header .sub{color:var(--dim);font-size:12px}
+  .wrap{display:flex;gap:18px;padding:18px;flex-wrap:wrap;align-items:flex-start}
+  .col{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .col.params{flex:1 1 380px;min-width:340px}
+  .col.preview{flex:0 0 360px}
+  h2{margin:0 0 10px;font-size:13px;color:var(--dim);font-weight:600;letter-spacing:.04em}
+  .grp{margin-bottom:16px}
+  .grp>label{display:block;font-size:12px;color:var(--dim);margin-bottom:6px}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{border:1px solid var(--line);background:var(--panel2);color:var(--fg);
+        border-radius:7px;padding:6px 11px;cursor:pointer;font-size:13px;transition:.12s}
+  .chip:hover{border-color:var(--acc)}
+  .chip.on{background:var(--acc);color:#1a1205;border-color:var(--acc);font-weight:600}
+  select,input[type=text]{width:100%;background:var(--panel2);color:var(--fg);
+        border:1px solid var(--line);border-radius:7px;padding:7px 9px;font-size:13px}
+  input[type=range]{width:100%;accent-color:var(--acc)}
+  .row{display:flex;align-items:center;gap:10px}
+  .row .val{min-width:52px;text-align:right;color:var(--acc);font-variant-numeric:tabular-nums}
+  .hint{color:var(--dim);font-size:11.5px;margin-top:5px}
+  .sw{display:flex;align-items:center;gap:8px;cursor:pointer}
+
+  /* 预览：864x1536 等比缩到面板宽度 */
+  .stage{position:relative;width:100%;aspect-ratio:864/1536;border-radius:8px;
+         overflow:hidden;background:radial-gradient(120% 60% at 50% 78%,#3a3340 0%,#15161c 70%)}
+  .stage::after{content:"";position:absolute;left:50%;bottom:0;transform:translateX(-50%);
+         width:74%;height:52%;border-radius:50% 50% 0 0;
+         background:linear-gradient(#5b4a44,#2b2429);opacity:.55}
+  .ph{position:absolute;inset:0}
+  .ttl{position:absolute;left:0;right:0;text-align:center;color:#fff;
+       font-weight:700;letter-spacing:.02em;white-space:nowrap;
+       text-shadow:0 3px 12px rgba(0,0,0,.85)}
+  .sub{position:absolute;left:0;right:0;text-align:center;color:#f5f2ea;opacity:.95;
+       text-shadow:0 2px 8px rgba(0,0,0,.8)}
+  .rule{position:absolute;left:50%;transform:translateX(-50%);height:2px;
+        background:#ffc24b;border-radius:2px}
+  .cue{position:absolute;left:0;right:0;bottom:11%;text-align:center;color:#fff;
+       font-size:13px;opacity:.85;text-shadow:0 2px 6px rgba(0,0,0,.9)}
+  .sweep{position:absolute;inset:0;pointer-events:none;
+         background:linear-gradient(100deg,transparent 42%,rgba(255,209,92,.85) 50%,transparent 58%);
+         mix-blend-mode:screen;opacity:0}
+
+  @keyframes kfade{from{opacity:0}to{opacity:1}}
+  @keyframes kpop{0%{transform:scale(.88)}65%{transform:scale(1.14)}100%{transform:scale(1)}}
+  @keyframes krise{from{transform:translateY(26px);opacity:0}to{transform:none;opacity:1}}
+  @keyframes kzoom{from{transform:scale(1.26);filter:blur(2px)}to{transform:none;filter:none}}
+  @keyframes kwipe{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
+  @keyframes ktrack{from{letter-spacing:.30em;filter:blur(2px)}to{letter-spacing:.02em;filter:none}}
+  @keyframes ksweep{0%{transform:translateX(-120%);opacity:0}
+                    30%{opacity:1}100%{transform:translateX(120%);opacity:0}}
+  .anim{animation-duration:.46s;animation-fill-mode:both;animation-timing-function:ease-out}
+  .a-fade{animation-name:kfade} .a-pop{animation-name:kpop;animation-duration:.78s}
+  .a-rise{animation-name:krise} .a-zoom{animation-name:kzoom}
+  .a-wipe{animation-name:kwipe} .a-tracking{animation-name:ktrack}
+  .a-none{animation:none}
+  .sweep.play{animation:ksweep .62s ease-in-out .28s both}
+
+  pre{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+      padding:10px;font-size:12px;overflow:auto;margin:0;white-space:pre-wrap;word-break:break-all}
+  .btns{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+  button{border:1px solid var(--line);background:var(--panel2);color:var(--fg);
+         border-radius:7px;padding:6px 12px;cursor:pointer;font-size:13px}
+  button:hover{border-color:var(--acc)}
+  button.pri{background:var(--acc);color:#1a1205;border-color:var(--acc);font-weight:600}
+  .warn{color:var(--acc2);font-size:11.5px}
+</style>
+</head>
+<body>
+<header>
+  <h1>开场标题编辑器</h1>
+  <span class="sub">风格 × 字体 × 动效 × 位置 —— 四个维度任意组合，调好导出配置即可定板</span>
+</header>
+
+<div class="wrap">
+  <!-- ============ 左：参数 ============ -->
+  <div class="col params">
+    <div class="grp">
+      <label>标题文本（只看效果用，改它不影响配置）</label>
+      <div class="row"><input type="text" id="txtMain" value="不用出镜"></div>
+      <div class="row" style="margin-top:6px"><input type="text" id="txtSub" value="是有代价的"></div>
+    </div>
+
+    <div class="grp">
+      <label>① 风格 —— 管光效、细线、排版</label>
+      <div class="chips" id="styles"></div>
+      <div class="hint" id="styleDesc"></div>
+    </div>
+
+    <div class="grp">
+      <label>② 字体 —— 管字形（系统里还有 107 个可选，见 <code>--list-fonts</code>）</label>
+      <select id="fontSel"></select>
+      <div class="row" style="margin-top:6px">
+        <input type="text" id="fontCustom" placeholder="或手填字体名（须是 fontconfig 能解析的全名）">
+      </div>
+    </div>
+
+    <div class="grp">
+      <label>③ 入场动效 —— 标题怎么出现</label>
+      <div class="chips" id="motions"></div>
+      <div class="hint" id="motionDesc"></div>
+    </div>
+
+    <div class="grp">
+      <label>④ 位置 —— 锚点 + 像素微调</label>
+      <div class="chips" id="anchors"></div>
+      <div class="row" style="margin-top:8px">
+        <span style="color:var(--dim);font-size:12px">偏移</span>
+        <input type="range" id="offset" min="-400" max="400" step="10" value="0">
+        <span class="val" id="offsetV">0 px</span>
+      </div>
+      <div class="hint" id="anchorDesc"></div>
+    </div>
+
+    <div class="grp">
+      <label>停留时长（秒）</label>
+      <div class="row">
+        <input type="range" id="hold" min="1" max="6" step="0.1" value="3.6">
+        <span class="val" id="holdV">3.6 s</span>
+      </div>
+    </div>
+
+    <div class="grp">
+      <label>辉光强度</label>
+      <div class="row">
+        <input type="range" id="glow" min="0" max="3" step="1" value="2">
+        <span class="val" id="glowV">2</span>
+      </div>
+      <div class="hint">0 = 无辉光；2 = 定板；3 = 更浓更亮</div>
+    </div>
+
+    <div class="grp">
+      <label>扫光</label>
+      <label class="sw"><input type="checkbox" id="sweep" checked> 标题出现时一道光扫过</label>
+      <div class="hint">FootageCrate 的建议：一个镜头只扫一次、只闪一下</div>
+    </div>
+  </div>
+
+  <!-- ============ 中：预览 ============ -->
+  <div class="col preview">
+    <h2>近似预览（点「重播」看入场动效）</h2>
+    <div class="stage" id="stage">
+      <div class="ph">
+        <div class="sweep" id="sweepEl"></div>
+        <div class="ttl" id="ttl"></div>
+        <div class="rule" id="rule"></div>
+        <div class="sub" id="subEl"></div>
+        <div class="cue">这里是正文字幕的位置（示意）</div>
+      </div>
+    </div>
+    <div class="btns">
+      <button class="pri" id="replay">▶ 重播动效</button>
+      <button id="toTop">回到顶部定板</button>
+    </div>
+    <div class="hint warn">预览是 CSS 近似（位置/层级/颜色/动效方向准确，辉光与扫光的强度以烧片为准）</div>
+  </div>
+
+  <!-- ============ 右：导出 ============ -->
+  <div class="col params">
+    <h2>导出：写进 ip.json</h2>
+    <pre id="jsonOut"></pre>
+    <div class="btns">
+      <button id="copyJson">复制 JSON</button>
+      <button id="dlJson">下载 title.json</button>
+    </div>
+
+    <h2 style="margin-top:18px">一键定板命令</h2>
+    <pre id="cmdApply"></pre>
+    <div class="btns"><button id="copyApply">复制命令</button></div>
+
+    <h2 style="margin-top:18px">出真实对比图（烧在真片子上）</h2>
+    <pre id="cmdPrev"></pre>
+    <div class="btns"><button id="copyPrev">复制命令</button></div>
+    <div class="hint">把 <code>&lt;混音.mp4&gt; &lt;字幕.srt&gt;</code> 换成 S01 的真实路径再跑</div>
+  </div>
+</div>
+
+<script>
+// ---- 与 substyle.py 保持一致的取值（改引擎要同步这里） ----
+const STYLES = {
+  cinematic:{cn:"电影感", glow:true,  rule:true,  desc:"暖金辉光 + 金色扫光 + 金细线（FootageCrate 三件套）"},
+  magazine: {cn:"杂志",   glow:false, rule:true,  desc:"上下双细线夹主标，靠线与字距建立秩序，无光效"},
+  pure:     {cn:"极简",   glow:false, rule:false, desc:"只有白字 + 细描边，最耐看，不吃画面"},
+  neon:     {cn:"霓虹",   glow:true,  rule:false, desc:"青蓝双层辉光 + 白扫光 + 冷色描边，科技/潮流向"},
+  stamp:    {cn:"印章",   glow:false, rule:false, desc:"金色底块横向展开 + 深色字反白，冲击力最强"},
+};
+const MOTIONS = {
+  tracking:"电影片头语法：字距从宽收到定板值 + 模糊聚焦，最「贵」",
+  fade:"只淡入不位移，最克制，任何画面都不会出错",
+  pop:"剪映式缩放弹入（过冲到 114%），短视频语法",
+  rise:"从下方 26px 浮上来，温和有呼吸感",
+  zoom:"从 126% 推到 100%，带压迫感，适合强观点",
+  wipe:"从左往右逐字显形（\\clip 横向展开）",
+  none:"无动画，硬出硬收",
+};
+const ANCHORS = {
+  top:   {cn:"顶部",    y:167, desc:"压在画面上部空白区，不吃人脸（定板）"},
+  third: {cn:"上三分",  y:461, desc:"黄金分割线，画面重心更稳"},
+  center:{cn:"正中",    y:624, desc:"适合信息型口播、无人物画面的片"},
+  lower: {cn:"下三分",  y:952, desc:"接近字幕区，有压字幕风险（慎用）"},
+};
+const FONTS = ["仓耳渔阳体 W05","仓耳渔阳体 W04","思源宋体 CN Heavy","思源宋体 CN SemiBold",
+  "思源黑体 CN Heavy","思源黑体 CN Bold","优设标题黑","优设标题圆","庞门正道标题体",
+  "站酷高端黑","阿里巴巴普惠体 2.0 115 Black","千图厚黑体"];
+const H = 1536, W = 864, SUB_GAP = 201;   // 副标相对主标的间距（1536 高下）
+
+const S = {style:"cinematic", font:FONTS[0], motion:"tracking",
+           anchor:"top", offset:0, hold:3.6, glow:2, sweep:true};
+const $ = id => document.getElementById(id);
+
+function chips(host, items, key, onpick){
+  host.innerHTML = "";
+  Object.entries(items).forEach(([k,v])=>{
+    const b = document.createElement("button");
+    b.className = "chip" + (S[key]===k ? " on" : "");
+    b.textContent = (v.cn || k) + (key==="motion" ? "" : "");
+    b.onclick = ()=>{ S[key]=k; chips(host, items, key, onpick); onpick && onpick(k); render(); };
+    host.appendChild(b);
+  });
+}
+function buildUI(){
+  chips($("styles"), STYLES, "style", k=>{ $("styleDesc").textContent = STYLES[k].desc; });
+  $("styleDesc").textContent = STYLES[S.style].desc;
+  chips($("motions"), Object.fromEntries(Object.keys(MOTIONS).map(k=>[k,{cn:k}])), "motion",
+        k=>{ $("motionDesc").textContent = MOTIONS[k]; });
+  $("motionDesc").textContent = MOTIONS[S.motion];
+  chips($("anchors"), ANCHORS, "anchor", k=>{ $("anchorDesc").textContent = ANCHORS[k].desc; });
+  $("anchorDesc").textContent = ANCHORS[S.anchor].desc;
+  $("fontSel").innerHTML = FONTS.map(f=>`<option${f===S.font?" selected":""}>${f}</option>`).join("");
+  $("fontSel").onchange = e=>{ S.font = e.target.value; $("fontCustom").value=""; render(); };
+  $("fontCustom").oninput = e=>{ if(e.target.value.trim()){ S.font = e.target.value.trim(); render(); } };
+  [["offset","offsetV",v=>v+" px"],["hold","holdV",v=>v+" s"],["glow","glowV",v=>v]]
+    .forEach(([id,vid,fmt])=>{
+      $(id).oninput = e=>{ S[id] = parseFloat(e.target.value); $(vid).textContent = fmt(S[id]); render(); };
+    });
+  $("sweep").onchange = e=>{ S.sweep = e.target.checked; render(); };
+  $("txtMain").oninput = $("txtSub").oninput = render;
+  $("replay").onclick = ()=>render(true);
+  $("toTop").onclick = ()=>{ Object.assign(S,{anchor:"top",offset:0});
+    $("offset").value=0; $("offsetV").textContent="0 px"; buildUI(); render(true); };
+}
+
+function titleFs(txt){                       // 与 substyle._title_fs 同逻辑
+  const n = (txt||"").replace(/[，。？！、；：\s]/g,"").length;
+  return 90 * (n<=4 ? 1.24 : n<=6 ? 1.12 : 1);
+}
+function render(replay){
+  const st = STYLES[S.style];
+  const k  = $("stage").clientWidth / W || 0.39;      // 预览缩放
+  const y  = (ANCHORS[S.anchor].y + S.offset) * k;
+  const fs = titleFs($("txtMain").value) * k;
+  const ss = 38 * k;
+
+  const t = $("ttl");
+  t.textContent = $("txtMain").value;
+  t.style.top = y + "px";
+  t.style.fontSize = fs + "px";
+  t.style.fontFamily = `"${S.font}", sans-serif`;
+  t.style.letterSpacing = ".02em";
+  t.className = "ttl anim a-" + S.motion;
+  if (S.style === "stamp"){
+    t.style.display = "inline-block"; t.style.background = "#ffc24b"; t.style.color = "#1a1205";
+    t.style.padding = `${fs*0.12}px ${fs*0.22}px`; t.style.textShadow = "none";
+  } else {
+    t.style.background = "transparent"; t.style.color = "#fff"; t.style.padding = "0";
+    t.style.textShadow = (S.glow>0 && st.glow)
+      ? `0 0 ${S.glow*7}px ${S.style==="neon"?"#00e5ff":"#ffc24b"}, 0 3px 12px rgba(0,0,0,.85)`
+      : "0 3px 12px rgba(0,0,0,.85)";
+  }
+
+  const r = $("rule");
+  r.style.display = st.rule ? "block" : "none";
+  r.style.top = (y + fs*1.30) + "px";
+  r.style.width = (W*0.18*k) + "px";
+
+  const s = $("subEl");
+  s.textContent = $("txtSub").value;
+  s.style.top = (y + SUB_GAP*k) + "px";
+  s.style.fontSize = ss + "px";
+  s.style.fontFamily = `"${S.font}", sans-serif`;
+  s.style.letterSpacing = ".14em";
+  s.className = "sub anim a-" + (S.motion==="none" ? "none" : "fade");
+
+  const sw = $("sweepEl");
+  sw.className = "sweep" + (S.sweep && st.glow ? " play" : "");
+
+  if (replay){                                  // 重启 CSS 动画
+    [t,s,sw].forEach(el=>{ el.style.animation = "none"; void el.offsetHeight; el.style.animation = ""; });
+  }
+
+  // ---- 导出 ----
+  const cfg = {style:S.style, font:S.font, motion:S.motion, anchor:S.anchor,
+               offset:S.offset, hold:S.hold, glow:S.glow, sweep:S.sweep};
+  $("jsonOut").textContent = JSON.stringify({subtitle:{title:cfg}}, null, 2);
+  const q = `"${S.font}"`;
+  const base = `--style ${S.style} --font ${q} --motion ${S.motion} --pos ${S.anchor} `+
+               `--offset ${S.offset} --glow ${S.glow} --sweep ${S.sweep?"on":"off"} --hold ${S.hold}`;
+  $("cmdApply").textContent = `python3 03_生产脚本/title_preview.py --apply ip.json ${base}`;
+  $("cmdPrev").textContent =
+    `python3 03_生产脚本/title_preview.py <混音.mp4> <字幕.srt> ${base} \\\n`+
+    `  --at 0.15,0.45,1.60 --out 08_过程/_标题预览/我的方案.png`;
+}
+function copy(id){
+  navigator.clipboard.writeText($(id).textContent).then(()=>{
+    const b = event.target; const t = b.textContent; b.textContent = "✓ 已复制";
+    setTimeout(()=>b.textContent = t, 1200);
+  });
+}
+$("copyJson").onclick = ()=>copy("jsonOut");
+$("copyApply").onclick = ()=>copy("cmdApply");
+$("copyPrev").onclick = ()=>copy("cmdPrev");
+$("dlJson").onclick = ()=>{
+  const blob = new Blob([$("jsonOut").textContent], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "title.json"; a.click();
+};
+buildUI(); render(true);
+window.addEventListener("resize", ()=>render(false));
+</script>
+</body>
+</html>
