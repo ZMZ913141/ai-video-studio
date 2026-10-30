@@ -496,8 +496,13 @@ def do_to_en(e, setname, force=False, as_json=False):
             "逐段译成英文：\n"
             "  expression_en = 这一段的眉/眼/嘴状态（照 expression 译，1 句）\n"
             "  perf_en = 这一段的手势与身体动作（照 motion 译，1 句；"
-            "如果他只是自然端坐没有动作，就写 His hands rest still and low near his lap.）\n"
+            "如果这一段只是自然端坐没有动作，就写 The hands rest still and low near the lap.）\n"
             "camera 不用译出，只用来理解语境。\n\n"
+            "★ 性别必须中立：中文原文没有指明男女，**一律用中性表达**"
+            "（the speaker / their / the hands / the face），"
+            "绝对不能出现 he / she / his / her / him 这类代词。\n"
+            "  为什么：人物长什么样由参考静帧决定（见 ip.json 的 visual.still），"
+            "提示词里一旦指定性别就会跟静帧打架，长出另一张脸。\n"
             + json.dumps(payload, ensure_ascii=False))
 
     try:
@@ -526,6 +531,14 @@ def do_to_en(e, setname, force=False, as_json=False):
             issues.append(f"段{i} 没译出 expression_en")
         if not row.get("perf_en"):
             issues.append(f"段{i} 没译出 perf_en")
+        # ★ 性别代词闸门：中文原稿不带性别，译文里冒出 he/she/his/her 说明模型自己加了
+        #   人物是谁由参考静帧决定，提示词里指定性别会跟静帧打架 → 整批不落盘
+        gend = re.findall(r"\b(he|she|his|her|hers|him|himself|herself)\b",
+                          (row.get("expression_en", "") + " " + row.get("perf_en", "")),
+                          re.IGNORECASE)
+        if gend:
+            issues.append(f"段{i} 出现了性别代词（{'/'.join(sorted(set(gend)))}）："
+                          f"中文原稿没指定性别，人物由静帧决定，译文必须中性")
         result.append(row)
 
     if issues:
