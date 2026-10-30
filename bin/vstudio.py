@@ -22,6 +22,7 @@ vstudio —— 洁斌资产 · 视频生产总控 CLI
 ※ 全球化名：ip 参数写名字/别名/路径都行（"洁斌"、"主号"、"陈洁斌主号"、"S04"）。
 """
 import argparse
+import glob
 import json
 import os
 import re
@@ -154,6 +155,67 @@ def set_dirs(ip_root, setname):
     """一套片子横跨的目录（05~08 同名）"""
     d = opus_dirs(ip_root)
     return {k: os.path.join(ip_root, d[k], setname) for k in ("05", "06", "07", "08")}
+
+
+# ---------------------------------------------------------------- 音频时长探测
+# ★ 段数必须由「喂给出片的那条音频」算，不能由 SRT 末条 / 字数估来算。
+#   2026-10-30 的实测：同一套片，按字数估 20.3s → 498 帧 → 4 段；
+#   出片脚本读真实留白音频 20.76s → 499 帧 → 吸附到 515 → 5 段。
+#   于是提示词只写了 4 段，第 5 段静默退回默认描述（画面与台词不符），
+#   而日志里除了那条"段数对不上"的告警，没有任何一步会失败。
+#   差的那 0.46s 就是片尾静音 —— 光看 SRT 永远看不到。
+#   ★ 探测必须用**出片脚本同一支 ffmpeg**（gen_video.py 里 FF 就是这个 imageio 自带版）。
+#   同一份 mp3，系统 ffmpeg 报 20.73s、这支报 20.76s —— 差 0.03s，
+#   但 20.73×24+1=498（正好落在 5+17n 网格上，4 段），
+#   20.76×24+1=499（越界，吸附到 515，5 段）。差一个二进制就差了整整一段。
+_FF_CANDIDATES = (
+    "/home/qmr/.workbuddy/binaries/python/envs/default/lib/python3.13/"
+    "site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2",
+    "ffmpeg",
+)
+
+
+def _ffmpeg():
+    import shutil
+    for c in _FF_CANDIDATES:
+        if os.path.exists(c):
+            return c
+        if c == "ffmpeg":
+            p = shutil.which("ffmpeg")
+            if p:
+                return p
+    return None
+
+
+def probe_sec(path):
+    """真实时长（秒）。本机 ffprobe 是坏的，只能解析 ffmpeg -i 的 Duration 行。"""
+    ff = _ffmpeg()
+    if not ff or not path or not os.path.isfile(path):
+        return None
+    try:
+        r = subprocess.run([ff, "-i", path], capture_output=True, text=True, timeout=30)
+    except Exception:
+        return None
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",
+                  (r.stderr or "") + (r.stdout or ""))
+    if not m:
+        return None
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+
+def audio_sec_of(dir06):
+    """这一步真正喂给出片的音频时长（**留白版优先**，那是出片读的那条）。
+
+    返回 (秒, 路径)；找不到/探不到就 (None, None)，调用方退回估算。
+    """
+    for pat in ("*留白*.mp3", "*留白*.wav", "*留白*.m4a", "*.mp3", "*.wav"):
+        fs = sorted(glob.glob(os.path.join(dir06, pat)),
+                    key=os.path.getmtime, reverse=True)
+        for f in fs:
+            sec = probe_sec(f)
+            if sec:
+                return sec, f
+    return None, None
 
 
 def landing_path(ip_root, setname):
@@ -996,6 +1058,7 @@ def cmd_algo(a):
         except Exception as ex:
             die(f"读档位失败：{ex}")
     sec = a.sec
+    src = "命令行 --sec"
     if sec is None:
         e = resolve_ip(a.ip)
         sets = list_sets(e["path"])
@@ -1003,27 +1066,35 @@ def cmd_algo(a):
             next((s for s in sets if s.startswith(a.set)), None)
         if not name:
             die(f"没有这套：{a.set}（现有 {' / '.join(sets) or '无'}）")
-        # 没给时长就按文案字数估（ip.json 记的约 3.85 字/s）
-        base = os.path.join(e["path"], opus_dirs(e["path"]).get("05", "05_文案"), name)
-        txt = None
-        for pat in ("*字幕文本*.txt", "*.txt", "*.md"):
-            import glob as _g
-            fs = [f for f in sorted(_g.glob(os.path.join(base, pat)))
-                  if not os.path.basename(f).startswith("job")]
-            if fs:
-                txt = fs[0]
-                break
-        if not txt:
-            die(f"没给 --sec 也找不到文案：{base}")
-        n = len(re.sub(r"\s", "", open(txt, encoding="utf-8-sig").read()))
-        sec = n / 3.85
+        # ★ 优先用**真实音频**：出片脚本读的就是它。
+        #   以前这里直接按字数估（20.3s），出片读留白 mp3（20.76s），
+        #   差 0.46s 正好跨过 5+17n 网格边界 → 预览 4 段、实出 5 段。
+        sec, apath = audio_sec_of(set_dirs(e["path"], name)["06"])
+        if sec:
+            src = f"真实音频 {os.path.basename(apath)}"
+        else:
+            # 没有音频（还没跑 tts）才退回按文案字数估
+            base = os.path.join(e["path"], opus_dirs(e["path"]).get("05", "05_文案"), name)
+            txt = None
+            for pat in ("*字幕文本*.txt", "*.txt", "*.md"):
+                fs = [f for f in sorted(glob.glob(os.path.join(base, pat)))
+                      if not os.path.basename(f).startswith("job")]
+                if fs:
+                    txt = fs[0]
+                    break
+            if not txt:
+                die(f"没给 --sec、也没有音频和文案：{base}")
+            n = len(re.sub(r"\s", "", open(txt, encoding="utf-8-sig").read()))
+            sec = n / 3.85
+            src = "按字数估（还没有音频，跑完 tts 再算才准）"
     p = A.plan(sec, mp, target_segs=a.segs)
     if a.json:
-        print(json.dumps(p, ensure_ascii=False, indent=2))
+        print(json.dumps(dict(p, sec_source=src), ensure_ascii=False, indent=2))
         return
     print(f"{mp}MP{'（档位 ' + tname + '）' if tname else ''}"
           f" → {p['res'][0]}x{p['res'][1]}（实际 {p['real_mp']}MP）"
           f"{'  [快速档]' if p['fast'] else ''}")
+    print(f"  时长来源 {src}  {sec:.2f}s")
     print(f"  片长 {sec:.1f}s  留白 前 {p['pad_head']}s / 后 {p['pad_tail']}s"
           f"  → 对齐后 {p['padded_sec']}s")
     print(f"  总帧 {p['total_frames']}（{p['total_sec']}s，≡5 mod 17）"

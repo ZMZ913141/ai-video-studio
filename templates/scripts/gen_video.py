@@ -2151,6 +2151,25 @@ def main():
                  f"  多 IP 场景请用 STILL=<本IP静帧.png> 指定")
     _w, _h = calc_res()
     print(f"   净长 {tot} 帧（{tot/FPS:.3f}s）  字幕 {len(cues)} 条")
+    # ★ 把「这一版到底怎么分段」落到文件 —— 提示词侧必须按它写分镜。
+    #   段数**不是** studio_algo.plan() 直接给的：下面还有一步「按切点是否落在
+    #   停顿上」在 ±4 范围内换段数重排（2026-10-30 就是 plan 说 4 段、
+    #   这里重排成 5 段，结果提示词只写了 4 段，第 5 段静默退回默认描述）。
+    #   所以真值只在这里，写出来让 prompts --gen 读。
+    _plan_out = (os.environ.get("PLAN_OUT") or "").strip()
+    if _plan_out:
+        try:
+            with open(_plan_out, "w", encoding="utf-8") as _f:
+                json.dump({"set": TAG, "n": len(segs), "total_frames": tot,
+                           "total_sec": round(tot / FPS, 3),
+                           "audio_sec": round(audio_sec, 3), "mp": MP,
+                           "maxlen": MAXLEN, "overlap": OVERLAP,
+                           "segs": [list(s) for s in segs],
+                           "cuts_sec": [round(s[0] / FPS, 2) for s in segs[1:]]},
+                          _f, ensure_ascii=False)
+            print(f"   分段计划 → {_plan_out}（{len(segs)} 段，提示词按这个写）")
+        except Exception as _ex:
+            print(f"  ⚠ 分段计划落盘失败：{_ex}")
     print(f"   分辨率 MP={MP} → {_w}x{_h}（{_w*_h/1024/1024:.3f}MP）"
           f"{'  ← 注意：验收工具 W,H 需同步' if (_w, _h) != (768, 1376) else ''}")
     # ★ 快速档警告必须在 DRY 阶段就打 —— DRY 恰恰是决定跑不跑的那一步，

@@ -163,6 +163,7 @@ class Pipeline:
         self.dry = dry
         self.force = force
         self.force_from = ""      # run() 里设成 --from 的步骤名（那一步强制重做）
+        self._after_from = set()  # --from 之后的步骤（只在"跳过"时给提示，不改语义）
         self.opt_segs = segs
         self.opt_grid = grid
         self.verbose = verbose
@@ -468,6 +469,13 @@ class Pipeline:
                     self.ctx[st["set_var"]] = hit
                 self.log["steps"].append(rec)
                 print(f"  ⏭  {sid} 跳过（已有 {os.path.basename(hit)}）")
+                # ★ --from X 只强制重做 X 本身，后面的步骤靠产物 mtime 判断。
+                #   于是 `--from free` 会出现「free 跑了、video 却跳过」——
+                #   2026-10-30 我自己就被这个坑住：以为在重出 std，其实一条没动。
+                #   凡是「在 --from 之后却仍然复用旧产物」的步骤，明确提示一句。
+                if sid in self._after_from:
+                    print(f"      ↑ 它用的是**旧产物**（--from 只强制重做那一步）；"
+                          f"要重做请 --from {sid}")
                 self.refresh()
                 return rec
             if stale:
@@ -645,6 +653,10 @@ class Pipeline:
         #   用户改完语气听半天以为没生效（2026-10-30 真跑抓到）。
         #   现在只强制 X 这一步，后面的步骤靠产物 mtime 链式触发重做。
         self.force_from = (start or "").strip()
+        # 「--from 之后的所有步骤」——只用来在跳过时给提示，不改变重做语义
+        _ids = [s["id"] for s in self.cfg.get("steps", [])]
+        self._after_from = set(_ids[_ids.index(self.force_from) + 1:]) \
+            if self.force_from in _ids else set()
         self.seed_from_disk()
 
         p = self.log["plan"]
@@ -653,6 +665,17 @@ class Pipeline:
               + ("  [DRY]" if self.dry else ""))
         print(f"  预计 {p['total_frames']} 帧 / {p['total_sec']}s / {p['segs']} 段"
               f"  单段上限 {p['maxlen']} 帧  格数 {p['grid']}")
+        # ★ 这里给的是「按目标段长的初值」。出片脚本还会按切点质量在 ±4 内换段数
+        #   （S02 std 实测 4 → 5），提示词也是按它（.segplan.json）写的。
+        #   两处不一致会让人以为提示词少了——所以有实测计划就以它为准。
+        _sp = os.path.join(V.set_dirs(self.root, self.set)["05"], ".segplan.json")
+        try:
+            _pl = json.load(open(_sp, encoding="utf-8"))
+            if int(_pl.get("n") or 0) and int(_pl.get("n") or 0) != int(p["segs"]):
+                print(f"  出片自适应后实际 {_pl['n']} 段 / {_pl['total_frames']} 帧"
+                      f"（提示词按这个写的；切点落在停顿上比的均分更重要）")
+        except Exception:
+            pass
         if self.ctx.get("pad_head"):
             print(f"  音频留白 前 {self.ctx['pad_head']}s / 后 {self.ctx['pad_tail']}s"
                   f"  配乐比人声低 {self.ctx['bgm_offset']} LU")

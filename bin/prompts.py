@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime
 
@@ -190,6 +191,61 @@ def _cps(ip_root):
     return 3.85
 
 
+def _video_n(ip_root, setname, mp, target_segs=None):
+    """问出片脚本：这一版到底出几段。返回 (n, 说明)。
+
+    ★ 为什么不能自己算
+    ------------------
+    studio_algo.plan() 给的是「按目标段长的初值」，gen_video 拿到之后还会按
+    「切点是否落在停顿上」在 ±4 范围内换段数重排（它宁可多一段，也不在半句上切）。
+    两边各算一次，迟早对不上：2026-10-30 真跑就是 plan 说 4 段、
+    实出 5 段，第 5 段静默退回默认描述 —— 画面和台词差一句，日志只留一行告警。
+    所以让提示词**去问出片**：跑一次 DRY（不出片、不占 GPU、约 3 秒），
+    读它落盘的 `.segplan.json`。段数以它为准，天生一致。
+    """
+    od = V.opus_dirs(ip_root)
+    gv = os.path.join(ip_root, od.get("03", "03_生产脚本"), "gen_video.py")
+    if not os.path.isfile(gv):
+        return None, f"没有出片脚本（{gv}），只能按算法估"
+    dirs = V.set_dirs(ip_root, setname)
+    _asec, apath = V.audio_sec_of(dirs["06"])
+    if not apath:
+        return None, "还没有音频（先跑 tts），只能按算法估"
+    srt = None
+    for pat in (os.path.join(dirs["07"], "*.srt"), os.path.join(dirs["05"], "*.srt")):
+        fs = sorted(glob.glob(pat))
+        if fs:
+            srt = fs[0]
+            break
+    if not srt:
+        return None, "还没有 SRT（先跑 srt），只能按算法估"
+
+    dfl = {}
+    try:
+        dfl = (json.load(open(CFG_PATH, encoding="utf-8")).get("defaults") or {})
+    except Exception:
+        pass
+    ts = target_segs if target_segs is not None else dfl.get("target_segs")
+    out = os.path.join(dirs["05"], ".segplan.json")
+    env = dict(os.environ, SRT=srt, AUDIO=apath, TAG=setname, MP=str(mp),
+               DRY="1", PLAN_OUT=out, PROMPTS_EN="", MATERIALS="")
+    if ts:
+        env["TARGET_SEGS"] = str(ts)
+    if dfl.get("overlap"):
+        env["OVERLAP"] = str(dfl["overlap"])
+    try:
+        subprocess.run([sys.executable, gv], env=env, capture_output=True,
+                       text=True, timeout=240)
+        plan = json.load(open(out, encoding="utf-8"))
+        n = int(plan.get("n") or 0)
+        if n > 0:
+            return n, (f"出片脚本 DRY：{n} 段 / {plan.get('total_frames')} 帧"
+                       f" / {plan.get('audio_sec')}s 音频")
+    except Exception as ex:
+        return None, f"问出片脚本失败（{type(ex).__name__}），只能按算法估"
+    return None, "出片脚本没给出分段计划，只能按算法估"
+
+
 def build_segments(ip_root, setname, target_seg_secs=8.0, mp=None, target_segs=None):
     """把文案切成**与出片段数一致**的段落。
 
@@ -225,13 +281,28 @@ def build_segments(ip_root, setname, target_seg_secs=8.0, mp=None, target_segs=N
     else:
         return []
 
-    try:
-        p = A.plan(sec, float(mp) if mp is not None else _default_mp(),
-                   target_segs=target_segs,
-                   target_seg_secs=float(target_seg_secs))
-        n = int(p["segs"])
-    except Exception:
-        n = max(1, int(round(sec / max(1.0, float(target_seg_secs)))) or 1)
+    # ★★ 时长只认「真正喂给出片的那个音频文件」（留白 mp3）。
+    #   2026-10-30 真跑踩的坑：SRT 末条停在 20.3s（片尾静音没字幕），
+    #   出片脚本读留白 mp3 是 20.76s —— 差 0.46s，正好把 499 帧顶到 515 帧，
+    #   于是提示词 4 段、出片 5 段，第 5 段静默退回默认描述（画面与台词不符）。
+    #   这类错不会让任何一步失败，只能靠"两边读同一个数"从源头消掉。
+    _asec, _apath = V.audio_sec_of(dirs["06"])
+    if _asec:
+        sec = _asec
+
+    # 段数以**出片脚本的 DRY 结果**为准（它会按停顿质量重排段数）
+    _mp = float(mp) if mp is not None else _default_mp()
+    n, _why = _video_n(ip_root, setname, _mp, target_segs)
+    if not n:
+        try:
+            p = A.plan(sec, _mp, target_segs=target_segs,
+                       target_seg_secs=float(target_seg_secs))
+            n = int(p["segs"])
+            _why = f"{_why} → plan() 给 {n} 段"
+        except Exception:
+            n = max(1, int(round(sec / max(1.0, float(target_seg_secs)))) or 1)
+            _why = f"{_why} → 按目标段长估 {n} 段"
+    print(f"  段数 {n} 段  ← {_why}")
 
     if cues:
         return _split_cues_n(cues, n)
