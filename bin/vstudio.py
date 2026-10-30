@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-vstudio —— 洁斌资产 · 视频生产总控 CLI
+vstudio —— 视频生产总控 CLI
 
 ★ 这是整个生产体系的**唯一入口**。UI 是可选项，本 CLI 才是真接口：
   人可以在终端敲，agent 可以用 Bash 调（加 --json 拿结构化结果），
   也可以挂成 MCP 给别的 AI 调（见同目录 mcp_server.py）。
 
-管辖范围：陈洁斌主号 + 其客户 IP（与 IP总档.json 一致）。雅太社（珠珠）不纳管。
+管辖范围：本平台主号 + 其客户 IP（与 registry.json 一致）。独立合作生产线不纳管。
 
 常用：
   vstudio ips                          看有几个 IP、素材齐不齐
-  vstudio jobs 洁斌                     看所有套次的进度
-  vstudio job-new 洁斌 S05 讲AI变现      开一套新的
+  vstudio jobs <IP名>                   看所有套次的进度
+  vstudio job-new <IP名> S05 讲AI变现      开一套新的
   vstudio job-show 洁斌 S04             看一套的详情
   vstudio job-set 洁斌 S05 文案 ok       推进阶段
   vstudio guard 洁斌                     开工前自检（缺素材直接非零退出）

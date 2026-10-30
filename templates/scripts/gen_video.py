@@ -69,7 +69,7 @@ AUDIO_SRC = os.environ.get("AUDIO", "")
 # ★★ 多 IP 隔离：静帧决定「这是谁的脸」，真值来自本 IP 的 ip.json
 #   2026-10-28 改。旧写法两个致命问题：
 #     ① 靠 glob 从 ../02_素材真值/*静帧*.png 取，在错的目录跑就指向错的 IP
-#     ② 兜底硬编码「陈洁斌_主号_静帧_...」→ 忘了设 STILL 就直接长出洁斌的脸
+#     ② 兜底硬编码某个 IP 的静帧名 → 忘了设 STILL 就直接长出别人的脸
 #   现在改为按脚本路径锁定 IP，素材缺失直接 sys.exit，绝不静默退回别人的素材。
 #   环境变量 STILL 仍可用，但指向本 IP 之外会被 ip_guard 拒绝。
 # 注意：IP 档案的加载放在 UNET/CLIP 常量定义之后（见文件下方），
@@ -109,7 +109,7 @@ UPSCALER = "minimax_h3_latent_upscaler_3d_fp16_V2.safetensors"
 # ★★ 多 IP 隔离：静帧决定「这是谁的脸」，真值来自本 IP 的 ip.json
 #   2026-10-28 改。旧写法两个致命问题：
 #     ① 靠 glob 从 ../02_素材真值/*静帧*.png 取，在错的目录跑就指向错的 IP
-#     ② 兜底硬编码「陈洁斌_主号_静帧_...」→ 忘了设 STILL 就直接长出洁斌的脸
+#     ② 兜底硬编码某个 IP 的静帧名 → 忘了设 STILL 就直接长出别人的脸
 #   现在改为按**脚本路径**锁定 IP，素材缺失直接 sys.exit，
 #   **绝不静默退回别人的素材**。环境变量 STILL 仍可用，
 #   但指向本 IP 之外会被 ip_guard 拒绝。
@@ -1469,12 +1469,12 @@ DEFAULT_PROMPT_VARS = {
     ),
     # ★★ 2026-10-31：把这四个「姿态」从骨架里拆出来（第 4 处同类护栏）。
     #   以前骨架写死 "his seated posture" / "in his chair, near his lap" / "sits"，
-    #   等于**默认所有人都是坐着对着沙发讲话** —— 主号是坐姿，所以一直没暴露；
-    #   珠珠（客户卡）是站在展厅里讲的，DRY 一跑就自相矛盾：
+    #   等于**默认所有人都是坐着对着沙发讲话** —— 第一个 IP 是坐姿，所以一直没暴露；
+    #   第二个 IP 是站姿，DRY 一跑就自相矛盾：
     #   subject_definitions 说 "her seated posture"，detailed 说 "standing"，
     #   模型被两句话拉扯，姿势会在段与段之间漂。
     #   默认值必须中性（画面交回 <Picture 1>），要用具体姿态的 IP 在 ip.json 里显式钉死。
-    #   ⚠️ 主号 ip.json 已把前三个显式写成旧值，DRY 逐字节不变（有 golden 可 diff）。
+    #   ⚠️ 第一个 IP 的 ip.json 已把前三个显式写成旧值，DRY 逐字节不变（有 golden 可 diff）。
     "posture": 'his posture',
     "rest_pose": 'settled and relaxed, hands resting low and still',
     # ★ 默认必须是「不表态」：坐着写 sits、站着写 stands，引擎不替客户选姿势。
@@ -1484,7 +1484,7 @@ DEFAULT_PROMPT_VARS = {
     #   坐着讲的 IP 自己写 seated，站着讲的写 standing，别让引擎替客户决定姿势。
     "seated_where": 'in the room of the reference still',
     "where_of_still": 'in the room shown',
-    # ★ <d> 标记里的语种标签。主号/珠珠是中文口播，但引擎不该把 [Chinese] 焊死 ——
+    # ★ <d> 标记里的语种标签。引擎不该把 [Chinese] 焊死 ——
     #   给英文或粤语 IP 出片时，这一处会让口型对不上（标记语言与实际发音不一致）。
     "lang_tag": 'Chinese',
     "above_head": (
@@ -1874,11 +1874,11 @@ def _gender_norm(text, g):
     """把骨架里写死的 he/his 按本 IP 的性别归一。
 
     ★ 为什么要有：这套英文骨架是全引擎共用的一份，里面 90 处 he/his 是「男性默认」。
-      女性 IP（客户女主播）直接用，出来的提示词就是「一位女性……他的脸……他坐在椅子上」，
+      女性 IP 直接用，出来的提示词就是「一位女性……他的脸……他坐在椅子上」，
       模型会摇摆，画面容易中性化。这跟「引擎默认值必须中性」是同一条铁律。
 
-    ★ 只在 video.gender 明确是女性时替换 —— 主号（male）走同一行代码但逐字节不变，
-      不重新验证主号的历史成片。\b 词边界是必须的：'the' 里含 he，
+    ★ 只在 video.gender 明确是女性时替换 —— 男性 IP 走同一行代码但逐字节不变，
+      已交付的男性成片无需复验。\b 词边界是必须的：'the' 里含 he，
       裸子串替换会把它改成 'tshe'（这类错误比不替换更难查）。
     """
     if str(g).lower() not in ("f", "female", "女", "女性", "woman"):

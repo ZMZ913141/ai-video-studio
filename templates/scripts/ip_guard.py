@@ -142,7 +142,7 @@ def check_assets(ip, strict=True, verbose=True):
                 unlisted.append(f"{group}.{key}")
             continue
         rel = g[key]
-        # ★★ 关键：null 不能静默跳过。2026-10-28 踩到：雅太社档案里
+        # ★★ 关键：null 不能静默跳过。2026-10-28 踩到：某个独立档案里
         #    ref_audio/still 写的是 null，旧的 `if not rel: continue`
         #    直接跳过 → 自检输出「✓ 档案加载完成」，看起来一切正常，
         #    实际这个 IP 根本没法出片。**这正是要防的静默失败**。
