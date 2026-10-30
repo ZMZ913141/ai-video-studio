@@ -44,11 +44,14 @@ sys.path.insert(0, HERE)
 import substyle as S          # noqa: E402
 import burn_ass as B          # noqa: E402  复用它的 ffmpeg 封装（flatpak kdenlive）
 
-# 内置推荐：系统里 55 个中文字体里真正适合「标题」的这批
+# 内置推荐：系统里 107 个可选择名字里真正适合「标题」的这批
 # （手写体/书法体不进 —— 口播片用书法体会显得不专业，且笔画细、压不住画面）
+# ★ 宋/黑体系列必须点名**重字重**：思源宋体 CN Regular / 思源黑体 CN Regular
+#   是正文用字重，放标题上笔画太细，浅背景一压就飘（2026-10-30 对比图实测）。
 RECOMMENDED_FONTS = [
     "仓耳渔阳体 W05", "仓耳渔阳体 W04",
-    "思源宋体 CN", "思源黑体 CN",
+    "思源宋体 CN Heavy", "思源宋体 CN SemiBold",
+    "思源黑体 CN Heavy", "思源黑体 CN Bold",
     "优设标题黑", "优设标题圆",
     "庞门正道标题体", "站酷高端黑",
     "阿里巴巴普惠体 2.0 115 Black", "千图厚黑体",
@@ -64,27 +67,56 @@ CUE_VARIANTS = [
 
 # ---------------- 字体清单 ----------------
 
+_FONT_CACHE = {}
+
+
+def _resolve(name):
+    """一个字体名实际会落到哪个字体文件（fontconfig 的解析结果）。"""
+    if name not in _FONT_CACHE:
+        _FONT_CACHE[name] = subprocess.run(
+            ["fc-match", "-f", "%{file}", name],
+            capture_output=True, text=True).stdout.strip()
+    return _FONT_CACHE[name]
+
+
 def list_fonts(top=0):
-    """系统里能解析到的中文字体（排掉解析不到会静默回退 Noto 的错名）。"""
-    out = subprocess.run(["fc-list", "-f", "%{family}|%{file}\n"],
+    """系统里能解析到的中文字体，**按字重展开**，只收「名下落在自己文件上」的名字。
+
+    两个必须做的事：
+    1) 多字重家族要拆开：`仓耳渔阳体` 家族有 W01~W05，只按 family 列会只剩 W01，
+       而 W05 才是做标题要的那一档 —— 名字写成「家族 + 字重」才挑得到。
+    2) **严格校验**：`fc-match <名字>` 必须解析回**这个字体自己的文件**。
+       只判「不是 Noto」不够 —— 错名会静默落到同家族另一档（比如 W04 的名字
+       落到 W01）或别的字体，烧出来字形不对但不报错，肉眼很难发现。
+    """
+    out = subprocess.run(["fc-list", "-f", "%{family}|%{style}|%{file}\n"],
                          capture_output=True, text=True).stdout
-    seen, res = set(), []
+    res, seen_file = [], set()
     for line in out.splitlines():
-        if "|" not in line:
+        parts = line.split("|")
+        if len(parts) < 3:
             continue
-        fam, path = line.split("|", 1)
+        fam, style, path = parts[0], parts[1], parts[2]
         main = fam.split(",")[0].strip()
-        if not main or main in seen:
+        if not main:
             continue
-        # 只要含中文/日文的家族（纯拉丁字体渲染不出汉字）
+        # 只要中文家族（纯拉丁字形渲染不出汉字）
         if re.fullmatch(r"[A-Za-z0-9 \-_.]+", main):
             continue
-        seen.add(main)
-        hit = subprocess.run(["fc-match", "-f", "%{file}\n", main],
-                             capture_output=True, text=True).stdout.strip()
-        if not hit or "noto" in hit.lower() or "dejavu" in hit.lower():
-            continue        # 名字解析不到 → 烧出来字形全错，不进清单
-        res.append((main, os.path.basename(hit)))
+        cands = [main]
+        # ⚠ %{style} 可能返回多个本地化值（"W05,Regular"），逗号拼接 → 只取第一个，
+        #   否则拼出来的字体名是「仓耳渔阳体 W05,Regular」，libass 认不出、静默回退。
+        st = style.split(",")[0].strip()
+        if st and st.lower() not in ("regular", "normal", "book"):
+            cands.append(f"{main} {st}")       # 家族 + 字重（W05 / 115 Black / Bold…）
+        for name in cands:
+            hit = _resolve(name)
+            if os.path.basename(hit) != os.path.basename(path):
+                continue                        # 名字解析不到自己 → 会烧错字形，剔除
+            if hit in seen_file:
+                continue
+            seen_file.add(hit)
+            res.append((name, os.path.basename(path)))
     res.sort()
     if top:
         res = res[:top]
