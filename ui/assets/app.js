@@ -282,6 +282,41 @@ function saveDialogue() {
   dlgByIp[state.ip] = { messages: state.dialogue.slice(-40), pending: state.dlgPending };
 }
 
+/* 对话里确认执行的动作 → 按动作类型定向刷新受影响的 state 和面板。
+   后端 _exec_dialogue_action 支持的动作里，写类的会改 card.json / ip.json /
+   人设 md / job.json / 素材清单，这里按类型刷对应的数据源。 */
+async function refreshDialogueAfterActions(acts) {
+  const kinds = new Set(acts.map(a => (a.action || '').split(':')[0]));
+  const needCard = ['write_card', 'add_habit', 'add_redline', 'add_need']
+    .some(k => kinds.has(k));
+  const needIp = ['write_ip'].some(k => kinds.has(k));
+  const needJobs = ['new_card', 'set_stage'].some(k => kinds.has(k));
+  const needPersona = ['write_persona'].some(k => kinds.has(k));
+  const needMaterials = ['assign_material'].some(k => kinds.has(k));
+  const needTrial = ['trial_cfg'].some(k => kinds.has(k));
+  const needScript = ['write_script'].some(k => kinds.has(k));
+
+  const jobs = [];
+  if (needCard) jobs.push(loadCard());
+  if (needIp) jobs.push(loadIpCfg());
+  if (needJobs) jobs.push(loadJobs());
+  await Promise.all(jobs);
+
+  // 这些 render 有的是 async，统一 await，避免「改了东西，别处慢半拍才变」。
+  const renders = [];
+  if (needCard || needIp) {
+    renders.push(Promise.resolve().then(() => { renderHero(); renderInspect(); }),
+      renderSettings());
+  }
+  if (needPersona) renders.push(renderPersona());
+  if (needMaterials) renders.push(renderMaterials());
+  if (needTrial) renders.push(renderTrial());
+  if (needScript) renders.push(renderBrief());
+  if (needJobs) renders.push(renderTree());
+  await Promise.all(renders);
+  renderDialogue();
+}
+
 /* ---------- 布局记忆 ---------- */
 const LS = 'vstudio.ui.v1';
 const ui = Object.assign({ left: 288, right: 372, density: 'comfy', collapsed: {}, rightOpen: false },
@@ -522,6 +557,33 @@ async function loadCard() {
 
 async function loadIpCfg() {
   state.ipcfg = await api('ipconfig?ip=' + encodeURIComponent(state.ip));
+}
+
+/* ★ 保存后的统一刷新：三份数据源一起重拉 + 重渲染所有受影响面板。
+   以前每个保存入口各自刷新、各自渲染，漏一个就出现「点了保存，界面不更新」。
+   现在所有写操作成功后统一走这里，杜绝「有的面板同步、有的不同步」。
+   opts.card / opts.ipcfg / opts.cfg 控制要刷哪份数据源；
+   opts.extra 追加额外要重渲染的面板（默认渲染 hero/inspect/settings/log）。 */
+async function refreshAllAfterWrite(opts = {}) {
+  if (!state.ip) return;
+  const jobs = [];
+  if (opts.card !== false) jobs.push(loadCard());
+  if (opts.ipcfg !== false) jobs.push(loadIpCfg());
+  if (opts.cfg) jobs.push((async () => { state.cfg = await api('config'); })());
+  await Promise.all(jobs);
+  // renderHero/renderInspect 是同步的；settings/log/audio 是 async 的。
+  // 统一 await，保证「保存后立刻看到更新」，不让渲染在后台竞态。
+  const renders = [];
+  if (opts.render !== false) {
+    renders.push(
+      Promise.resolve().then(() => { renderHero(); renderInspect(); }),
+      renderSettings(), renderLog(),
+    );
+  }
+  if (Array.isArray(opts.extra)) {
+    for (const fn of opts.extra) renders.push(Promise.resolve().then(fn).catch(() => {}));
+  }
+  await Promise.all(renders);
 }
 
 async function selectSet(id) {
@@ -872,18 +934,23 @@ async function renderCmd() {
   }));
   // 断点重做：交付之后最常见的动作就是"只重做后半段"。
   // 步骤名从 config/pipeline.json 实时取 —— 不在 JS 里硬列一遍（列了就会跟真值分叉）。
-  const steps = Object.keys((state.cfg && state.cfg.pipeline && state.cfg.pipeline.steps) || {});
-  const redo = steps.length ? `
+  // ★ pipeline.json 的 steps 是**数组**（[{id:'tts',...},...]），不是 {tts:{...}} 对象。
+  //   用 Object.keys(数组) 会得到 ["0","1",...] 索引 —— 按钮显示一串数字、data-step 传
+  //   "0" 这种字符串，点下去 `--from 0` 在流水线里直接报「不在步骤里」。所以这里按数组遍历取 id。
+  const _stepList = (state.cfg && state.cfg.pipeline && state.cfg.pipeline.steps) || [];
+  const stepDefs = Array.isArray(_stepList)
+    ? _stepList.map((s, i) => ({ id: s.id || s.name || String(i), desc: s.desc || s.name || s.id || String(i) }))
+    : Object.keys(_stepList).map(k => ({ id: k, desc: (_stepList[k] || {}).desc || (_stepList[k] || {}).name || k }));
+  const redo = stepDefs.length ? `
     <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
       <div class="hint" style="margin-bottom:8px">
         <b>断点重做</b>：改了某一环（换音色 / 改字幕 / 换 BGM），只想从那里往后跑。
         点「跑」直接开跑（前面已完成的产物保持不动），点「复制」回终端跑。</div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px">${steps.map(s => {
-        const meta = (state.cfg.pipeline.steps || {})[s] || {};
-        const label = meta.name || meta.desc || s;
+      <div style="display:flex;flex-wrap:wrap;gap:6px">${stepDefs.map(s => {
+        const label = s.desc;
         return `<span class="btn-group">
-          <button class="btn sm" data-exe="redo" data-step="${esc(s)}" title="跑到这里为止之后的全部重做">${ico('play')} ${esc(String(label).slice(0, 8))}</button>
-          <button class="btn sm ghost" data-redo="${esc(s)}" title="只复制命令">${ico('copy')}</button></span>`;
+          <button class="btn sm" data-exe="redo" data-step="${esc(s.id)}" title="从「${esc(s.id)}」这一步开始，往后全部重做（前面产物不动）">${ico('play')} ${esc(String(label).slice(0, 8))}</button>
+          <button class="btn sm ghost" data-redo="${esc(s.id)}" title="只复制命令">${ico('copy')}</button></span>`;
       }).join('')}</div>
     </div>` : '';
   $('#cmdBox').innerHTML = `
@@ -1127,8 +1194,10 @@ async function saveSetting(scope, key, ctrlId, tier) {
     }
     if (r.ok) {
       toast('已保存', `${key} → ${r.new}`, 'ok');
-      await Promise.all([loadIpCfg(), (async () => { state.cfg = await api('config'); })()]);
-      renderSettings(); renderLog(); renderInspect();
+      // ★ 改的是 ip.json 或 pipeline.json，两处都重拉，面板统一重渲染。
+      //   音色语气指令改了还要同步音频面板（那里也有一个 ttsInstr 输入框）。
+      const extra = (key === 'voice.tts.instruction') ? [renderAudio] : [];
+      await refreshAllAfterWrite({ card: false, cfg: scope === 'global', extra });
     } else toast('没改成', r.error || '', 'err');
   };
   await OK(false);
@@ -1183,8 +1252,7 @@ async function saveReset(scope, key) {
   if (r.ok) {
     toast(r.unchanged ? '本来就是这个值' : '已恢复',
       r.unchanged ? key : `${key}：${r.old} → ${r.new}`, 'ok');
-    await Promise.all([loadIpCfg(), (async () => { state.cfg = await api('config'); })()]);
-    renderSettings(); renderInspect(); renderLog();
+    await refreshAllAfterWrite({ card: false, cfg: scope === 'global' });
   } else toast('没恢复成', r.error || '', 'err');
 }
 
@@ -1200,9 +1268,6 @@ async function saveFont() {
   if (!changes.length) return toast('没变', '和当前值一样', '');
 
   const rows = changes.map(([k, v], i) => {
-    const steps = (state.cfg?.pipeline?.steps || {});
-    const order = Object.keys(steps);
-    const ass = order.indexOf('ass'), burn = order.indexOf('burn');
     return `<div style="display:flex;gap:8px;padding:4px 0">
       <span class="mono" style="color:var(--accent-2);min-width:150px">${esc(k)}</span>
       <span style="color:var(--tx-3)">${esc(String(get(state.ipcfg, k) ?? '—'))}</span>
@@ -1221,8 +1286,7 @@ async function saveFont() {
     if (!r.ok) return toast('第 ' + k + ' 项失败', r.error || '', 'err');
   }
   toast('已存进 ip.json', '记得重跑 ass + burn', 'ok');
-  await loadIpCfg();
-  renderSettings(); renderInspect(); renderLog();
+  await refreshAllAfterWrite({ card: false });
 }
 
 /* ---------- 音色语气：AI 设计 ---------- */
@@ -1260,8 +1324,7 @@ async function designVoice() {
     if (rr.error) return toast('没存成', rr.error, 'err');
     toast('音色指令已存', '重跑配音那一步就生效', 'ok');
     closeModal();
-    await loadIpCfg();
-    renderSettings(); renderInspect(); renderLog();
+    await refreshAllAfterWrite({ card: false, extra: [renderAudio] });
   };
 }
 
@@ -1733,9 +1796,8 @@ async function renderAudio() {
                                             path: state.ip, confirm: true } });
         if (r.error) return toast('没存成', r.error, 'err');
       }
-      await loadIpCfg();
+      await refreshAllAfterWrite({ card: false, render: false, extra: [renderAudio, renderLog] });
       toast('配乐定了', name + ' —— 以后出片都拿这首，不再重新生成', 'ok');
-      await renderAudio();
     };
   });
 }
@@ -1761,9 +1823,8 @@ async function saveBgmParams(wantRandom) {
     const r = await api('set', { body: { scope: 'ip', key: k, value: v, path: state.ip, confirm: true } });
     if (r.error) return toast('没存成', r.error, 'err');
   }
-  await loadIpCfg();
+  await refreshAllAfterWrite({ card: false, render: false, extra: [renderAudio, renderLog] });
   toast('配乐参数已存', wantRandom ? '换了一首随机的' : '下次跑到 bgm 那一步就生效', 'ok');
-  await renderAudio();
 }
 
 async function probeBgm() {
@@ -1795,7 +1856,7 @@ async function saveTtsInstr(silent) {
   const r = await api('set', { body: { scope: 'ip', key: 'voice.tts.instruction',
                                        value: v, path: state.ip } });
   if (r.error) { if (!silent) toast('没存成', r.error, 'err'); return false; }
-  await loadIpCfg();
+  await refreshAllAfterWrite({ card: false });
   if (!silent) toast('语气指令已存', '点「重做配音」才会重抽', 'ok');
   return true;
 }
@@ -2211,6 +2272,9 @@ async function applyLearn() {
   const r = await api('learn-apply', { body: { ip: state.ip, items, confirm: 1 } });
   if (r.error) return toast('没采纳成', r.error, 'err');
   toast('已采纳', r.message || '', 'ok');
+  // ★ 写的是 card.json（业务真值），要刷 card 并重渲染依赖它的面板，
+  //   否则「档案卡·习惯」面板还停在旧列表。
+  await refreshAllAfterWrite({ ipcfg: false });
   await renderLearnStrip();
 }
 
@@ -2307,6 +2371,10 @@ async function sendDialogue() {
       //   模型重新拆一遍意图，很可能拆成别的 —— 确认就落空了。
       state.dlgPending = (r.actions || []).filter(a => a.status === 'await_confirm');
       saveDialogue();
+      // ★ 确认动作执行后，按动作类型定向刷新，否则 Hero/档案卡/设置停在旧值。
+      //   这是「对话里改了东西，别处不更新」的根因（以前完全没刷）。
+      const doneActs = (r.actions || []).filter(a => a.status === 'done' || a.status === 'answered');
+      if (doneActs.length) await refreshDialogueAfterActions(doneActs);
     }
   } catch (ex) {
     appendMessage('assistant', `发送失败：${ex}`);
@@ -2607,9 +2675,9 @@ function showScriptResult(r) {
       const rr = await api('landing', { body: { ip: state.ip, landing: r.landing } });
       if (rr.error) return toast('没存成', rr.error, 'err');
       toast('落点已定', '以后每一条都用这句', 'ok');
-      state.card = await api('card?ip=' + encodeURIComponent(state.ip));
       closeModal();
-      await renderBrief();
+      // 写的是 card.json 的 landing，刷 card + 面板；brief 里也显示落点，一起刷。
+      await refreshAllAfterWrite({ ipcfg: false, extra: [renderBrief] });
     };
   }
   $('#scWrite').onclick = async () => {
@@ -3816,7 +3884,7 @@ function bind() {
         const r = await api('set', { body: { scope: 'ip', key: 'bgm.source',
                                              value: picked.value, path: state.ip } });
         if (r.error) return toast('没改成', r.error, 'err');
-        await loadIpCfg(); await renderAudio();
+        await refreshAllAfterWrite({ card: false, render: false, extra: [renderAudio, renderLog] });
       }
       return;
     }
@@ -3946,8 +4014,8 @@ function showNoteDialog() {
     toast('已记下', kind === 'redline' ? '这条会进护栏' : '', 'ok');
     closeModal();
     await waitTask(r.task || r.id, 8000);
-    await loadCard();
-    if (state.tab === 'inspect') await renderInspect();
+    // 写的是 card.json（红线/习惯/需求），刷 card + 相关面板
+    await refreshAllAfterWrite({ ipcfg: false });
   };
 }
 

@@ -2618,17 +2618,31 @@ class Handler(BaseHTTPRequestHandler):
         seed_info = self._seed_info(root, setname)
         if span:
             f, t = span
-            # ① 补跑 —— 这才是「改了什么重做什么」。默认推荐的永远是这条：
-            #    输入没变就跳过，一分钱不花；改了文案/换音色，编排器自己算从哪重做。
+            # ① 只重做这一阶段 —— 「我改了音色，只想重新产一条音频」，就点这个。
+            #    用 --from {f} --to {t} 把流水线掐在**这一阶段末尾**，不往下跑。
+            #    以前只有「补跑（跑到结束）」，人点「音频」想单独产音频，结果一路烧到交付
+            #    —— 2026-10-30 用户实跑抓到：只点音频却继续往后跑。
+            only_why = "只跑到「{stage}」这一阶段为止，不往下出画面/字幕/成片。".format(stage=stage)
+            only_why += ("改了音色/文案只想重新配一条音，就点这条。" if stage == "音频"
+                         else "只想把这一环重新过一遍（不碰后面）就点这条。")
             plans.append({
-                "label": f"补跑（{f} → 结束，没变的不动）",
-                "why": "推荐。编排器按「产物在不在 + 输入变没变」自己决定每一步跳过还是重做，"
-                       "已完成的产物不浪费。改了文案/提示词之后点这条",
-                "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from {f}",
-                "exec": {"kind": "pipeline", "ip": ip, "set": setname, "from": f},
+                "label": f"只重做「{stage}」（{f} → {t}，不往下跑）",
+                "why": only_why,
+                "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from {f} --to {t}",
+                "exec": {"kind": "pipeline", "ip": ip, "set": setname,
+                         "from": f, "to": t},
                 "primary": True,
             })
-            # ② 原样重做 —— 明确要求「全部推倒重来」，不管输入变没变。
+            # ② 补跑 —— 「改了什么重做什么」，从这一步一路重做到交付（没变的不动）。
+            plans.append({
+                "label": f"补跑（{f} → 结束，没变的不动）",
+                "why": "从「{stage}」一路跑到成片交付。编排器按「产物在不在 + 输入变没变」"
+                       "自己决定每一步跳过还是重做，已完成的产物不浪费。"
+                       "改了文案/提示词、要出完整新版就点这条。".format(stage=stage),
+                "cmd": f"python3 bin/vstudio.py pipeline {ip} {setname} --from {f}",
+                "exec": {"kind": "pipeline", "ip": ip, "set": setname, "from": f},
+            })
+            # ③ 原样重做 —— 明确要求「全部推倒重来」，不管输入变没变。
             plans.append({
                 "label": f"整个重做「{stage}」（{f} → {t}，不看输入）",
                 "why": "产物明明在也要重跑一遍。适合怀疑产物坏了（花屏、音画错位）。"
@@ -2638,7 +2652,7 @@ class Handler(BaseHTTPRequestHandler):
                 "exec": {"kind": "pipeline", "ip": ip, "set": setname,
                          "from": f, "to": t, "force": True},
             })
-            # ③ 换种子 —— 只对吃画面的阶段有意义（音频/字幕与种子无关）。
+            # ④ 换种子 —— 只对吃画面的阶段有意义（音频/字幕与种子无关）。
             if stage in ("视频", "后期", "字幕", "验收", "交付"):
                 sd = seed_info.get("seed")
                 plans.append({
