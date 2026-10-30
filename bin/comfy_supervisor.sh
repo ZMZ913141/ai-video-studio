@@ -153,7 +153,10 @@ start_comfy() {
     return 3
   fi
   say "启动 ComfyUI：$COMFY_DIR/run.sh"
-  ( cd "$COMFY_DIR" && exec bash ./run.sh ) >>"$CLOG" 2>&1 &
+  # ★ 子进程里先关掉锁 fd（9），否则 ComfyUI 会继承这个 flock ——
+  #   守护自己死了，锁却还被 ComfyUI 拿着，下次 start 会误报「守护已在运行」。
+  #   2026-10-30 实测踩过：老守护退出后锁仍被占，`start` 直接拒绝。
+  ( exec 9>&-; cd "$COMFY_DIR" && exec bash ./run.sh ) >>"$CLOG" 2>&1 &
   echo $! >"$CPIDF"
   local i=0
   while [ "$i" -lt "$HEALTH_TIMEOUT" ]; do
@@ -188,11 +191,14 @@ cmd_run() {
   rm -f "$STOPF"
   # ★ GPU 拿不到就直接退出，**不能进重试循环** ——
   #   那样它会每 5 秒起一个没显卡的空壳，把日志刷满，人也查不出为什么。
+  #   ★ 但接管分支不需要 GPU：服务已经活着，本进程只负责看护。
   local why
-  if ! why="$(gpu_ok 2>&1)"; then
-    say "✗ 起不了：$why"
-    say "  请在能拿到 GPU 的终端里运行，守护进程会自动接管后续的重启。"
-    exit 3
+  if ! http_ok; then
+    if ! why="$(gpu_ok 2>&1)"; then
+      say "✗ 起不了：$why"
+      say "  请在能拿到 GPU 的终端里运行，守护进程会自动接管后续的重启。"
+      exit 3
+    fi
   fi
   say "守护启动（pid $$）· 目标 $URL · 日志 $LOG"
   local backoff=5 restarts=0 t_start t_end pid="" owned=0 misses=0
@@ -203,6 +209,13 @@ cmd_run() {
       if [ "$owned" = "0" ]; then
         say "接管：$URL 上已有实例在跑（不是本守护起的，退出码记不到）"
         owned=1
+        # 认到 pid 才算真看护：卡死能杀、能拿到存活时长；认不到就只剩心跳
+        pid="$(comfy_pid || true)"
+        if [ -n "${pid:-}" ]; then
+          say "  已按 cmdline 认到 pid $pid（后续卡死能处理，退出码仍记不到）"
+        else
+          say "  ⚠ 认不到 pid（cmdline 对不上）—— 只能心跳，卡死时需要人工干预"
+        fi
       fi
       misses=0; backoff=5
       sleep 5
@@ -260,10 +273,17 @@ cmd_start() {
   fi
   exec 8>&-
   local why
-  if ! why="$(gpu_ok 2>&1)"; then
-    echo "✗ 当前终端拿不到 GPU（$why）—— 起了也没用。"
-    echo "  在你自己的终端跑：bash $BASE/bin/comfy_supervisor.sh start"
-    return 3
+  # ★ 已经有健康实例在跑时**不需要本终端有 GPU** —— 接管看护而已。
+  #   以前这里无条件自检，导致从沙箱/无卡终端连「认领现有服务」都做不到，
+  #   明明服务好好的却只能干等用户手动执行。
+  if ! http_ok; then
+    if ! why="$(gpu_ok 2>&1)"; then
+      echo "✗ 当前终端拿不到 GPU（$why）—— 起了也没用。"
+      echo "  在你自己的终端跑：bash $BASE/bin/comfy_supervisor.sh start"
+      return 3
+    fi
+  else
+    echo "端口 $PORT 上已有健康的 ComfyUI —— 直接接管看护（无需本终端有 GPU）"
   fi
   setsid nohup bash "$0" run >>"$LOG" 2>&1 &
   local p=$!

@@ -191,10 +191,15 @@ systemctl --user status comfyui               # 之后只认这一条
 | `systemctl --user` | `Failed to connect to user scope bus`（总线不可达） |
 | `crontab` / `at` | `crontabs/root/: 权限不够` |
 | `ssh localhost` 绕出沙箱 | sshd 没监听（`Connection refused`） |
+| `setsid nohup … run` 在沙箱里起**守护**（绕开 CUDA 自检） | 进程 detach 之后连 `/dev/null` 都打不开（`Function not implemented`），`date` / `sleep` 报 `libsystemd.so.0` 找不到 → 守护变成残废：时间戳算不出来、日志刷错误、`存活 -1793325170s` 这种离谱数字就是这么来的 |
 
 所以守护脚本**先自检 GPU 再决定要不要起**：拿不到就直接说清楚，不会偷偷起个残废服务。
 你只需要在自己的终端执行一次 `bash bin/comfy_supervisor.sh start`（或装成服务），
 之后它自己负责所有重启——**这才是"确保它不挂"的真正形态**。
+
+补一句：**「接管一个已经在跑的服务」不需要 GPU**（已改成先探端口、通了就跳过 GPU 自检），
+但从沙箱里 detach 的守护仍然是残废（见上表最后一行）。所以在自己终端敲那一条 `start`
+依旧是必须的，只是它会立刻接管你手上那个活着的实例，不会重复启动。
 
 ---
 
@@ -223,6 +228,8 @@ systemctl --user status comfyui               # 之后只认这一条
 | 出片/配音跑到一半服务没了，`system_stats` 返回 **000** | 被 GPU 判死（`Xid 43`，换模型瞬间）或终端被关（`SIGHUP`） | 用 `bin/comfy_supervisor.sh start` 托管；死因看 `.cache/comfy/supervisor.log` |
 | 配音步骤报 `'NoneType' object is not callable`，堆栈落在 **Breeze-TTS** 的 `native.py ... flash_attn_func(...)` | **不是 TTS 的错，是别的插件栽赃**：`ComfyUI-SeedVR2_VideoUpscaler/src/optimization/compatibility.py` 在**模块级**执行 `ensure_flash_attn_safe()`，往 `sys.modules` 塞了个假 `flash_attn`（`flash_attn_func = None`）。TTS 的函数内 `from flash_attn import flash_attn_func` 因此「导入成功但拿到 None」，还在 `ALL_ATTENTION_FUNCTIONS` 注册了这个坏后端，跑到第一层 attention 才炸 | 已修：Breeze-TTS 改用**功能探测**（真的拿到可调用的 `flash_attn_func` 才算可用），而不是信 `importlib.util.find_spec`；注册点再兜一道，探测不过就不注册、整体退回 `sdpa`。**取证口诀：报错在 A 插件，真凶可能在 B 插件；`find_spec` 为真 ≠ 能用** |
 | 守护进程不停地重启，`ComfyUI` 的 pid 每十几秒换一个，日志刷 `Port 8188 is already in use` / 一堆假 `IMPORT FAILED` | `start_comfy` 用 `$!` 记 pid，**记到了错误的 pid**（run.sh 之间多一层子 shell）。守护看到 `kill -0 错误pid` 失败 → 以为服务死了 → 再起一个 → 抢不到端口退出 → 循环。健康的老实例反而被晾在一边，`status` 永远显示「pid 不可见」 | 已修：起来后按 **cmdline 反查**真实 pid（`main.py` + 本端口）覆盖 pid 文件；`kill` 前先校验 cmdline，对不上就拒绝（防误杀）。另外 `wait` 拿不到退出码时会返回 `127`，**那不是「命令找不到」**，已在 `forensics` 里注明 |
+| 守护明明没在跑，`start` 却说「守护已在运行（锁被占）」 | `exec 9>"$LOCKF"` 加的 `flock` fd **被子进程继承了**：守护自己退出后，ComfyUI 还攥着那把锁 | 已修：起 ComfyUI 的子 shell 里先 `exec 9>&-`。万一又遇到，`for p in /proc/[0-9]*; do ls -l $p/fd \\| grep -q comfy/lock && echo $p; done` 能揪出持有者 |
+| 审计/验收步骤卡了几分钟不结束，ComfyUI 那边也没动静 | 队列里卡着**幽灵任务**（客户端被强杀时，已提交的 prompt 还挂在 `queue_running`），后续任务全在排队 | `curl -s --noproxy '*' http://127.0.0.1:8188/queue` 看，然后 `curl -X POST .../interrupt` 清掉。正常审计 21 条约几十秒，跑到 400s 就是被堵了 |
 | 启动时刷一串 `IMPORT FAILED`（某几个插件报缺依赖） | **多半不是插件坏了**：是同时起了两个 ComfyUI，抢不到 8188 的那个顺手报一串假错然后退出（2026-10-30 用户看到的 SeedVR2 就是这种；活的实例其实把它的 6 个节点都加载了） | `ps -eo args \| grep main.py` 看是不是两个；守护已加**单实例锁 + 端口占用即接管**；别再手敲 `./run.sh`，只用 `comfy_supervisor.sh start` |
 
 ---
