@@ -145,9 +145,13 @@
         "PILOT": "{pilot}",
         "DRY": "{dry}",
         "SEED": "{seed}",
-        "PROMPTS_EN": "{dir05}/prompts.en.json",
-        "MATERIALS": "{dir05}/materials.json"
-      },
+    "PROMPTS_EN": "{dir05}/prompts.en.json",
+    "MATERIALS": "{dir05}/materials.json",
+    "ORIENT": "{orientation}",
+    "STILL": "{still}",
+    "PROMPT_VARS": "{dir05}/prompt_vars.json",
+    "SKIP_MEMCHECK": "{skip_memcheck}"
+  },
       "inputs": [
         "{dir05}/materials.json"
       ],

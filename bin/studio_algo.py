@@ -29,12 +29,17 @@ MULTIPLE = 32             # 分辨率吸附步长
 
 
 # ---------------- 分辨率 ----------------
-def calc_res(mp, multiple=MULTIPLE):
-    """复刻 ResolutionSelector：9:16 面积不变，边长吸附到 multiple 的倍数。"""
+def calc_res(mp, multiple=MULTIPLE, landscape=False):
+    """复刻 ResolutionSelector：面积不变，边长吸附到 multiple 的倍数。
+
+    ★ 2026-10-31：画幅方向不再是引擎常量。landscape=True → 16:9 横屏；
+      默认 False（竖屏）= 已交付的片子逐字节不变。
+    """
     tp = mp * 1024 * 1024
-    scale = math.sqrt(tp / (9 * 16))
-    w = round(9 * scale / multiple) * multiple
-    h = round(16 * scale / multiple) * multiple
+    rw, rh = (16, 9) if landscape else (9, 16)
+    scale = math.sqrt(tp / (rw * rh))
+    w = round(rw * scale / multiple) * multiple
+    h = round(rh * scale / multiple) * multiple
     return int(w), int(h)
 
 

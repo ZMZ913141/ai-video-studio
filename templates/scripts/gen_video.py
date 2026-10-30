@@ -116,7 +116,10 @@ UPSCALER = "minimax_h3_latent_upscaler_3d_fp16_V2.safetensors"
 from ip_guard import load_ip
 
 IP = load_ip(verbose=False)
-STILL_SRC = IP.asset("visual", "still")
+# ★ 2026-10-31：静帧允许**套次级**覆盖。同一个 IP 竖屏发抖音、横屏发视频号时，
+#   两套用的起始静帧不是同一张（横屏静帧不能从竖屏的裁出来，构图会缺两侧）。
+#   没给 STILL 就走 ip.json 的 visual.still —— 老片零改动。
+STILL_SRC = (os.environ.get("STILL") or "").strip() or IP.asset("visual", "still")
 assert STILL_SRC and os.path.exists(STILL_SRC), f"静帧缺失：{STILL_SRC}"
 UNET = IP.get("video.unet") or UNET
 CLIP = IP.get("video.clip") or CLIP
@@ -337,6 +340,23 @@ UPSCALER = _sfx(UPSCALER)
 #   真正的代价不是时间，是**段数从 6 涨到 8、接缝从 5 处涨到 7 处**。
 MP = float(os.environ.get("MP", "1.26"))
 MULTIPLE = 32
+
+# ── 画幅方向（竖屏 / 横屏）───────────────────────────────────────────────
+# ★ 2026-10-31：方向是**套次级事实**，不是引擎常量。
+#   同一个 IP 竖屏发抖音、横屏发视频号/B站，两套用的比例、静帧、构图描述都不一样。
+#   以前焊死 9:16（ResolutionSelector 的 aspect_ratio 与提示词里的 "vertical 9:16"
+#   都是字面量），换横屏只能靠裁 —— 背景图两侧被切掉。
+#   取值优先级：env ORIENT（流水线传入，来自 job.json）→ ip.json video.orientation
+#   → 竖屏。**默认竖屏 = 已交付的片子逐字节不变。**
+_ORIENT_RAW = (os.environ.get("ORIENT") or "").strip() or str(IP.get("video.orientation") or "")
+LANDSCAPE = str(_ORIENT_RAW).strip().lower() in (
+    "横屏", "landscape", "horizontal", "16:9", "land")
+ORIENT_CN = "横屏" if LANDSCAPE else "竖屏"
+# ResolutionSelector 节点的枚举值（ComfyUI comfy_extras/nodes_resolution.py）
+AR_NAME = "16:9 (Widescreen)" if LANDSCAPE else "9:16 (Portrait Widescreen)"
+AR_W, AR_H = (16, 9) if LANDSCAPE else (9, 16)
+# 提示词里的画幅描述 —— 横屏写 vertical 会让模型按竖屏构图取景
+AR_DESC = "horizontal 16:9 widescreen" if LANDSCAPE else "vertical 9:16"
 _BASE_MP = 1.008          # 768x1376 的实际 MP —— 这是「安全线标定基准」，不是当前出片档！
                           # ⚠️ 出片默认档已改为 1.26（864x1536），但 _BASE_MP/​_BASE_MAXLEN
                           # 仍是 **1.0MP/192帧** 这组实测数据。它们是「面积×帧数」这把尺子的刻度原点，
@@ -393,13 +413,19 @@ def lowvram_settings():
     return (8, 4, 8192)
 
 
-def calc_res(mp=MP, multiple=MULTIPLE):
-    """复刻 ResolutionSelector 的算法，供脚本内部预知输出尺寸（写日志/校验用）。"""
+def calc_res(mp=MP, multiple=MULTIPLE, landscape=None):
+    """复刻 ResolutionSelector 的算法，供脚本内部预知输出尺寸（写日志/校验用）。
+
+    landscape=None（默认）= 跟当前画幅方向走；显式给 True/False 可算另一方向的尺寸。
+    """
     import math
+    if landscape is None:
+        landscape = LANDSCAPE
     tp = mp * 1024 * 1024
-    scale = math.sqrt(tp / (9 * 16))
-    w = round(9 * scale / multiple) * multiple
-    h = round(16 * scale / multiple) * multiple
+    rw, rh = (16, 9) if landscape else (9, 16)
+    scale = math.sqrt(tp / (rw * rh))
+    w = round(rw * scale / multiple) * multiple
+    h = round(rh * scale / multiple) * multiple
     return w, h
 
 
@@ -1495,6 +1521,21 @@ DEFAULT_PROMPT_VARS = {
 PV = dict(DEFAULT_PROMPT_VARS)
 _custom = IP.get("video.prompt_vars") or {}
 PV.update({k: v for k, v in _custom.items() if isinstance(v, str) and v.strip()})
+# ★ 2026-10-31：**套次级** prompt_vars 覆盖（env PROMPT_VARS 指向 05_文案/<套次>/prompt_vars.json）。
+#   为什么需要它：横屏和竖屏的构图描述是两回事（竖屏「左边 chrome 架、右边两排木架」
+#   在横屏里根本排不下），但 prompt_vars 只有 ip.json 一处，改了会让竖屏老片变样。
+#   文件不存在 = 完全走老路，逐字节等同加这个字段之前。
+_pvf = (os.environ.get("PROMPT_VARS") or "").strip()
+_set_pv = {}
+if _pvf and os.path.isfile(_pvf):
+    try:
+        _set_pv = json.load(open(_pvf, encoding="utf-8")) or {}
+    except Exception as _e:
+        print(f"  ⚠ 套次 prompt_vars 读不出来（{_pvf}）：{_e}，已忽略")
+    if _set_pv:
+        PV.update({k: v for k, v in _set_pv.items()
+                   if isinstance(v, str) and v.strip()})
+        print(f"   套次构图覆盖 {_pvf}（{len(_set_pv)} 项）")
 # 本 IP 的性别（male / female）。只影响骨架里 he/his 的归一，见 _gender_norm。
 GENDER = str(IP.get("video.gender") or "male").strip()
 if _custom:
@@ -1791,7 +1832,9 @@ def build_prompt(i, segs, cues, audio_sec):
     )
 
     style = (
-        "Realistic vertical 9:16 talking-head video, one large diffused key light close to his face giving broad "
+        # ★ 画幅描述跟着方向走：横屏写 "vertical 9:16" 会让模型按竖屏取景，
+        #   主体被挤到中间、两侧留白（2026-10-31 横屏对比版）。
+        f"Realistic {AR_DESC} talking-head video, one large diffused key light close to his face giving broad "
         "gradual falloff, exposure held a little under full so every lit area of his face sits in the upper "
         "mid-tones, clean open shadow detail, warm neutral colour temperature, shallow depth of field with his "
         "face in crisp focus, natural dry matte skin with visible pores and an even diffuse sheen of a single "
@@ -1936,7 +1979,7 @@ def graph(prefix, segs, cues, audio_sec, total_sec, offset=0, full=None, frame_b
         "63": {"class_type": "CLIPLoader", "inputs": {"clip_name": CLIP, "type": "minimax", "device": "default"}},
         "65": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_video_vae_fp16.safetensors"}},
         "66": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"}},
-        "47": {"class_type": "ResolutionSelector", "inputs": {"aspect_ratio": "9:16 (Portrait Widescreen)",
+        "47": {"class_type": "ResolutionSelector", "inputs": {"aspect_ratio": AR_NAME,
                                                              "megapixels": MP, "multiple": MULTIPLE}},
         "13": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
         "11": {"class_type": "MiniMaxH3TimelinePlanner", "inputs": {

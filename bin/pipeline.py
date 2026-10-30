@@ -228,6 +228,32 @@ class Pipeline:
         self.ctx["ref_audio"] = ("" if not _ra else
                                  _ra if os.path.isabs(_ra)
                                  else os.path.join(self.root, _ra))
+        # ★ 画幅方向（竖屏/横屏）是**套次级**事实：同一个 IP 竖屏发抖音、
+        #   横屏发视频号/B站，两套的比例、起始静帧、构图描述都不一样。
+        #   取值：job.json.orientation → ip.json video.orientation → 竖屏。
+        #   默认竖屏 = 已交付的片子逐字节不变（2026-10-31 横屏对比版）。
+        _job = {}
+        try:
+            _job = json.load(open(os.path.join(self.dirs["05"], "job.json"),
+                                  encoding="utf-8")) or {}
+        except Exception:
+            _job = {}
+        _or = str(_job.get("orientation")
+                  or ((_ipd.get("video") or {}).get("orientation"))
+                  or "竖屏").strip()
+        self.landscape = str(_or).lower() in (
+            "横屏", "landscape", "horizontal", "16:9", "land")
+        self.ctx["orientation"] = "横屏" if self.landscape else "竖屏"
+        # ★ 套次级起始静帧：横屏不能拿竖屏静帧裁出来（构图缺两侧）。
+        #   没写 still 就留空 → gen_video 走 ip.json 的 visual.still（老片零改动）。
+        _st = str(_job.get("still") or "").strip()
+        self.ctx["still"] = ("" if not _st else
+                             _st if os.path.isabs(_st)
+                             else os.path.join(self.root, _st))
+        # ★ SKIP_MEMCHECK 透传：内存紧张但 ComfyUI 已稳定时（ram_free 28G
+        #   但 ComfyUI 自己占着 ~13G），可用 SKIP_MEMCHECK=1 让 gen_video
+        #   跳过门槛。出片前必须先 comfy_free.py 卸干净模型。
+        self.ctx["skip_memcheck"] = os.environ.get("SKIP_MEMCHECK", "")
         # ★ 种子：以前写死在 gen_video.py 里（881208001），pipeline 不传也不显示。
         #   后果是「重跑一遍」= 同一提示词 + 同一音频 + 同一种子 = 几乎一样的画面，
         #   十几分钟 GPU 白烧，人还以为自己换了一版。现在种子是编排器的一等参数。
@@ -327,7 +353,7 @@ class Pipeline:
     def refresh(self):
         c = self.ctx
         mp = c["mp"]
-        w, h = A.calc_res(mp)
+        w, h = A.calc_res(mp, landscape=getattr(self, "landscape", False))
         c["res_w"], c["res_h"] = w, h
         c["maxlen"] = A.maxlen_for_mp(mp)
         c["fast"] = "1" if A.is_fast(mp) else ""

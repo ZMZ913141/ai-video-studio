@@ -60,15 +60,32 @@ NEG = ("cartoon, illustration, painting, 3d render, plastic skin, distorted face
        "oversaturated, HDR look, wig, mask")
 
 # 两张图各自的取景要求。人物描述由用户给，这里只管「怎么取景」。
+# 取景文案里的 {ar} 由 framing() 按画幅方向填。
 FRAMING = {
-    "portrait": ("Chest-up portrait, vertical 9:16, the subject looks straight into the lens "
+    "portrait": ("Chest-up portrait, {ar}, the subject looks straight into the lens "
                  "with a calm friendly expression. Generous headroom above the hair, "
                  "shoulders visible at the bottom edge, centred composition."),
-    "still": ("Chest-up talking-head framing for a vertical 9:16 video, the subject looks into "
+    "still": ("Chest-up talking-head framing for a {ar} video, the subject looks into "
               "the lens as if about to speak, mouth closed. A broad band of background above "
               "the top of the hair, chest and shoulders at the bottom edge."),
 }
-SIZE = {"portrait": (1088, 1920), "still": (864, 1536)}
+# ★ 2026-10-31：画幅方向是**套次级**事实，不能只有竖屏一档。
+#   同一个 IP 竖屏发抖音、横屏发视频号/B站，起始静帧是两张不同的图
+#   （横屏静帧不能从竖屏的裁出来，构图会缺两侧）。
+#   横屏 1536x864 与竖屏 864x1536 面积相同（MP 1.26），耗时相当。
+#   --orient 横屏 切换；默认竖屏 = 老片零改动。
+SIZE_P = {"portrait": (1088, 1920), "still": (864, 1536)}
+SIZE_L = {"portrait": (1920, 1088), "still": (1536, 864)}
+LANDSCAPE = False          # main() 里按 --orient 设置
+
+
+def size_of(kind):
+    return (SIZE_L if LANDSCAPE else SIZE_P)[kind]
+
+
+def framing(kind):
+    ar = "horizontal 16:9" if LANDSCAPE else "vertical 9:16"
+    return FRAMING[kind].format(ar=ar)
 
 
 def post(api, data):
@@ -186,8 +203,17 @@ def main():
     ap.add_argument("--prompt", default="",
                     help="直接给完整英文提示词，跳过 --who/--scene 拼接"
                          "（多参考图时指代不清，要自己写明 image 1/2/3 各是什么）")
+    ap.add_argument("--orient", default="竖屏",
+                    help="画幅方向：竖屏（默认，1088x1920 / 864x1536）或 "
+                         "横屏（1920x1088 / 1536x864）")
     ap.add_argument("--dry", action="store_true")
     a = ap.parse_args()
+
+    global LANDSCAPE
+    LANDSCAPE = str(a.orient).strip().lower() in (
+        "横屏", "landscape", "horizontal", "16:9", "land")
+    if LANDSCAPE:
+        print("画幅：横屏 16:9")
 
     from vstudio import resolve_ip
     e = resolve_ip(a.ip)
@@ -198,21 +224,22 @@ def main():
     if not a.who.strip() and not a.prompt.strip():
         raise SystemExit("要么给 --who 描述这个人，要么给 --prompt 直接写完整提示词")
     for kind in (["portrait", "still"] if a.only == "both" else [a.only]):
-        w, h = SIZE[kind]
+        w, h = size_of(kind)
+        _ar = "horizontal 16:9" if LANDSCAPE else "vertical 9:16"
         if a.prompt.strip():
             # 直给模式：多参考图时「图 1 是谁、图 2 是什么」必须由人写明，
             # 自动拼接的 "Photorealistic photo of <who>" 在这种场景下指代不清。
             prompt = " ".join(x for x in (
-                a.prompt.strip().rstrip("。.") + ".", FRAMING[kind],
+                a.prompt.strip().rstrip("。.") + ".", framing(kind),
                 "Real photography, natural soft light, shallow depth of field, sharp on the face, "
-                "vertical 9:16.",) if x)
+                + _ar + ".",) if x)
         else:
             prompt = " ".join(x for x in (
                 "Photorealistic photo of", a.who.strip().rstrip("。."),
                 ("Set in " + a.scene.strip().rstrip("。.") + ".") if a.scene.strip() else "",
-                FRAMING[kind],
+                framing(kind),
                 "Real photography, natural soft light, shallow depth of field, sharp on the face, "
-                "vertical 9:16.",) if x)
+                + _ar + ".",) if x)
         ext = "形象底图" if kind == "portrait" else "起始静帧"
         dst = os.path.join(out_dir, "%s_%s_%dx%d.png" % (prefix, ext, w, h))
         jobs.append((kind, prompt, w, h, dst))
@@ -239,7 +266,12 @@ def main():
     #   人在档案里看到的就是 02_素材真值/xxx.png，让他照抄就行；
     #   按 cwd 解析会在项目根下找，报 FileNotFoundError 还看不出是路径基准的问题。
     def _abs(p):
-        return p if os.path.isabs(p) else os.path.join(e["path"], p)
+        if os.path.isabs(p):
+            return p
+        # ★ 先按 IP 根解析（兼容绝对路径写法），再按素材目录解析
+        #   （用户给文件名时不用写 02_素材真值/ 前缀，2026-10-31 横屏静帧踩过）
+        r = os.path.join(e["path"], p)
+        return r if os.path.isfile(r) else os.path.join(e["path"], "02_素材真值", p)
 
     ref_paths = [_abs(x.strip()) for x in (a.refs or a.ref).split(",") if x.strip()]
     seq = [push_input(p) for p in ref_paths]
