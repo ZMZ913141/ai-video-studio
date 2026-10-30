@@ -409,7 +409,13 @@ def main():
     gap = float(sys.argv[sys.argv.index("--gap") + 1]) \
         if "--gap" in sys.argv else 0.12
 
-    script = re.sub(r"\s*\n+\s*", "", open(txt, encoding="utf-8-sig").read().strip())
+    # ★ 保留换行。换行是「一行一句」的**硬断句**，抹掉它就只剩标点可用；
+    #   而 AI 写的文案几乎不打标点（T02：160 字只有 6 个标点），
+    #   换行一没，17 行会被并成 2 个 18 秒的大块。
+    #   只清空格/制表符，并把连续空行压成一个。
+    raw = open(txt, encoding="utf-8-sig").read().strip()
+    script = re.sub(r"[ \t\u3000]+", "", raw)
+    script = re.sub(r"\n{2,}", "\n", script)
     cues = split_cues(script)
     n_chars = len(spoken_chars(script))
     print(f"定稿 {n_chars} 字 / {len(cues)} 条字幕   音频 {duration(src):.2f}s")
