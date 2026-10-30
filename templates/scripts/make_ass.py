@@ -272,25 +272,29 @@ def build(tag, srt_path, out_ass, dur=None):
     ev = []
     total = dur or (cues[-1]["t1"] + 0.4)
 
-    # ---- 1. 开场钩子（前 2.6s，压在画面上部空白区）----
+    # ---- 1. 开场钩子（前 HOOK_DUR 秒，压在画面上部空白区）----
     # 2026-10-30 标题升档：学 FootageCrate 的三件套（辉光/字距收拢/扫光），
     # 替代旧的单层弹入 —— 弹入是剪映语法，收拢+扫光是电影语法。
+    # 停留时长集中在 S.HOOK_DUR（substyle），skipped_title 窗口跟着它走。
     # 退路：SUB_TITLE_FX=plain 恢复旧样式（对照用）。
     hook_txt = set()
     if d.get("hook"):
         main, sub = d["hook"]
         m2, _ = apply_hl(main, d.get("hl_title", []), color_only=True)
+        _hd = min(S.HOOK_DUR, total)
         if S.TITLE_FX:
-            ev.extend(S.cinematic_title(m2, 0.0, min(2.6, total)))
+            ev.extend(S.cinematic_title(m2, 0.0, _hd))
+            if sub:
+                ev.append(S.title_rule(0.0, _hd))
         else:
-            ev.append(S.dialog(2, 0.0, min(2.6, total), "Title",
+            ev.append(S.dialog(2, 0.0, _hd, "Title",
                                "{" + S.pop(7, 114) + "}" + m2))
         hook_txt.add(strip_punct(main))
         if sub:
             s2, _ = apply_hl(sub, d.get("hl_sub", []), color_only=True)
             _sub_fx = "{" + S.sub_in() + "}" if S.TITLE_FX \
                 else "{" + S.pop(5, 108) + "}"
-            ev.append(S.dialog(2, 0.20, min(2.6, total), "Sub", _sub_fx + s2))
+            ev.append(S.dialog(2, 0.20, _hd, "Sub", _sub_fx + s2))
             hook_txt.add(strip_punct(sub))
 
     # ---- 2. 正文逐条 ----
@@ -333,10 +337,13 @@ def build(tag, srt_path, out_ass, dur=None):
     for i, c in enumerate(cues, 1):
         style = "CTA" if i in cta_idx else "Cue"
         body = norm_lines(c["text"])       # 多行 cue → \N
-        # 钩子期间（前 2.6s）如果这条字幕就是标题那句话，别再在底部重复一遍 ——
+        # 钩子期间如果这条字幕就是标题那句话，别再在底部重复一遍 ——
         # 实测 T01 开场是「你觉得分身贵」在屏幕上方（大标题）和下方（字幕）同时出现，
         # 一句话看两遍，比没有标题更难看。
-        if i not in cta_idx and c["t0"] < 2.7 and strip_punct(c["text"]) in hook_txt:
+        # ★ 窗口跟 S.HOOK_DUR 联动：标题停留拉长后，同文判定窗口也要跟着长，
+        #   否则标题还没退、底部又滚一遍同样的话。
+        if i not in cta_idx and c["t0"] < S.HOOK_DUR + 0.1 \
+                and strip_punct(c["text"]) in hook_txt:
             skipped_title += 1
             continue
         if i in cta_idx:

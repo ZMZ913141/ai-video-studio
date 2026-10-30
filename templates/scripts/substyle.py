@@ -125,10 +125,16 @@ SHA_TITLE = 4
 # ---------- 字体（已实测 fc-match 可解析） ----------
 # ⚠️ 名字必须和字体文件里的真实 family 名一致，否则 libass 静默回退 Noto。
 #    实测通过的是：AlibabaPuHuiTi_2_115_Black / YouSheBiaoTiHei / PangMenZhengDao-Cu
+# 2026-10-30 标题字体定板：普惠 Black → 仓耳渔阳体 W05（多字重：W01 细…W05 重）。
+#    Black 黑体是「喊」的语法，渔阳体带书卷气的标题感，配「辉光+收拢+扫光」
+#    的电影式标题更协调 —— 用户反馈「字体还有优化空间」后实测对比定的。
+#    ★ 已装字体见 ~/.local/share/fonts/cbpro/（优设标题圆/站酷文艺/庞门正道细线
+#      等都在，换风格 = 改这里 + ip.json 的 subtitle.font_title 双改）。
 FONT_CUE = "阿里巴巴普惠体 2.0 75 SemiBold"     # 正文字幕：稳、清楚
 FONT_CUE_B = "阿里巴巴普惠体 2.0 95 ExtraBold"  # CTA / 强调
-FONT_TITLE = "阿里巴巴普惠体 2.0 115 Black"      # 标题：最硬最抓眼（不是仓耳渔阳）
-FONT_TITLE_SOFT = "站酷仓耳渔阳体 W04"           # 备用：偏人文，适合金句
+FONT_TITLE = "仓耳渔阳体 W05"                    # 标题：书卷气的标题字（原普惠 Black）
+FONT_TITLE_SOFT = "仓耳渔阳体 W04"              # 备用：更轻一档（⚠ 原值「站酷仓耳渔阳体
+                                                #   W04」是错名，fc-match 解析不到会静默回退 Noto）
 FONT_TITLE_ALT = "优设标题黑"                    # 备用：偏设计感，适合短钩子
 
 # 字体要能被 IP 单独换 —— 写死在模块里就意味着"想换字体得改引擎代码"，
@@ -280,7 +286,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: Cue,{font_of("cue")},{FS_CUE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,1,0,1,{OUT_CUE},{SHA_CUE},2,{SAFE_LEFT},{SAFE_LEFT},{CUE_MARGIN_V},1
 Style: CueB,{font_of("cue_b")},{FS_CUE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,1,0,1,{OUT_CUE},{SHA_CUE},2,{SAFE_LEFT},{SAFE_LEFT},{CUE_MARGIN_V},1
 Style: Title,{font_of("title")},{FS_TITLE},&H{C_WHITE},&H000000FF,&H{C_DARK},&H78000000,0,0,0,0,100,100,2,0,1,{OUT_TITLE},{SHA_TITLE},8,{SAFE_LEFT},{SAFE_LEFT},{TITLE_MARGIN_V},1
-Style: Sub,{font_of("cue")},{FS_SUB},&H{C_WARM},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,3,0,1,3,2,8,{SAFE_LEFT},{SAFE_LEFT},{int(round(260*H/BASE_H))},1
+Style: Sub,{font_of("cue")},{FS_SUB},&H{C_WARM},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,3,0,1,3,2,8,{SAFE_LEFT},{SAFE_LEFT},{int(round(330*H/BASE_H))},1
 Style: CTA,{font_of("cue_b")},{FS_CTA},&H{C_WHITE},&H000000FF,&H{C_ORANGE},&H90000000,0,0,0,0,100,100,2,0,1,6,3,2,60,60,{int(round(300*H/BASE_H))},1
 Style: Tag,{font_of("cue")},{FS_TAG},&H{C_GOLD},&H000000FF,&H{C_DARK},&H64000000,0,0,0,0,100,100,4,0,1,3,0,8,{SAFE_LEFT},{SAFE_LEFT},{int(round(200*H/BASE_H))},1
 
@@ -340,6 +346,11 @@ def rise(frames=8):
 TITLE_FX = os.environ.get("SUB_TITLE_FX", "").strip().lower() \
     not in ("plain", "0", "off", "false", "no")
 
+# 钩子标题停留时长（秒）。2026-10-30 用户反馈 2.6s 偏短 → 3.6s。
+# ★ make_ass 的 skipped_title 判定窗口也用这个值（标题承担同文字幕不上屏），
+#   两处必须联动，否则改一处会出现「标题还在、底部又滚一遍同样的话」。
+HOOK_DUR = 3.6
+
 GLOW_COLOR = C_GOLD      # 辉光颜色：暖金（和关键词花字同一个金，全片一个强调色系）
 SWEEP_COLOR = "005CD1FF" # 扫光颜色：#FFD15C 亮金。
 # ⚠ 别用暖白：底色本身是白色，白上扫白等于没扫（2026-10-30 实测 #FFF3D9 完全看不见）。
@@ -347,6 +358,21 @@ SWEEP_COLOR = "005CD1FF" # 扫光颜色：#FFD15C 亮金。
 C_GRAD_BOTTOM = "00BFD9E6"  # 渐变下半：#E6D9BF 暖沙（顶部受光、底部收暗的伪渐变）
 SWEEP_T0 = 0.28          # 扫光起点（秒，相对标题出现）
 SWEEP_T1 = 0.82          # 扫光终点
+
+
+def _title_fs(text):
+    """钩子主标字号按字数自适应：短标题放大，长标题退回定板值。
+
+    「不用出镜」4 个字用 90 号在 864 宽里只占 ~270px，居中两侧全是空——
+    短标题就该大，这是海报排版的基本功（电影海报同逻辑：字越少字越大）。
+    """
+    import re as _re
+    n = len(_re.sub(r"[，。？！、；：\s]", "", text))
+    if n <= 4:
+        return int(round(FS_TITLE * 1.24))
+    if n <= 6:
+        return int(round(FS_TITLE * 1.12))
+    return FS_TITLE
 
 
 def cinematic_title(text, t0, t1):
@@ -359,51 +385,75 @@ def cinematic_title(text, t0, t1):
     层 4/5 渐变字芯：上 55% 亮白、下 45% 暖沙色，模拟顶部受光
              （FootageCrate 标题资产的标配）。两层各带完整的入场动画，
              必须同步动，否则渐变缝和描边对不上。
-    层 6 扫光：亮暖白色副本 + 移动竖带 \\clip，一次、短促。
+    层 6 扫光：亮金色副本 + 移动竖带 \\clip，一次、短促。
+    字号：短标题按 _title_fs() 放大（海报逻辑），所有层统一 override ——
+         各层字号不一致会让辉光/描边/字芯错位成重影。
     """
     lines = []
+    fs = _title_fs(text)
     glow_bord = int(round(OUT_TITLE * 1.8))
     stroke_bord = max(4, int(round(OUT_TITLE * 0.7)))
     # 入场动画（字距收拢 + 模糊聚焦 + 极轻放大）：三层本体共用，必须逐字一致
-    fsp0 = int(round(FS_TITLE * 0.30))
-    motion = ("\\fsp%d\\blur2\\fscx96\\fscy96\\fad(140,100)"
-              "\\t(0,460,\\fsp2\\blur0\\fscx100\\fscy100)" % fsp0)
+    # ★ 字距起点按放大后的字号算，否则大字标题收拢前会左右溢出安全区
+    fsp0 = int(round(fs * 0.30))
+    motion = ("\\fs%d\\fsp%d\\blur2\\fscx96\\fscy96\\fad(140,100)"
+              "\\t(0,460,\\fsp2\\blur0\\fscx100\\fscy100)" % (fs, fsp0))
     # 1) 辉光层
     lines.append(dialog(2, t0, t1, "Title",
-        "{\\bord%d\\blur8\\shad0\\1a&HFF&\\3c&H%s&\\3a&H38&"
+        "{\\fs%d\\bord%d\\blur8\\shad0\\1a&HFF&\\3c&H%s&\\3a&H38&"
         "\\fad(280,170)\\t(0,600,\\bord%d\\blur4)}%s"
-        % (glow_bord, GLOW_COLOR, int(round(glow_bord * 0.6)), text)))
+        % (fs, glow_bord, GLOW_COLOR, int(round(glow_bord * 0.6)), text)))
     # 2) 描边层（只有轮廓）
     lines.append(dialog(3, t0, t1, "Title",
         "{\\bord%d\\shad0\\1a&HFF&%s}%s" % (stroke_bord, motion, text)))
     # 3) 渐变字芯：上下两半各一层（ASS 没有真正的渐变填充，用 \\clip 二分）
     y_top = max(0, TITLE_MARGIN_V - 40)
-    y_mid = TITLE_MARGIN_V + int(round(FS_TITLE * 0.55))
-    y_bot = TITLE_MARGIN_V + int(round(FS_TITLE * 1.5)) + 40
+    y_mid = TITLE_MARGIN_V + int(round(fs * 0.55))
+    y_bot = TITLE_MARGIN_V + int(round(fs * 1.5)) + 40
     lines.append(dialog(4, t0, t1, "Title",
         "{\\bord0\\shad0\\1c&H%s&\\blur1\\clip(0,%d,%d,%d)%s}%s"
         % (C_WHITE, y_top, W, y_mid, motion, text)))
     lines.append(dialog(5, t0, t1, "Title",
         "{\\bord0\\shad0\\1c&H%s&\\blur1\\clip(0,%d,%d,%d)%s}%s"
         % (C_GRAD_BOTTOM, y_mid, W, y_bot, motion, text)))
-    # 4) 扫光层：竖带从画面左外扫到右外，带子经过处字亮成暖白。
+    # 4) 扫光层：竖带从画面左外扫到右外，带子经过处字亮成金色。
     bw = int(round(W * 0.18))
     y0 = max(0, TITLE_MARGIN_V - 80)
-    y1 = min(H, TITLE_MARGIN_V + int(round(FS_TITLE * 2.2)) + 80)
+    y1 = min(H, TITLE_MARGIN_V + int(round(fs * 2.2)) + 80)
     ta = int(round(SWEEP_T0 * 1000))
     tb = int(round(SWEEP_T1 * 1000))
     lines.append(dialog(6, t0, t1, "Title",
-        "{\\bord0\\shad0\\blur2\\1c&H%s&"
+        "{\\fs%d\\bord0\\shad0\\blur2\\1c&H%s&"
         "\\clip(-%d,%d,0,%d)\\t(%d,%d,\\clip(%d,%d,%d,%d))}%s"
-        % (SWEEP_COLOR, bw, y0, y1, ta, tb, W, y0, W + bw, y1, text)))
+        % (fs, SWEEP_COLOR, bw, y0, y1, ta, tb, W, y0, W + bw, y1, text)))
     return lines
 
 
+def title_rule(t0, t1, y=None):
+    """主副标之间的金色细线（杂志排版的 rule line，矢量画线）。
+
+    2px 高的暖金短线，比「——」字符稳（不依赖字形/字体回退）。
+    分隔出「主标 → 细线 → 副标」三级层级，杂志感和影视片头感都靠它。
+    y 默认落在主标底与副标顶之间（按最大号标题推算）。
+    """
+    if y is None:
+        y = TITLE_MARGIN_V + int(round(_title_fs("四") * 1.30))
+    w = int(round(W * 0.09))
+    return dialog(3, t0, t1, "Sub",
+        "{\\an5\\pos(%d,%d)\\bord0\\shad0\\1c&H%s&\\fad(320,200)"
+        "\\p1}m %d 0 l %d 0 l %d 2 l %d 2{\\p0}"
+        % (W // 2, y, C_GOLD, -w, w, w, -w))
+
+
 def sub_in():
-    """副标题入场：比主标慢半拍、更轻 —— 字距小收拢 + 轻模糊聚焦。"""
+    """副标题入场：比主标慢半拍、更轻 —— 字距小收拢 + 轻模糊聚焦。
+
+    ★ 收拢终点是 \\fsp6（杂志眉标的宽字距），不是 3 —— 副标常驻宽字距，
+      和主标形成「大紧 + 小松」的对比层级。
+    """
     fsp0 = int(round(FS_SUB * 0.30))
     return ("\\fad(200,120)\\fsp%d\\blur2"
-            "\\t(80,520,\\fsp3\\blur0)" % fsp0)
+            "\\t(80,520,\\fsp6\\blur0)" % fsp0)
 
 
 def fade_only(ms_in=60, ms_out=40):
