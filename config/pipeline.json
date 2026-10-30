@@ -74,6 +74,27 @@
       ]
     },
     {
+      "id": "voicetone",
+      "stage": "音频",
+      "desc": "音色自检：这条配音是不是本 IP 的嗓子（防跨 IP 串档，串了立刻停）",
+      "py": "numpy",
+      "script": "{tools}/voice_check.py",
+      "_why": "2026-10-31 珠珠整条片子用了主号的声音：gen_tts 的参考音落地名写死成 cb_ref.wav 且「已存在就跳过」。日志打印的却是正确文件名，人耳半小时才发现。机器量 MFCC 一秒就能判（同人 0.97-0.99 / 异人 0.65-0.75）。",
+      "argv": [
+        "{audio}",
+        "{ref_audio}"
+      ],
+      "flag": [
+        "--min",
+        "0.90"
+      ],
+      "out_glob": "",
+      "optional": false,
+      "depends": [
+        "audio"
+      ]
+    },
+    {
       "id": "srt",
       "needs_comfy": true,
       "stage": "字幕",

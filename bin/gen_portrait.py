@@ -35,6 +35,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -96,7 +97,7 @@ def poll(pid, timeout=1800):
     raise SystemExit("ComfyUI 超时没出图（%s）" % pid)
 
 
-def graph(prompt, w, h, seed, steps, cfg, ref=None):
+def graph(prompt, w, h, seed, steps, cfg, ref=None, refs=None):
     g = {
         "10": {"class_type": "UNETLoader", "inputs": {"unet_name": MODEL_UNET,
                                                       "weight_dtype": "default"}},
@@ -115,11 +116,13 @@ def graph(prompt, w, h, seed, steps, cfg, ref=None):
     }
     enc = {"clip": ["11", 0], "prompt": prompt, "negative_prompt": NEG,
            "resolution": 0, "vae": ["12", 0]}
-    if ref:
-        # 图生图：拿已经定好的底图当身份参考，第二张才不会长成另一个人。
-        # 两张图脸不一样，出片时看着像换了演员 —— 这是最容易被客户一眼看穿的错。
-        enc["images.image_1"] = ["13", 0]
-        g["13"] = {"class_type": "LoadImage", "inputs": {"image": ref}}
+    # refs = 有序多参考图（image_1..image_N）。image_1 是「身份/主体锚」，
+    # 后面几张是「场景/服装/道具参考」—— 顺序有意义，别随手排。
+    seq = list(refs or ([ref] if ref else []))
+    for i, p in enumerate(seq, 1):
+        nid = str(20 + i)
+        g[nid] = {"class_type": "LoadImage", "inputs": {"image": p}}
+        enc["images.image_%d" % i] = [nid, 0]
     g["14"] = {"class_type": "TextEncodeQwenImage21", "inputs": enc}
     g["16"]["inputs"]["positive"] = ["14", 0]
     g["16"]["inputs"]["negative"] = ["14", 1]
@@ -127,12 +130,20 @@ def graph(prompt, w, h, seed, steps, cfg, ref=None):
 
 
 def push_input(path):
-    """LoadImage 只认 ComfyUI 的 input 目录，先拷进去（同名覆盖）。"""
+    """LoadImage 只认 ComfyUI 的 input 目录，先拷进去（同名覆盖）。
+
+    ★ 文件名必须清成 ASCII：档案里的素材常叫「背景图 (1).png」，带空格和括号，
+      ComfyUI 的 LoadImage 拿这种名字会直接 400，报错还只说 image not found。
+    """
     d = os.environ.get("COMFY_IN", "/cfu/ComfyUI/input/studio")
     os.makedirs(d, exist_ok=True)
-    dst = os.path.join(d, os.path.basename(path))
+    base = os.path.basename(path)
+    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", os.path.splitext(base)[0]) + \
+        (os.path.splitext(base)[1].lower() if re.search(r"\.(png|jpg|jpeg|webp)$",
+                                                        base, re.I) else ".png")
+    dst = os.path.join(d, safe)
     shutil.copy2(path, dst)
-    return "studio/" + os.path.basename(path)
+    return "studio/" + safe
 
 
 def grab(hist, dst):
@@ -160,7 +171,7 @@ def probe(path):
 def main():
     ap = argparse.ArgumentParser(description="生成形象底图 / 起始静帧（Qwen-Image 2.1）")
     ap.add_argument("--ip", required=True)
-    ap.add_argument("--who", required=True, help="这个人是谁、长什么样、穿什么（英文更好使）")
+    ap.add_argument("--who", default="", help="这个人是谁、长什么样、穿什么（英文更好使）")
     ap.add_argument("--scene", default="", help="背景/环境描述")
     ap.add_argument("--only", choices=["portrait", "still", "both"], default="both")
     ap.add_argument("--steps", type=int, default=8)
@@ -169,6 +180,12 @@ def main():
     ap.add_argument("--out-dir", default="", help="默认写进该 IP 的 02_素材真值/")
     ap.add_argument("--from", dest="ref", default="",
                     help="拿这张图当身份参考（图生图）—— 出第二张时用它，脸才一致")
+    ap.add_argument("--refs", default="",
+                    help="多张参考图，逗号分隔。**顺序有意义**：第 1 张是身份锚，"
+                         "后面依次是场景/服装/道具。给了它就忽略 --from")
+    ap.add_argument("--prompt", default="",
+                    help="直接给完整英文提示词，跳过 --who/--scene 拼接"
+                         "（多参考图时指代不清，要自己写明 image 1/2/3 各是什么）")
     ap.add_argument("--dry", action="store_true")
     a = ap.parse_args()
 
@@ -178,14 +195,24 @@ def main():
     prefix = e["name"].replace("演示客户", "") or "形象"
 
     jobs = []
+    if not a.who.strip() and not a.prompt.strip():
+        raise SystemExit("要么给 --who 描述这个人，要么给 --prompt 直接写完整提示词")
     for kind in (["portrait", "still"] if a.only == "both" else [a.only]):
         w, h = SIZE[kind]
-        prompt = " ".join(x for x in (
-            "Photorealistic photo of", a.who.strip().rstrip("。."),
-            ("Set in " + a.scene.strip().rstrip("。.") + ".") if a.scene.strip() else "",
-            FRAMING[kind],
-            "Real photography, natural soft light, shallow depth of field, sharp on the face, "
-            "vertical 9:16.",) if x)
+        if a.prompt.strip():
+            # 直给模式：多参考图时「图 1 是谁、图 2 是什么」必须由人写明，
+            # 自动拼接的 "Photorealistic photo of <who>" 在这种场景下指代不清。
+            prompt = " ".join(x for x in (
+                a.prompt.strip().rstrip("。.") + ".", FRAMING[kind],
+                "Real photography, natural soft light, shallow depth of field, sharp on the face, "
+                "vertical 9:16.",) if x)
+        else:
+            prompt = " ".join(x for x in (
+                "Photorealistic photo of", a.who.strip().rstrip("。."),
+                ("Set in " + a.scene.strip().rstrip("。.") + ".") if a.scene.strip() else "",
+                FRAMING[kind],
+                "Real photography, natural soft light, shallow depth of field, sharp on the face, "
+                "vertical 9:16.",) if x)
         ext = "形象底图" if kind == "portrait" else "起始静帧"
         dst = os.path.join(out_dir, "%s_%s_%dx%d.png" % (prefix, ext, w, h))
         jobs.append((kind, prompt, w, h, dst))
@@ -207,13 +234,22 @@ def main():
     except Exception as ex:
         raise SystemExit("连不上 ComfyUI（%s）：%s" % (COMFY, ex))
 
+    # 参考图只拷一次：多段 loop 里重复 copy 会白耗 IO（大图 5–9MB/张）
+    # ★ 相对路径按「IP 根目录」解析，不是按当前工作目录 ——
+    #   人在档案里看到的就是 02_素材真值/xxx.png，让他照抄就行；
+    #   按 cwd 解析会在项目根下找，报 FileNotFoundError 还看不出是路径基准的问题。
+    def _abs(p):
+        return p if os.path.isabs(p) else os.path.join(e["path"], p)
+
+    ref_paths = [_abs(x.strip()) for x in (a.refs or a.ref).split(",") if x.strip()]
+    seq = [push_input(p) for p in ref_paths]
+    for i, p in enumerate(ref_paths, 1):
+        print("   参考图 %d：%s" % (i, p))
+
     for i, (kind, prompt, w, h, dst) in enumerate(jobs):
         seed = (a.seed or int(time.time())) + i * 7
-        ref = push_input(a.ref) if a.ref else None
-        if ref:
-            print("   身份参考：%s" % a.ref)
         t0 = time.time()
-        pid = post("/prompt", {"prompt": graph(prompt, w, h, seed, a.steps, a.cfg, ref)})["prompt_id"]
+        pid = post("/prompt", {"prompt": graph(prompt, w, h, seed, a.steps, a.cfg, refs=seq)})["prompt_id"]
         hist = poll(pid)
         dst, src = grab(hist, dst)
         print("✓ %s → %s  (%.0fs, seed=%s)" % (kind, dst, time.time() - t0, seed))

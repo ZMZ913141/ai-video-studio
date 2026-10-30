@@ -25,7 +25,6 @@
     "burn_ass.py": "03_生产脚本",
     "comfy_free.py": "03_生产脚本",
     "finish_v6.py": "03_生产脚本",
-    "gen_still_cb_qwen.py": "03_生产脚本",
     "gen_tts.py": "03_生产脚本",
     "gen_video.py": "03_生产脚本",
     "ip_guard.py": "03_生产脚本",
@@ -49,6 +48,8 @@
     "srt_sync_audit.py": "04_验收工具",
     "topcheck.py": "04_验收工具",
     "verify_scale.py": "04_验收工具",
-    "title_editor.html": "03_生产脚本"
-  }
+    "title_editor.html": "03_生产脚本",
+    "voice_check.py": "04_验收工具"
+  },
+  "_moved_out": "2026-10-31 迁出 gen_still_cb_qwen.py：它只服务单 IP（写死 cb_base.png 与「陈洁斌_主号_静帧_」输出名），放在引擎真源里会被 scripts-sync 推到每个客户档案，属于典型的跨 IP 污染。该脚本留在该 IP 自己的 03_生产脚本/ 里；通用需求走 bin/gen_portrait.py --refs 多参考图。"
 }

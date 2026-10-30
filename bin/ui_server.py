@@ -966,10 +966,21 @@ def build_exec(b, want_result=False):
         # ★ 定帧：接新客户的第一件事 —— 定形象底图 + 起始静帧。
         #   没有静帧，视频模型就没有第一帧，出不了片。
         #   这个动作占 GPU（出图 1-2 分钟），所以要二次确认。
+        # ★ 三条路都通：who（文字描述）/ prompt（直给完整英文提示词）/
+        #   refs（多参考图，人脸+场景+服装）。以前只认 who，客户给了
+        #   形象底图和展厅图也用不上，只能靠文字凭空描述脸 —— 必漂。
         who = (b.get("who") or "").strip()
-        if not who:
-            raise ValueError("要写清楚这个人长什么样（英文更好使）")
-        argv = ["bin/gen_portrait.py", "--ip", ip, "--who", who]
+        prompt = (b.get("prompt") or "").strip()
+        refs = (b.get("refs") or "").strip()
+        if not who and not prompt:
+            raise ValueError("要写清楚这个人长什么样（英文更好使），或者直接给完整提示词")
+        argv = ["bin/gen_portrait.py", "--ip", ip]
+        if who:
+            argv += ["--who", who]
+        if prompt:
+            argv += ["--prompt", prompt]
+        if refs:
+            argv += ["--refs", refs]
         scene = (b.get("scene") or "").strip()
         if scene:
             argv += ["--scene", scene]

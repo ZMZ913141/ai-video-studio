@@ -1441,6 +1441,18 @@ DEFAULT_PROMPT_VARS = {
         'his identity, his face, his outfit and every accessory, the background '
         'behind him, the lighting and the colour tone'
     ),
+    # ★★ 2026-10-31：把这四个「姿态」从骨架里拆出来（第 4 处同类护栏）。
+    #   以前骨架写死 "his seated posture" / "in his chair, near his lap" / "sits"，
+    #   等于**默认所有人都是坐着对着沙发讲话** —— 主号是坐姿，所以一直没暴露；
+    #   珠珠（客户卡）是站在展厅里讲的，DRY 一跑就自相矛盾：
+    #   subject_definitions 说 "her seated posture"，detailed 说 "standing"，
+    #   模型被两句话拉扯，姿势会在段与段之间漂。
+    #   默认值必须中性（画面交回 <Picture 1>），要用具体姿态的 IP 在 ip.json 里显式钉死。
+    #   ⚠️ 主号 ip.json 已把前三个显式写成旧值，DRY 逐字节不变（有 golden 可 diff）。
+    "posture": 'his posture',
+    "rest_pose": 'settled and relaxed, hands resting low and still',
+    "pose_verb": 'sits',
+    "lap_ref": 'his lap',
     "seated_where": 'seated in the room of the reference still',
     "where_of_still": 'in the room shown',
     "above_head": (
@@ -1477,8 +1489,14 @@ DEFAULT_PROMPT_VARS = {
 PV = dict(DEFAULT_PROMPT_VARS)
 _custom = IP.get("video.prompt_vars") or {}
 PV.update({k: v for k, v in _custom.items() if isinstance(v, str) and v.strip()})
+# 本 IP 的性别（male / female）。只影响骨架里 he/his 的归一，见 _gender_norm。
+GENDER = str(IP.get("video.gender") or "male").strip()
 if _custom:
-    unknown = sorted(set(_custom) - set(DEFAULT_PROMPT_VARS))
+    # ★ 下划线开头的是**元字段**（`_note` / `_gender_note` 这类给人看的说明），
+    #   不是提示词变量，别混进"拼错的变量名"告警里 —— 否则每跑一次都刷一条假警告，
+    #   真拼错时反而没人看（狼来了）。
+    unknown = sorted(k for k in set(_custom) - set(DEFAULT_PROMPT_VARS)
+                     if not k.startswith("_"))
     if unknown:
         # 拼错的变量名 Template 会原样留着不报错，等于改了个寂寞还查不出来
         print(f"  ⚠ ip.json 的 video.prompt_vars 里有不认识的名字：{unknown}（已忽略）")
@@ -1597,8 +1615,8 @@ def build_prompt(i, segs, cues, audio_sec):
 
     subj = (
         "subject_definitions:\n"
-        "<Subject 1> is $who_lc, taken one-to-one from <Picture 1>: $appearance. His body proportions, his "
-        "seated posture and his shoulder line also follow <Picture 1>. $skin "
+        "<Subject 1> is $who_lc, taken one-to-one from <Picture 1>: $appearance. His body proportions, $posture "
+        "and his shoulder line also follow <Picture 1>. $skin "
         # ★ 眉部必须显式写「放松」，否则模型按「认真讲解」的默认表情演，眉间会皱起来。
         #   2026-10-27 用户指出 S04 眉毛皱着。此前提示词里**完全没有眉毛相关描述**，
         #   等于把表情交给了模型默认值。只写「放松」不够，要连眉骨到眉尾的走向一起说，
@@ -1651,8 +1669,9 @@ def build_prompt(i, segs, cues, audio_sec):
         "and a little of the $scene_noun on either side of him; $room_right and $room_left"
     )
 
-    opening = ("He is settled and relaxed in his chair, hands resting low and still near his lap, "
-               "his gaze level on the lens, breathing calmly. ")
+    # ★ 姿态来自 ip.json（默认中性）：以前写死 "in his chair ... near his lap"，
+    #   站着讲的 IP 会被要求「坐在椅子里、手放在腿上」，和静帧的站姿打架。
+    opening = ("He is $rest_pose, his gaze level on the lens, breathing calmly. ")
     if i > 0:
         od = ov / FPS
         opening = (
@@ -1682,7 +1701,7 @@ def build_prompt(i, segs, cues, audio_sec):
     if seg_lines:
         n_char = sum(len(re.sub(r"[，。？！、；：\s]", "", s)) for s in seg_lines)
         topic = f"about {n_char} characters of $lang across {len(seg_lines)} short phrases"
-        summ_body = (f"$who_cap sits $where_of_still of the reference still and speaks "
+        summ_body = (f"$who_cap $pose_verb $where_of_still of the reference still and speaks "
                      f"directly into the lens in $lang, delivering {topic}. "
                      f"He is giving a talking-head explainer to camera; no other action, no cutaway.")
     else:
@@ -1725,6 +1744,11 @@ def build_prompt(i, segs, cues, audio_sec):
     acts = []
     for txt, t, k in beats:
         g = (CALM_GESTURES if i >= 3 else GESTURES)[k % len(GESTURES)]
+        # ★ "near his lap" 是坐姿假设的参照点；站着讲的 IP 在 ip.json 里给 lap_ref，
+        #   否则默认手势会把「手在腿边」硬塞给一个站立的人。
+        _lap = PV.get("lap_ref") or "his lap"
+        if _lap != "his lap":
+            g = g.replace("his lap", _lap)
         # (S1) 说话人 ID：H3 规范 §4.4 要求「说话人标识放在 <d> 外面」，这样写合规。
         # ⚠️ 但要说清楚：**它并不能阻止字幕被画进画面**（2026-10-27 实测无效）。
         #    详见 SKILL.md §3「出片后必须先抽帧看画面有没有字」。
@@ -1794,7 +1818,26 @@ def build_prompt(i, segs, cues, audio_sec):
     )
     # ★ 变量统一在这里替换（不在各处拼的时候替换），好处是拼装逻辑保持纯拼接、
     #   一眼能看出最终结构，改业务不用在一个个 f-string 里找。
-    return Template(subj + summ + ret + det + snd + mus).safe_substitute(pv)
+    return _gender_norm(Template(subj + summ + ret + det + snd + mus).safe_substitute(pv), GENDER)
+
+
+def _gender_norm(text, g):
+    """把骨架里写死的 he/his 按本 IP 的性别归一。
+
+    ★ 为什么要有：这套英文骨架是全引擎共用的一份，里面 90 处 he/his 是「男性默认」。
+      女性 IP（客户女主播）直接用，出来的提示词就是「一位女性……他的脸……他坐在椅子上」，
+      模型会摇摆，画面容易中性化。这跟「引擎默认值必须中性」是同一条铁律。
+
+    ★ 只在 video.gender 明确是女性时替换 —— 主号（male）走同一行代码但逐字节不变，
+      不重新验证主号的历史成片。\b 词边界是必须的：'the' 里含 he，
+      裸子串替换会把它改成 'tshe'（这类错误比不替换更难查）。
+    """
+    if str(g).lower() not in ("f", "female", "女", "女性", "woman"):
+        return text
+    for a_, b_ in (("himself", "herself"), ("his", "her"), ("His", "Her"),
+                   ("him", "her"), ("Him", "Her"), ("he", "she"), ("He", "She")):
+        text = re.sub(r"\b%s\b" % a_, b_, text)
+    return text
 
 
 def timeline(segs, cues, audio_sec, total_sec, offset=0, full=None, frame_base=0):

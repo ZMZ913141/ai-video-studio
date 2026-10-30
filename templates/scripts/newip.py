@@ -358,7 +358,7 @@ def main():
         for e in mine:
             print(f"    {e.get('name')}  →  {e.get('path')}  （套次 {e.get('tag')}）")
         print("\n  直接进那个目录改 ip.json，不要新建。")
-        print("  重复目录会串参数 —— 2026-10-27 踩过一次，把洁斌的重叠帧参数套到了别家。")
+        print("  重复目录会串参数 —— 2026-10-27 踩过一次，把上一个 IP 的重叠帧参数套到了别家。")
         if a.name:  # 非交互模式：直接退出
             return 1
         if ask("确认仍要新建？输入 yes 继续", "").lower() != "yes":

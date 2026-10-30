@@ -217,6 +217,17 @@ class Pipeline:
         self.script_txt = pick_script_txt(self.dirs["05"])
         if self.script_txt:
             self.ctx["script_txt"] = self.script_txt
+        # ★ 音色真值也进变量表：voice 验收步骤要拿「本 IP 的参考音频」当基准。
+        #   2026-10-31 珠珠串档事故后加的 —— 以前验收没人核对「这条配音是谁的嗓子」，
+        #   于是 gen_tts 用错参考音也能一路跑到交付。
+        try:
+            _ipd = json.load(open(os.path.join(self.root, "ip.json"), encoding="utf-8"))
+        except Exception:
+            _ipd = {}
+        _ra = str(((_ipd.get("voice") or {}).get("ref_audio")) or "")
+        self.ctx["ref_audio"] = ("" if not _ra else
+                                 _ra if os.path.isabs(_ra)
+                                 else os.path.join(self.root, _ra))
         # ★ 种子：以前写死在 gen_video.py 里（881208001），pipeline 不传也不显示。
         #   后果是「重跑一遍」= 同一提示词 + 同一音频 + 同一种子 = 几乎一样的画面，
         #   十几分钟 GPU 白烧，人还以为自己换了一版。现在种子是编排器的一等参数。

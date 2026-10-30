@@ -325,7 +325,7 @@ def ass_head():
     """
     return f"""[Script Info]
 ScriptType: v4.00+
-Title: 陈洁斌主号 字幕标题
+Title: 字幕标题
 PlayResX: {W}
 PlayResY: {H}
 WrapStyle: 2
@@ -550,18 +550,32 @@ SWEEP_T1 = 0.82          # 扫光终点
 
 
 def _title_fs(text):
-    """钩子主标字号按字数自适应：短标题放大，长标题退回定板值。
+    """钩子主标字号按字数自适应：短标题放大，长标题按安全区宽度收缩。
 
     「不用出镜」4 个字用 90 号在 864 宽里只占 ~270px，居中两侧全是空——
     短标题就该大，这是海报排版的基本功（电影海报同逻辑：字越少字越大）。
+
+    ★ 长标题必须有上限（2026-10-30 主号 S01 实测踩到）：
+      n=10 用 90 号实测占 752px，而右侧互动列安全线在 x=744（可用 697px），
+      越界 63px —— 抖音点赞竖列会直接把字压住，safe_zone_audit 判 ❌。
+      这里按「每字 0.84em」反算，宁可小两号也不越界；
+      金线 / 副标的位置也跟着这个字号走（title_rule 用的是它），一起收。
     """
     import re as _re
     n = len(_re.sub(r"[，。？！、；：\s]", "", text))
     if n <= 4:
-        return int(round(FS_TITLE * 1.24))
-    if n <= 6:
-        return int(round(FS_TITLE * 1.12))
-    return FS_TITLE
+        fs = int(round(FS_TITLE * 1.24))
+    elif n <= 6:
+        fs = int(round(FS_TITLE * 1.12))
+    else:
+        fs = FS_TITLE
+    if n:
+        # ★ 安全区是**偏左**的（右侧要给点赞/评论竖列让位），所以可用宽不能取
+        #   SAFE_RIGHT - SAFE_LEFT，必须取「居中后左右各留多少」的较小者 ×2。
+        #   2026-10-30 第一次改就用错成整段宽，字缩到 82 号仍越界 32px。
+        safe_w = 2 * min(W // 2 - SAFE_LEFT, SAFE_RIGHT - W // 2)
+        fs = min(fs, int(safe_w / (n * 0.84)))
+    return max(42, fs)
 
 
 def cinematic_title(text, t0, t1):

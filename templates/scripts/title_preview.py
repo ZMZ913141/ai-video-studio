@@ -461,11 +461,13 @@ def main():
     if not times:
         times = [0.15, 0.45, 1.60] if any(k == "motion" for k, _ in dims) else [1.60]
 
-    out_dir = "/cfu/ai视频档案库/陈洁斌主号/08_过程/_标题预览"
+    # ★ 默认落在「被预览的那条视频」旁边，不写死某个 IP 的目录。
+    #   写死等于所有 IP 的预览图都堆进同一个人的档案里（跨 IP 污染）。
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(a.video)), "_标题预览")
     try:
         os.makedirs(out_dir, exist_ok=True)
     except OSError:
-        out_dir = os.path.join(os.path.dirname(os.path.abspath(a.video)), "_标题预览")
+        out_dir = os.path.join(os.getcwd(), "_标题预览")
         os.makedirs(out_dir, exist_ok=True)
 
     print(f"主标「{main_txt}」 副标「{sub_txt}」  画面 {vw}x{vh}")

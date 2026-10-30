@@ -22,6 +22,7 @@
 import glob
 import json
 import os
+import hashlib
 import re
 import shutil
 import subprocess
@@ -49,7 +50,13 @@ from ip_guard import load_ip
 
 IP = load_ip()
 REF_SRC = IP.asset("voice", "ref_audio")
-REF_NAME = "cb_ref.wav"
+# ★★ 2026-10-31 串档事故：这里原来写死 `cb_ref.wav`（洁斌的缩写），且"文件已存在就跳过"。
+#   后果：主号先跑过一次 → 珠珠这条 TTS 直接复用主号的参考音，
+#   生成的配音 MFCC 与主号 0.988、与珠珠本人参考只有 0.752 —— 客户的片子成了别人的声音，
+#   而且日志照样打印「音色参考 珠珠_声音参考_8s.mp3」，看起来一切正常（最难查的一类）。
+#   修法照 gen_video.py 的范式：名字按「参考音频路径」区分 + 每次校验源文件是否更新。
+_h = hashlib.md5(os.path.abspath(REF_SRC).encode("utf-8")).hexdigest()[:8] if REF_SRC else "noip"
+REF_NAME = "ref_%s.wav" % _h
 # 参考音的逐字稿。**必须和 REF_SRC 是同一句**，否则音色克隆会跑偏。
 REF_TEXT = os.environ.get("REF_TEXT") or IP.get("voice.ref_text") or ""
 if os.environ.get("REF_TEXT") is None:
@@ -181,10 +188,12 @@ def prep():
     assert os.path.exists(src), src
     os.makedirs(IN_DIR, exist_ok=True)
     d = os.path.join(IN_DIR, REF_NAME)
-    if not os.path.exists(d):
+    # 源文件比落地文件新就重转。只判「存在」会让换了参考音的人白改一夜（串档事故）。
+    if not os.path.exists(d) or os.path.getsize(d) == 0 \
+            or os.path.getmtime(src) > os.path.getmtime(d):
         subprocess.run([FF, "-nostdin", "-y", "-i", src, "-ar", "48000", "-ac", "1",
                         "-c:a", "pcm_s16le", d], check=True, capture_output=True)
-        print("参考音频 →input")
+        print("参考音频 →input（%s）" % REF_NAME)
 
 
 def main():

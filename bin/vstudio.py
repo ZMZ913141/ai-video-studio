@@ -1147,6 +1147,19 @@ def cmd_scripts_sync(a):
     import difflib
     from datetime import datetime
 
+    # ★ 同步前先扫一遍真源：真源里任何一个 IP 私有标识（名字/别名/cb_ 这类缩写）
+    #   都会被推到**所有客户档案**去。2026-10-31 珠珠整条片子用了主号的声音，
+    #   根因就是真源里一行 REF_NAME = "cb_ref.wav"。闸门放在这里最难被绕过：
+    #   只要还想同步，就得先过扫描。
+    _lint = os.path.join(ROOT, "bin", "scripts_lint.py")
+    if os.path.exists(_lint):
+        import subprocess as _sp
+        r = _sp.run([sys.executable, _lint], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stdout.rstrip())
+            die("✗ 引擎真源里有 IP 私有标识或「存在就跳过」的写文件，已拒绝同步。\n"
+                "   修掉上面标 ✗ 的行再同步；只标 · 的是提示，不影响。")
+
     mpath = os.path.join(ROOT, "templates", "scripts", "manifest.json")
     if not os.path.exists(mpath):
         die(f"引擎真源不存在：{mpath}")
