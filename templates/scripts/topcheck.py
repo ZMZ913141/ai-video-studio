@@ -52,7 +52,7 @@ def set_size(w, h):
 
 
 def gray(path, t=0.0):
-    p = subprocess.run([FF, "-v", "error", "-ss", str(t), "-i", path, "-frames:v", "1",
+    p = subprocess.run([FF, "-nostdin", "-v", "error", "-ss", str(t), "-i", path, "-frames:v", "1",
                         "-vf", f"scale={W}:{H}", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
                        capture_output=True)
     if len(p.stdout) < W * H:

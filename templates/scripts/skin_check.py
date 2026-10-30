@@ -31,7 +31,7 @@ def _probe_wh(path):
 
 
 def gray(path, t=0.0):
-    p = subprocess.run([FF, "-v", "error", "-ss", str(t), "-i", path, "-frames:v", "1",
+    p = subprocess.run([FF, "-nostdin", "-v", "error", "-ss", str(t), "-i", path, "-frames:v", "1",
                         "-vf", f"scale={W}:{H}", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
                        capture_output=True)
     return np.frombuffer(p.stdout, np.uint8)[:W * H].reshape(H, W).astype(np.float32)

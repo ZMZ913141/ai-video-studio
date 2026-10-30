@@ -425,7 +425,7 @@ def audio_dur(path):
     if not os.path.isfile(path):
         sys.exit(f"✗ 音频不存在：{path}\n"
                  f"  多 IP 场景请用 AUDIO=<本IP定板音频> 指定")
-    p = subprocess.run([FF, "-hide_banner", "-i", path], capture_output=True)
+    p = subprocess.run([FF, "-nostdin", "-hide_banner", "-i", path], capture_output=True)
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", p.stderr.decode(errors="replace"))
     if not m:
         sys.exit(f"✗ 读不出音频时长（不是有效音频？）：{path}\n"
@@ -570,7 +570,7 @@ def pause_windows(audio_path, min_sec=0.15, offset_db=20, force=False):
     SR, FRAME_MS, POOL = 8000, 10, 2
     try:
         p = subprocess.run(
-            [FF, "-v", "quiet", "-i", audio_path, "-ac", "1", "-ar", str(SR),
+            [FF, "-nostdin", "-v", "quiet", "-i", audio_path, "-ac", "1", "-ar", str(SR),
              "-f", "s16le", "-"], capture_output=True)
         pcm = array.array("h")
         pcm.frombytes(p.stdout)
@@ -643,7 +643,7 @@ def pause_quality(cues, audio_path=None):
         return []
     try:
         p = subprocess.run(
-            [FF, "-v", "quiet", "-i", audio_path, "-ac", "1", "-ar", "8000",
+            [FF, "-nostdin", "-v", "quiet", "-i", audio_path, "-ac", "1", "-ar", "8000",
              "-f", "s16le", "-"], capture_output=True)
         pcm = array.array("h")
         pcm.frombytes(p.stdout)
@@ -2045,7 +2045,7 @@ def prep(audio_sec):
             shutil.copy2(v["src"], dst)
         print(f"参考视频 {v['id']}（{v['name']}，{v['use']}） →input")
     a = os.path.join(IN_DIR, AUDIO_NAME)
-    subprocess.run([FF, "-y", "-i", AUDIO_SRC, "-af", "apad=pad_dur=0.60",
+    subprocess.run([FF, "-nostdin", "-y", "-i", AUDIO_SRC, "-af", "apad=pad_dur=0.60",
                     "-t", f"{audio_sec}", "-ar", "48000", "-ac", "2", "-b:a", "192k", a],
                    check=True, capture_output=True)
     print("音频 →input")

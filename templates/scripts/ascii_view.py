@@ -18,7 +18,7 @@ def main():
     path, t = sys.argv[1], float(sys.argv[2])
     cw = int(sys.argv[3]) if len(sys.argv) > 3 else 56
     ch = max(8, int(cw * 1376 / 768 / 2.1))
-    p = subprocess.run([FF, "-v", "error", "-ss", str(t), "-i", path, "-frames:v", "1",
+    p = subprocess.run([FF, "-nostdin", "-v", "error", "-ss", str(t), "-i", path, "-frames:v", "1",
                         "-vf", f"scale={cw}:{ch}", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
                        capture_output=True)
     d = np.frombuffer(p.stdout, np.uint8)[:cw * ch].reshape(ch, cw).astype(np.float32)

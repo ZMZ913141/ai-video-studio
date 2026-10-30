@@ -116,7 +116,8 @@ def build_items_from_ai(ip, n):
     n = int(n)
     cmd = [PY, os.path.join(HERE, "studio_ai.py"), "topics", ip,
            "-n", str(n), "--json"]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL)
     if r.returncode != 0:
         tail = [x for x in (r.stderr or r.stdout or "").strip().splitlines() if x.strip()]
         raise SystemExit("✗ 自动出题失败：" + (tail[-1][:220] if tail else "无输出"))
@@ -195,7 +196,8 @@ def prepare_script(ip, setname, topic, script_path, tone=""):
            "--set", setname, "--topic", topic, "--write", "--json"]
     if tone:
         cmd += ["--tone", tone]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL)
     if r.returncode != 0:
         return False, f"AI 写文案失败：{(r.stderr or r.stdout).strip().splitlines()[-1][:160]}"
     try:
@@ -215,7 +217,8 @@ def preflight():
     g = os.path.join(HERE, "comfy_guard.py")
     if not os.path.isfile(g):
         return True, "（没装 comfy_guard，跳过预检）"
-    r = subprocess.run([PY, g, "preflight"], capture_output=True, text=True)
+    r = subprocess.run([PY, g, "preflight"], capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL)
     tail = [x for x in (r.stdout or "").strip().splitlines() if x.strip()]
     return r.returncode == 0, (tail[-1][:150] if tail else "预检失败（无输出）")
 
@@ -228,7 +231,9 @@ def run_one(ip, setname, tier, extra, log_dir):
     cmd += extra
     t0 = time.time()
     # stdout 直接继承：一条要跑十几分钟，用户得能看见它活着
-    r = subprocess.run(cmd)
+    # ★ stdin 必须断开：这条要跑十几分钟，在后台（nohup / & / 计划任务）时
+    #   若子进程读到终端会吃 SIGTTIN，整组停住、看起来像"卡死在渲染"。
+    r = subprocess.run(cmd, stdin=subprocess.DEVNULL)
     sec = int(time.time() - t0)
     return r.returncode == 0, f"{sec // 60} 分 {sec % 60} 秒，退出码 {r.returncode}"
 

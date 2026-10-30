@@ -403,7 +403,7 @@ def run_cli(args, timeout=60):
     cmd = [PY, VSTUDIO] + args
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           cwd=ROOT, errors="replace")
+                           cwd=ROOT, errors="replace", stdin=subprocess.DEVNULL)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return 124, "", f"超时 {timeout}s"
@@ -2860,7 +2860,7 @@ class Handler(BaseHTTPRequestHandler):
                 if ff:
                     try:
                         subprocess.run(
-                            [ff, "-y", "-v", "error", "-i", src, "-t", "12",
+                            [ff, "-nostdin", "-y", "-v", "error", "-i", src, "-t", "12",
                              "-ar", "48000", "-ac", "1", "-c:a", "flac", dest],
                             capture_output=True, timeout=300)
                         ok = os.path.exists(dest)
@@ -3475,7 +3475,7 @@ class Handler(BaseHTTPRequestHandler):
             cmd += ["--prefer", prefer]
         try:
             p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
-                               timeout=600)
+                               timeout=600, stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
             return self._bad("跑超时了（10 分钟）。素材多的时候打标会慢，"
                              "可以先把素材精简一下再试。")
@@ -3547,7 +3547,7 @@ class Handler(BaseHTTPRequestHandler):
         env["STUDIO_HOME"] = ROOT
         try:
             cp = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True,
-                                text=True, timeout=180)
+                                text=True, timeout=180, stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
             return self._json({"error": "归纳超时了（180s），稍后再试"}, 504)
         out = (cp.stdout or "").strip()

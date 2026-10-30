@@ -13,7 +13,7 @@ FF = ("/home/qmr/.workbuddy/binaries/python/envs/default/lib/python3.13/"
 
 
 def probe(path):
-    p = subprocess.run([FF, "-i", path], capture_output=True)
+    p = subprocess.run([FF, "-nostdin", "-i", path], capture_output=True)
     dur = 0.0
     for l in p.stderr.decode().splitlines():
         m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", l)
@@ -23,7 +23,7 @@ def probe(path):
 
 
 def silences(path, noise=-32, d=0.15):
-    p = subprocess.run([FF, "-i", path, "-af", f"silencedetect=noise={noise}dB:d={d}",
+    p = subprocess.run([FF, "-nostdin", "-i", path, "-af", f"silencedetect=noise={noise}dB:d={d}",
                         "-f", "null", "-"], capture_output=True)
     out = []
     s = None

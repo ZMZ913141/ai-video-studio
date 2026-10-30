@@ -101,7 +101,7 @@ def grab(hist):
 
 
 def dur(path):
-    p = subprocess.run([FF, "-hide_banner", "-i", path], capture_output=True)
+    p = subprocess.run([FF, "-nostdin", "-hide_banner", "-i", path], capture_output=True)
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", p.stderr.decode("utf-8", "ignore"))
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
 
@@ -139,7 +139,7 @@ def main():
     src = grab(hist)
     os.makedirs(out_dir, exist_ok=True)
     # 48k / 单声道 / flac：gen_tts.py 的 prep() 就是这么转的，参考音统一规格最省事
-    subprocess.run([FF, "-y", "-v", "error", "-i", src, "-t", "12",
+    subprocess.run([FF, "-nostdin", "-y", "-v", "error", "-i", src, "-t", "12",
                     "-ar", "48000", "-ac", "1", "-c:a", "flac", flac], check=True)
     with open(txt, "w", encoding="utf-8") as f:
         f.write(a.text.strip() + "\n")

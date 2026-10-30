@@ -987,7 +987,7 @@ def probe_image(path):
     if not ff:
         return {}
     try:
-        p = subprocess.run([ff, "-hide_banner", "-i", path],
+        p = subprocess.run([ff, "-nostdin", "-hide_banner", "-i", path],
                            capture_output=True, timeout=30)
         s = p.stderr.decode("utf-8", "ignore")
         m = re.search(r",\s*(\d{2,5})x(\d{2,5})", s)
@@ -1094,7 +1094,7 @@ def probe_audio(path):
 
     info = {}
     try:
-        p = subprocess.run([ff, "-hide_banner", "-i", path],
+        p = subprocess.run([ff, "-nostdin", "-hide_banner", "-i", path],
                            capture_output=True, timeout=30)
         s = p.stderr.decode("utf-8", "ignore")
         d = re.search(r"Duration: (\d+):(\d+):([\d.]+)", s)
@@ -1111,7 +1111,7 @@ def probe_audio(path):
         return {"ok": False, "why": "读不了这个文件：%s" % ex}
 
     try:
-        p = subprocess.run([ff, "-v", "error", "-i", path, "-t", "8",
+        p = subprocess.run([ff, "-nostdin", "-v", "error", "-i", path, "-t", "8",
                             "-ar", "6000", "-ac", "1", "-f", "s16le",
                             "-c:a", "pcm_s16le", "-"],
                            capture_output=True, timeout=120)

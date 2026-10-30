@@ -94,7 +94,7 @@ def render(t, ctx, missing=None):
 
 def ff_dur(path, ff):
     """读音频/视频时长。★ ffprobe 在本机不可用，只能用 ffmpeg -i 解析 stderr。"""
-    p = subprocess.run([ff, "-hide_banner", "-i", path], capture_output=True)
+    p = subprocess.run([ff, "-nostdin", "-hide_banner", "-i", path], capture_output=True)
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", p.stderr.decode(errors="replace"))
     if not m:
         return None
@@ -381,7 +381,8 @@ class Pipeline:
             started = False
             try:
                 r = subprocess.run(["bash", sup, "start"], capture_output=True,
-                                   text=True, timeout=180)
+                                   text=True, timeout=180,
+                                   stdin=subprocess.DEVNULL)
                 msg = ((r.stdout or "") + (r.stderr or "")).strip()
                 if msg:
                     print("    " + msg.replace("\n", "\n    "))
@@ -553,8 +554,13 @@ class Pipeline:
             # STUDIO_HOME：让 IP 目录里的脚本副本也能找到仓库（比如
             # config/secrets.local.json 里的第三方 key）。不传的话，
             # 从 /cfu/ai视频档案库/<IP>/03_生产脚本 往上走是找不到仓库的。
-            rc = subprocess.run(cmd, cwd=self.root,
-                                env=dict(os.environ, STUDIO_HOME=ROOT, **env)).returncode
+            # ★ stdin=DEVNULL：子进程一律不该读终端。ffmpeg 默认会读（等键盘 q），
+            #   在后台进程组里一读就吃 SIGTTIN，整个进程组**停住**，
+            #   流水线静默卡死、日志一行不写。2026-10-30 实测 `--from ass` 卡了 6 分钟。
+            #   这里兜一层，配合各脚本自己的 -nostdin，双保险。
+            rc = subprocess.run(cmd, cwd=self.root, stdin=subprocess.DEVNULL,
+                                env=dict(os.environ, STUDIO_HOME=ROOT, PYTHONUNBUFFERED="1", **env)
+                                ).returncode
         rec["rc"] = rc
         rec["t1"] = time.time()
         rec["sec"] = round(rec["t1"] - rec["t0"], 1)
@@ -649,7 +655,8 @@ class Pipeline:
                "-t", f"{total:.3f}", "-ar", "48000", "-c:a", "libmp3lame",
                "-q:a", "2", dst]
         print(f"   留白 前 {h}s / 后 {t}s（自适应 {d:.1f}s 片长）")
-        rc = subprocess.run(cmd, capture_output=True).returncode
+        rc = subprocess.run(cmd, capture_output=True,
+                            stdin=subprocess.DEVNULL).returncode
         if rc == 0 and os.path.isfile(dst):
             self.ctx["audio"] = dst
             rec["out"] = dst
@@ -706,13 +713,28 @@ class Pipeline:
         #   （S02 std 实测 4 → 5），提示词也是按它（.segplan.json）写的。
         #   两处不一致会让人以为提示词少了——所以有实测计划就以它为准。
         _sp = os.path.join(V.set_dirs(self.root, self.set)["05"], ".segplan.json")
+        _pl = None
         try:
             _pl = json.load(open(_sp, encoding="utf-8"))
             if int(_pl.get("n") or 0) and int(_pl.get("n") or 0) != int(p["segs"]):
                 print(f"  出片自适应后实际 {_pl['n']} 段 / {_pl['total_frames']} 帧"
                       f"（提示词按这个写的；切点落在停顿上比的均分更重要）")
         except Exception:
-            pass
+            _pl = None
+        # ★ PILOT 必须显式说出来。上面刚写过「实际 5 段」，而 pilot 只渲染其中 1 段 ——
+        #   不说明的话，跑完只出 1 段会被当成 bug，人还会以为提示词少写了 4 段。
+        _pspec = str(self.ctx.get("pilot") or "").strip().lower()
+        if _pspec:
+            _tot = int((_pl or {}).get("n") or p["segs"] or 0)
+            if _pspec == "last":
+                _which = f"第 {_tot} 段（末段 —— 验「越到后面越油腻」用这个）"
+            else:
+                try:
+                    _which = f"第 {max(1, min(_tot, int(_pspec)))} 段"
+                except ValueError:
+                    _which = "第 1 段"
+            print(f"   ⚑ PILOT={_pspec} → **只渲染{_which}**，全片 {_tot} 段；"
+                  f"提示词/字幕/配乐仍按全片做")
         if self.ctx.get("pad_head"):
             print(f"  音频留白 前 {self.ctx['pad_head']}s / 后 {self.ctx['pad_tail']}s"
                   f"  配乐比人声低 {self.ctx['bgm_offset']} LU")

@@ -18,7 +18,7 @@ SR = 48000
 
 
 def pcm(path, extra=None):
-    a = [FF, "-v", "error", "-i", path]
+    a = [FF, "-nostdin", "-v", "error", "-i", path]
     if extra:
         a += extra
     a += ["-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]

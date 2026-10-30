@@ -20,7 +20,7 @@ SW, SH = 96, 172          # 分析用小图，够判景别和曝光，且快
 def frames(path):
     """以 rawvideo 流式读全片小图，避免一次吃满内存。"""
     p = subprocess.Popen(
-        [FF, "-v", "error", "-i", path, "-vf", f"scale={SW}:{SH}",
+        [FF, "-nostdin", "-v", "error", "-i", path, "-vf", f"scale={SW}:{SH}",
          "-f", "rawvideo", "-pix_fmt", "gray", "-"],
         stdout=subprocess.PIPE)
     per = SW * SH

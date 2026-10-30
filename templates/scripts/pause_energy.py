@@ -86,7 +86,7 @@ def envelope(path):
     """返回 (每 10ms 的 dB 列表, 总时长秒)。"""
     import numpy as np
     p = subprocess.run(
-        [FF, "-v", "quiet", "-i", path, "-ac", "1", "-ar", str(SR), "-f", "s16le", "-"],
+        [FF, "-nostdin", "-v", "quiet", "-i", path, "-ac", "1", "-ar", str(SR), "-f", "s16le", "-"],
         capture_output=True)
     if not p.stdout:
         raise SystemExit(f"解码失败：{path}\n{p.stderr.decode('utf-8', 'replace')[:500]}")

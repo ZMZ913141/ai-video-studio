@@ -171,7 +171,7 @@ def poll(pid, timeout=1800):
 
 
 def dur(path):
-    p = subprocess.run([FF, "-hide_banner", "-i", path], capture_output=True)
+    p = subprocess.run([FF, "-nostdin", "-hide_banner", "-i", path], capture_output=True)
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", p.stderr.decode())
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
 
@@ -182,7 +182,7 @@ def prep():
     os.makedirs(IN_DIR, exist_ok=True)
     d = os.path.join(IN_DIR, REF_NAME)
     if not os.path.exists(d):
-        subprocess.run([FF, "-y", "-i", src, "-ar", "48000", "-ac", "1",
+        subprocess.run([FF, "-nostdin", "-y", "-i", src, "-ar", "48000", "-ac", "1",
                         "-c:a", "pcm_s16le", d], check=True, capture_output=True)
         print("参考音频 →input")
 

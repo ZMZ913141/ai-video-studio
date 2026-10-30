@@ -46,7 +46,7 @@ def _probe_wh(path):
 
 
 def gray_frame(path, t):
-    p = subprocess.run([FF, "-v", "error", "-ss", f"{t:.3f}", "-i", path,
+    p = subprocess.run([FF, "-nostdin", "-v", "error", "-ss", f"{t:.3f}", "-i", path,
                         "-frames:v", "1", "-vf", f"scale={W}:{H}",
                         "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"],
                        capture_output=True)
@@ -57,7 +57,7 @@ def gray_frame(path, t):
 
 
 def gray_still(path):
-    p = subprocess.run([FF, "-v", "error", "-i", path, "-frames:v", "1",
+    p = subprocess.run([FF, "-nostdin", "-v", "error", "-i", path, "-frames:v", "1",
                         "-vf", f"scale={W}:{H}", "-f", "rawvideo",
                         "-pix_fmt", "gray", "pipe:1"], capture_output=True)
     b = np.frombuffer(p.stdout, np.uint8)
@@ -105,7 +105,7 @@ def hist_corr(a, b):
 
 
 def dur(path):
-    p = subprocess.run([FF, "-hide_banner", "-i", path], capture_output=True)
+    p = subprocess.run([FF, "-nostdin", "-hide_banner", "-i", path], capture_output=True)
     import re
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", p.stderr.decode())
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))

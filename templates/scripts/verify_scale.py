@@ -19,7 +19,7 @@ MINRUN = 8       # 头发段最短行数
 
 
 def frame_at(vid, t, out):
-    subprocess.run([FF, "-y", "-i", vid, "-ss", str(t), "-frames:v", "1", out],
+    subprocess.run([FF, "-nostdin", "-y", "-i", vid, "-ss", str(t), "-frames:v", "1", out],
                    check=True, stdout=DEVNULL, stderr=DEVNULL)
 
 

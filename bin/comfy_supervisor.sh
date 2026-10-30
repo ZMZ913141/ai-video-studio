@@ -51,6 +51,40 @@ http_ok() {
   curl -fsS --noproxy '*' -m 3 -o /dev/null "$URL/system_stats" 2>/dev/null
 }
 
+env_ok() {
+  # 环境自检：**在进任何循环之前**跑一次。
+  #
+  # 为什么需要：2026-10-30 在沙箱里 detach 出来的守护，连 `date` 都跑不起来
+  # （`libsystemd.so.0: cannot open shared object file: Operation not permitted`），
+  # `sleep` 报 `libtinfo.so.6`、`/dev/null` 报 `Function not implemented`。
+  # 它**不会崩**，而是忠实地每 5 秒循环一次、每次写一行报错 ——
+  # 46 分钟攒了 39803 行日志，其中 25596 行是这些报错，真正的死因全被埋了。
+  #
+  # 更要命的是逻辑后果：`http_ok` 里的 curl 同样跑不起来 → 返回失败 →
+  # 守护认为「服务挂了」→ 反复尝试拉起。工具链坏了被误读成服务坏了。
+  #
+  # 所以：任何一个基础能力不可用，就直说、立刻退出，别假装在干活。
+  local bad="" detail=""
+  if ! date +%s >/dev/null 2>&1; then
+    bad="date"; detail="$(date +%s 2>&1 | head -2)"
+  elif ! sleep 0.1 2>/dev/null; then
+    bad="sleep"; detail="$(sleep 0.1 2>&1 | head -2)"
+  elif ! (: >/dev/null) 2>/dev/null; then
+    bad="/dev/null 可写"; detail="$( (: >/dev/null) 2>&1 | head -2)"
+  elif ! (: >>"$LOG") 2>/dev/null; then
+    bad="写日志 $LOG"; detail="权限或磁盘"
+  fi
+  [ -z "$bad" ] && return 0
+  {
+    printf '[FATAL] 这个终端的基础工具链是坏的，守护在这里跑只会刷垃圾日志。\n'
+    printf '        第一个失败的是：%s\n' "$bad"
+    printf '        %s\n' "$detail"
+    printf '        多半是 LD_LIBRARY_PATH 被改过，或者是沙箱里 detach 出来的进程。\n'
+    printf '        请在**你自己的登录终端**里执行：bash %s/bin/comfy_supervisor.sh start\n' "$BASE"
+  } >&2
+  return 4
+}
+
 is_comfy_proc() {
   # 校验一个 pid 是不是**我们的** ComfyUI：cmdline 里既有 main.py 又有本端口。
   # ★ 2026-10-30 踩过：start_comfy 用 `$!` 记 pid，实测记到了 127608（早就没了的
@@ -189,6 +223,8 @@ cmd_run() {
   fi
   trap 'say "守护收到退出信号"; p="$(comfy_pid || true)"; [ -n "${p:-}" ] && kill_comfy "$p"; exit 0' INT TERM
   rm -f "$STOPF"
+  # ★ 第一关：工具链。坏了就退出，绝不进循环（见 env_ok 的注释）。
+  env_ok || exit 4
   # ★ GPU 拿不到就直接退出，**不能进重试循环** ——
   #   那样它会每 5 秒起一个没显卡的空壳，把日志刷满，人也查不出为什么。
   #   ★ 但接管分支不需要 GPU：服务已经活着，本进程只负责看护。
@@ -264,6 +300,9 @@ cmd_run() {
 }
 
 cmd_start() {
+  # ★ 先自检本终端工具链：detach 出去的子进程继承的是同一套环境，
+  #   这里坏掉了，后台那个也一定是残废的 —— 现场报错比事后翻 4 万行日志好。
+  env_ok || return 4
   if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
     echo "守护已在运行（pid $(cat "$PIDF")）"; return 0
   fi

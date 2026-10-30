@@ -103,13 +103,34 @@ def spoken_chars(s):
     return NOISE.sub("", s)
 
 
+def normalize_script(raw):
+    """把原始文案规整成「一行一句」的脚本（只动空白与半角标点，不动字）。
+
+    三件事，每一件都对应踩过的坑：
+    ① 半角句末标点（. ! ?）**后面跟空白** = 一句话结束 → 换成换行。
+       中文的 SENT_END 只有「。？！」，半角那三个一个字都不认，
+       夹英文的文案（品牌名/口号）会整段焊成一条大块。
+       只在「标点 + 空白」时切，所以 `1.26MP`、`S01.mp4` 不会被劈开。
+    ② 只清空格/制表符，**保留换行** —— 换行是硬断句边界（2026-10-30 的坑：
+       老实现把换行当空白吃掉，T02 的 17 行并成 2 个 18 秒大块）。
+    ③ 连续空行压成一个，避免空 cue。
+    """
+    s = re.sub(r"(?<=[.!?])(?=\s)", "\n", raw or "")
+    s = re.sub(r"[ \t\u3000]+", "", s)
+    return re.sub(r"\n{2,}", "\n", s)
+
+
 # ---------------- 音频 -> ASR ----------------
 
 def duration(path):
+    # ★ -nostdin 不是可选项：ffmpeg 默认会去读终端（等键盘 q），
+    #   在后台进程组里（nohup / systemd / `&` / 批量脚本）一读就吃 SIGTTIN，
+    #   整个进程组**停住**，流水线静默卡死、日志一行不写。
+    #   2026-10-30 实测：`--from ass` 跑了 6 分钟没动静，ps 一看状态是 T。
     p = subprocess.run(
         ["/home/qmr/.workbuddy/binaries/python/envs/default/lib/python3.13/"
          "site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2",
-         "-hide_banner", "-i", path], capture_output=True)
+         "-nostdin", "-hide_banner", "-i", path], capture_output=True)
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", p.stderr.decode())
     if not m:
         raise SystemExit("读不到时长: " + path)
@@ -414,8 +435,7 @@ def main():
     #   换行一没，17 行会被并成 2 个 18 秒的大块。
     #   只清空格/制表符，并把连续空行压成一个。
     raw = open(txt, encoding="utf-8-sig").read().strip()
-    script = re.sub(r"[ \t\u3000]+", "", raw)
-    script = re.sub(r"\n{2,}", "\n", script)
+    script = normalize_script(raw)
     cues = split_cues(script)
     n_chars = len(spoken_chars(script))
     print(f"定稿 {n_chars} 字 / {len(cues)} 条字幕   音频 {duration(src):.2f}s")

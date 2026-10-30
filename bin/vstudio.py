@@ -193,7 +193,7 @@ def probe_sec(path):
     if not ff or not path or not os.path.isfile(path):
         return None
     try:
-        r = subprocess.run([ff, "-i", path], capture_output=True, text=True, timeout=30)
+        r = subprocess.run([ff, "-nostdin", "-i", path], capture_output=True, text=True, timeout=30)
     except Exception:
         return None
     m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",

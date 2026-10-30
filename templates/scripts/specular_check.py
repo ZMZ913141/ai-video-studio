@@ -53,7 +53,7 @@ def _probe_wh(path):
 
 
 def gray(path, t):
-    p = subprocess.run([FF, "-v", "error", "-ss", f"{t:.3f}", "-i", path,
+    p = subprocess.run([FF, "-nostdin", "-v", "error", "-ss", f"{t:.3f}", "-i", path,
                         "-frames:v", "1", "-vf", f"scale={W}:{H}",
                         "-f", "rawvideo", "-pix_fmt", "gray", "-"],
                        capture_output=True)
@@ -126,7 +126,7 @@ def one(path, t):
 
 def duration(path):
     import re
-    p = subprocess.run([FF, "-hide_banner", "-i", path], capture_output=True)
+    p = subprocess.run([FF, "-nostdin", "-hide_banner", "-i", path], capture_output=True)
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", p.stderr.decode())
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
 

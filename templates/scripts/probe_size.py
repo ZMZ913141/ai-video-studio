@@ -32,7 +32,7 @@ W_H_DEFAULT = (768, 1376)          # S01/S02/S03 定版尺寸，探测失败时�
 def probe(path):
     """返回 (W, H)。视频取 video stream，图片取实际像素尺寸。失败返回兜底值。"""
     try:
-        p = subprocess.run([FF, "-hide_banner", "-i", path], capture_output=True)
+        p = subprocess.run([FF, "-nostdin", "-hide_banner", "-i", path], capture_output=True)
         log = p.stderr.decode(errors="replace")
     except Exception:
         return W_H_DEFAULT
