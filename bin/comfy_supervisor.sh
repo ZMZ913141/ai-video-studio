@@ -51,11 +51,52 @@ http_ok() {
   curl -fsS --noproxy '*' -m 3 -o /dev/null "$URL/system_stats" 2>/dev/null
 }
 
-comfy_pid() {
-  [ -f "$CPIDF" ] || return 1
-  local p; p="$(cat "$CPIDF" 2>/dev/null)"
-  [ -n "${p:-}" ] && kill -0 "$p" 2>/dev/null && { echo "$p"; return 0; }
+is_comfy_proc() {
+  # 校验一个 pid 是不是**我们的** ComfyUI：cmdline 里既有 main.py 又有本端口。
+  # ★ 2026-10-30 踩过：start_comfy 用 `$!` 记 pid，实测记到了 127608（早就没了的
+  #   某个子 shell），真实进程是 126027。后果是 status 永远显示「pid 不可见」，更要命的是
+  #   下次重启会 `kill` 一个无关的 pid。所以 kill 之前必须按 cmdline 确认身份。
+  local p="$1" c
+  [ -n "${p:-}" ] || return 1
+  kill -0 "$p" 2>/dev/null || return 1
+  c="$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null)" || return 1
+  case "$c" in
+    *main.py*"--port $PORT"*|*main.py*"--port=$PORT"*) return 0 ;;
+  esac
   return 1
+}
+
+find_comfy_pid() {
+  # 从运行中的进程反查，不信任 pid 文件（$! 在小壳里不可靠）
+  local p
+  for p in $(ps -eo pid,args 2>/dev/null | grep -E "main\.py.*(--port $PORT|--port=$PORT)" | grep -v grep | awk '{print $1}'); do
+    is_comfy_proc "$p" && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+comfy_pid() {
+  local p
+  if [ -f "$CPIDF" ]; then
+    p="$(cat "$CPIDF" 2>/dev/null)"
+    is_comfy_proc "${p:-}" && { echo "$p"; return 0; }
+  fi
+  # pid 文件失效 → 反查，顺便把文件纠正过来
+  if p="$(find_comfy_pid)"; then
+    echo "$p" >"$CPIDF" 2>/dev/null
+    echo "$p"; return 0
+  fi
+  return 1
+}
+
+kill_comfy() {
+  # 只杀确认过身份的进程
+  local p="$1"
+  if is_comfy_proc "${p:-}"; then
+    kill "$p" 2>/dev/null
+  else
+    say "⚠ 拒绝 kill ${p:-空}：它的 cmdline 不是本端口的 ComfyUI（防止误杀）"
+  fi
 }
 
 gpu_ok() {
@@ -76,6 +117,7 @@ forensics() {
     137) say "  ↳ 退出码 137 = 被 SIGKILL。两种可能：RAM 被内核 OOM 杀掉，或有人 kill -9" ;;
     129) say "  ↳ 退出码 129 = SIGHUP，通常是**启动它的终端被关掉了**" ;;
     143) say "  ↳ 退出码 143 = SIGTERM，被正常终止（有人 stop / 系统注销）" ;;
+    127) say "  ↳ 退出码 127 别当结论：经子 shell 时这只是 wait 拿不到真实退出码，不代表「命令找不到」" ;;
     0)   say "  ↳ 退出码 0 = 自己退出的，正常不该发生" ;;
     *)   say "  ↳ 退出码 $sig" ;;
   esac
@@ -116,6 +158,10 @@ start_comfy() {
   local i=0
   while [ "$i" -lt "$HEALTH_TIMEOUT" ]; do
     if http_ok; then
+      # ★ 服务一起来就按 cmdline 反查真实 pid 覆盖掉 $!：
+      #   run.sh 之间可能多一层子 shell，$! 未必是跑 main.py 的那个。
+      local real; real="$(find_comfy_pid || true)"
+      [ -n "${real:-}" ] && echo "$real" >"$CPIDF"
       say "✓ 服务就绪 ${URL}（用时 ${i}s，pid $(cat "$CPIDF")）"
       return 0
     fi
@@ -138,7 +184,7 @@ cmd_run() {
     say "已有一个守护在跑（锁 $LOCKF 被占），本进程直接退出"
     exit 0
   fi
-  trap 'say "守护收到退出信号"; [ -f "$CPIDF" ] && kill "$(cat "$CPIDF")" 2>/dev/null; exit 0' INT TERM
+  trap 'say "守护收到退出信号"; p="$(comfy_pid || true)"; [ -n "${p:-}" ] && kill_comfy "$p"; exit 0' INT TERM
   rm -f "$STOPF"
   # ★ GPU 拿不到就直接退出，**不能进重试循环** ——
   #   那样它会每 5 秒起一个没显卡的空壳，把日志刷满，人也查不出为什么。
@@ -167,20 +213,25 @@ cmd_run() {
     misses=$((misses + 1))
 
     # 自己起的进程还活着 → 可能正在加载模型，给一个宽限窗口
-    if [ "$owned" = "1" ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    if [ "$owned" = "1" ] && [ -n "$pid" ] && is_comfy_proc "$pid"; then
       if [ "$misses" -le $((HEALTH_TIMEOUT / 5)) ]; then
         sleep 5
         continue
       fi
       say "⚠ 进程在，但 ${HEALTH_TIMEOUT}s 内一直没就绪 —— 判定卡死，重启"
-      kill "$pid" 2>/dev/null
+      kill_comfy "$pid"
+      sleep 3
     fi
 
     if [ "$owned" = "1" ] && [ -n "$pid" ]; then
-      wait "$pid" 2>/dev/null; local rc=$?
+      # ★ 不要指望 wait 一定给得出退出码：多一层子 shell 时 wait 直接返回 127
+      #   （那不是「命令找不到」，是「这不是我的直接子进程」）。拿不到就老实说拿不到。
+      local rc=""
+      wait "$pid" 2>/dev/null && rc=0 || rc=$?
+      [ "$rc" = "127" ] && rc=""
       t_end=$(date +%s)
       restarts=$((restarts + 1))
-      say "════ ComfyUI 退出（rc=$rc，存活 $((t_end - t_start))s，累计重启 $restarts 次）"
+      say "════ ComfyUI 退出（rc=${rc:-取不到}，存活 $((t_end - t_start))s，累计重启 $restarts 次）"
       forensics "$rc"
     elif [ "$owned" = "1" ] && [ "$misses" -ge 2 ]; then
       # 接管来的实例没了：没有退出码可拿

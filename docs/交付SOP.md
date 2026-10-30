@@ -221,6 +221,8 @@ systemctl --user status comfyui               # 之后只认这一条
 | 成片字幕出现**双层重影** / 画面顶部莫名多出文字 | 参考视频本身带字（烧过字幕的成片、水印、台标）。模型会照着参考画面**自己重画文字**，位置还可能跑到顶部 | 换**原始无字**素材重出；出片日志会提醒 |
 | TTS/出片**卡十几分钟一个字不打** | ComfyUI 中途崩了（先查内存：还有几十 G 就不是 OOM，就是服务没了） | 已修：开工前门禁 + 轮询连续失败即报错退出；服务用守护进程托管后自己会回来（见「二·五」） |
 | 出片/配音跑到一半服务没了，`system_stats` 返回 **000** | 被 GPU 判死（`Xid 43`，换模型瞬间）或终端被关（`SIGHUP`） | 用 `bin/comfy_supervisor.sh start` 托管；死因看 `.cache/comfy/supervisor.log` |
+| 配音步骤报 `'NoneType' object is not callable`，堆栈落在 **Breeze-TTS** 的 `native.py ... flash_attn_func(...)` | **不是 TTS 的错，是别的插件栽赃**：`ComfyUI-SeedVR2_VideoUpscaler/src/optimization/compatibility.py` 在**模块级**执行 `ensure_flash_attn_safe()`，往 `sys.modules` 塞了个假 `flash_attn`（`flash_attn_func = None`）。TTS 的函数内 `from flash_attn import flash_attn_func` 因此「导入成功但拿到 None」，还在 `ALL_ATTENTION_FUNCTIONS` 注册了这个坏后端，跑到第一层 attention 才炸 | 已修：Breeze-TTS 改用**功能探测**（真的拿到可调用的 `flash_attn_func` 才算可用），而不是信 `importlib.util.find_spec`；注册点再兜一道，探测不过就不注册、整体退回 `sdpa`。**取证口诀：报错在 A 插件，真凶可能在 B 插件；`find_spec` 为真 ≠ 能用** |
+| 守护进程不停地重启，`ComfyUI` 的 pid 每十几秒换一个，日志刷 `Port 8188 is already in use` / 一堆假 `IMPORT FAILED` | `start_comfy` 用 `$!` 记 pid，**记到了错误的 pid**（run.sh 之间多一层子 shell）。守护看到 `kill -0 错误pid` 失败 → 以为服务死了 → 再起一个 → 抢不到端口退出 → 循环。健康的老实例反而被晾在一边，`status` 永远显示「pid 不可见」 | 已修：起来后按 **cmdline 反查**真实 pid（`main.py` + 本端口）覆盖 pid 文件；`kill` 前先校验 cmdline，对不上就拒绝（防误杀）。另外 `wait` 拿不到退出码时会返回 `127`，**那不是「命令找不到」**，已在 `forensics` 里注明 |
 | 启动时刷一串 `IMPORT FAILED`（某几个插件报缺依赖） | **多半不是插件坏了**：是同时起了两个 ComfyUI，抢不到 8188 的那个顺手报一串假错然后退出（2026-10-30 用户看到的 SeedVR2 就是这种；活的实例其实把它的 6 个节点都加载了） | `ps -eo args \| grep main.py` 看是不是两个；守护已加**单实例锁 + 端口占用即接管**；别再手敲 `./run.sh`，只用 `comfy_supervisor.sh start` |
 
 ---
