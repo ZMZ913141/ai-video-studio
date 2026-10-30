@@ -24,7 +24,7 @@
     },
     "high": {
       "mp": 1.26,
-      "note": "与 std 同分辨率，留作后续接二采/长片的参数位。"
+      "note": "⚠️ 目前与 std 完全相同（mp 都是 1.26），是个**占位档**：「留作后续接二采/长片」。选它不会得到更高画质，真要提画质得改 video.mp 或 video.second_pass.high_steps。"
     }
   },
   "defaults": {
@@ -248,6 +248,26 @@
         "{script_txt}"
       ],
       "optional": true
+    },
+    {
+      "id": "zone",
+      "stage": "验收",
+      "desc": "字幕安全区审计（逐帧减原片量真实包围盒；不阻断流水线）",
+      "py": "numpy",
+      "script": "{tools}/safe_zone_audit.py",
+      "_argv_note": "成品在前、原片在后。顺序反了会把「没字幕」当成「字幕铺满全屏」。用 {final}（烧完字幕）对 {mixed}（同编码前一步）做差，差分出来的才是烧上去的字 —— 直接找亮像素会把白衬衫和墙当成字幕。",
+      "argv": [
+        "{final}",
+        "{mixed}"
+      ],
+      "flag": [
+        "--every",
+        "12"
+      ],
+      "optional": true,
+      "depends": [
+        "final"
+      ]
     }
   ],
   "global_prompt": {

@@ -121,6 +121,14 @@ assert STILL_SRC and os.path.exists(STILL_SRC), f"静帧缺失：{STILL_SRC}"
 UNET = IP.get("video.unet") or UNET
 CLIP = IP.get("video.clip") or CLIP
 UPSCALER = IP.get("video.second_pass.model") or UPSCALER
+# 二采的两个开关以前是**写了不读**：ip.json 里 enabled / high_steps 齐备，
+# 代码里却 `"secondPass": True, "secondPassHighSteps": 2` 硬写死。
+# 后果是「想关掉二采省时间」关不掉、「想调高步数」调不动，而 ip.json 看着
+# 什么都支持 —— 2026-10-30 排查时抓到的典型假开关。
+# 插件那边确实认这两个值（bool(timeline["secondPass"])），接上就生效。
+SECOND_PASS = IP.get("video.second_pass.enabled")
+SECOND_PASS = True if SECOND_PASS is None else bool(SECOND_PASS)
+SECOND_PASS_STEPS = int(IP.get("video.second_pass.high_steps") or 2)
 # 模型链的另外三段也走档案卡：LoRA / Sage / 步数。IP 之间只差这三行，
 # 换工作流（换人换背景那类）时也是改这里，引擎侧不用动。
 LORA = IP.get("video.lora.name") or LORA
@@ -1849,8 +1857,8 @@ def timeline(segs, cues, audio_sec, total_sec, offset=0, full=None, frame_base=0
 
     return {
         "version": 10, "fps": FPS, "globalPrompt": "",
-        "secondPass": True,
-        "secondPassModel": UPSCALER, "secondPassHighSteps": 2,
+        "secondPass": SECOND_PASS,
+        "secondPassModel": UPSCALER, "secondPassHighSteps": SECOND_PASS_STEPS,
         "selection": {"start": 0, "duration": sel_dur},
         "videoAudioEnabled": True, "videoClips": vclips,
         "images": images,
