@@ -298,26 +298,42 @@ def split_cues(text):
 
     唯一例外：太碎的（<4 字）并回前一条，但**只限同一句内**，
     否则「…看见。」会跟下一句焊在一起。
-    """
-    text = re.sub(r"\s+", "", text)
-    parts, cur = [], ""
-    for ch in text:
-        cur += ch
-        if ch in SENT_END or ch in CLAUSE_SEP:
-            if spoken_chars(cur):
-                parts.append(cur)
-            cur = ""
-    if spoken_chars(cur):
-        parts.append(cur)
 
-    merged = []
-    for c in parts:
-        same_sent = merged and merged[-1][-1] not in SENT_END
+    坑二（2026-10-30）：**换行是硬边界，不能抹掉**。
+    老实现第一行就 `re.sub(r"\\s+", "", text)`，把换行和标点一样当空白吃掉，
+    于是断句只认标点。可 AI 写出来的文案是「一行一句、几乎不打标点」的格式
+    （T02：160 字、6 个标点），结果 17 行被并成 **2 个 18 秒的大块**，
+    一屏挂 50 多字，根本没法看。现在先按行切，行内再按标点切；
+    「太碎并回」也只在**同一行内**合并，不跨行——跨行就等于又把换行吃掉了。
+    """
+    lines = [ln for ln in (text or "").splitlines() if spoken_chars(ln)]
+    if not lines:
+        return []
+    parts = []          # [(cue 文本, 行号)]
+    for li, ln in enumerate(lines):
+        ln = re.sub(r"\s+", "", ln)
+        cur = ""
+        for ch in ln:
+            cur += ch
+            if ch in SENT_END or ch in CLAUSE_SEP:
+                if spoken_chars(cur):
+                    parts.append((cur, li))
+                cur = ""
+        if spoken_chars(cur):
+            parts.append((cur, li))
+
+    merged = []         # [(cue 文本, 行号)]
+    for c, li in parts:
+        same_sent = (
+            merged
+            and merged[-1][1] == li
+            and merged[-1][0][-1] not in SENT_END
+        )
         if same_sent and len(spoken_chars(c)) < MIN_CUE_CHARS:
-            merged[-1] += c
+            merged[-1] = (merged[-1][0] + c, li)
         else:
-            merged.append(c)
-    return merged
+            merged.append((c, li))
+    return [c for c, _ in merged]
 
 
 def cue_display(c):
