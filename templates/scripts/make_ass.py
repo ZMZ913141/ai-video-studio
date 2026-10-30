@@ -347,6 +347,19 @@ def build(tag, srt_path, out_ass, dur=None):
     if skipped_title:
         print(f"  · 开场标题已承担 {skipped_title} 条同文字幕，它们不再上屏（避免一句话看两遍）",
               file=sys.stderr)
+
+    # ★ DESIGN.hl 的词如果没出现在定稿文案里，就是**静默丢花字**（文案改过就会这样）。
+    #   2026-10-30 实测 S02：手工配了 9 个词，实际只染上 1 个（「换衣服化妆」），
+    #   其余 8 个一个不响 —— 看成品只会觉得「怎么没花字」，翻代码才知道 key 早失配了。
+    #   CTA 那条按设计不套花字，所以它命中的词不算失配，别刷这条告警。
+    cta_text = "".join(strip_punct(cues[i - 1]["text"]) for i in cta_idx)
+    lost = [k for k in hl_keys
+            if strip_punct(k) not in used_hl and strip_punct(k) not in cta_text]
+    if lost:
+        print(f"  ⚠ {tag} 的 DESIGN.hl 有 {len(lost)} 个词没出现在字幕里（文案改过？"
+              f"不会上屏）：{'、'.join(lost[:6])}{' …' if len(lost) > 6 else ''}",
+              file=sys.stderr)
+        warns.append(f"DESIGN.hl 失配 {len(lost)} 个：{lost[:6]}")
     S.write_ass(out_ass, ev)
     return ev, warns
 
