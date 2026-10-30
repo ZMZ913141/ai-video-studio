@@ -2285,7 +2285,10 @@ def main():
     _base = s[0][0]
     _batch_sec = (s[-1][1] - _base) / FPS
     prefix = f"{TAG}_pilot" if PILOT else f"{TAG}_full"
-    print(f"提交 {len(s)} 段 / seed={SEED} / 二采=V2", flush=True)
+    # ★ 别写死「二采=V2」：ip.json 的 second_pass.enabled 现在真的会生效，
+    #   关掉时还打印「二采=V2」就是在骗人（排查「为什么画质没提升」会查到死）。
+    _2p = f"二采开({UPSCALER} · {SECOND_PASS_STEPS} 步)" if SECOND_PASS else "二采关"
+    print(f"提交 {len(s)} 段 / seed={SEED} / {_2p}", flush=True)
     t0 = time.time()
     r = None
     for attempt in range(1, 4):

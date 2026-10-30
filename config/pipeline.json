@@ -137,12 +137,13 @@
       "reads_prompts": "conditional",
       "move_from": "{scripts}/{jid}_raw_*.mp4",
       "move_to": "{dir07}",
-      "out_glob": "{dir07}/{jid}_raw_*.mp4",
+      "out_glob": "{dir07}/{jid}_raw_full*.mp4",
       "set_var": "raw",
       "depends": [
         "audio",
         "srt"
-      ]
+      ],
+      "_out_note": "只认全片产物（raw_full*）。pilot 出的是 raw_pilot*.mp4 —— 混进来会让 grade 拿单段预览当全片，把正式成片覆盖成 3 秒残片。"
     },
     {
       "id": "grade",

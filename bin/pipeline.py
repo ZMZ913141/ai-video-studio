@@ -58,6 +58,10 @@ def comfy_alive(timeout=3.0):
 
 FF_FALLBACK = "/home/qmr/.workbuddy/binaries/python/envs/default/lib/python3.13/site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2"
 
+# PILOT（单段预览）只该跑到「出画面」为止。这几步是把片子做出来的必要前置，
+# 之后的调色/配乐/字幕/验收对「只看画面」没意义，而且会覆盖正式成片的同名产物。
+PILOT_KEEP_STEPS = ("tts", "pad", "srt", "free", "video")
+
 
 def load_cfg():
     if not os.path.exists(CFG_PATH):
@@ -428,6 +432,20 @@ class Pipeline:
         sid = st["id"]
         rec = {"id": sid, "stage": st.get("stage"), "desc": st.get("desc", ""),
                "t0": time.time()}
+        # ★ PILOT（单段预览）之后的一切都必须停。
+        #   为什么：pilot 只出一段（产物 S02_raw_pilot.mp4），但 grade 的产物名是
+        #   `{jid}_成片_{时长}s.mp4` —— **和正式成片同名**。放它跑下去，等于用 3 秒
+        #   残片覆盖掉 20 秒的正式片，而且日志全绿、只有回头点开片子才发现。
+        #   而且调色/配乐/字幕/安全区对「只验画面」毫无意义，白烧 CPU。
+        #   真要看全链，用 --tier std；想硬跑可以 PILOT_FULL=1。
+        if self.ctx.get("pilot") and sid not in PILOT_KEEP_STEPS \
+                and not os.environ.get("PILOT_FULL"):
+            rec["status"] = "skipped"
+            rec["note"] = "PILOT 单段预览：只验画面"
+            self.log["steps"].append(rec)
+            print(f"  ⏭  {sid} 跳过（PILOT 单段预览只验画面；"
+                  f"放它跑会把正式成片覆盖成单段残片）")
+            return rec
         # 废品站目录名要能一眼看出「谁的、哪个套次」——不然几天后废品站里
         # 一堆同名的 mp3 分不清谁是谁。套次名可能很长（还带冒号），所以只用 jid。
         ip_tag = f"{self.e['name']}_{self.jid}"
