@@ -183,11 +183,22 @@ def tile(images, out, cols=2, pad=8):
 
 
 def probe_size(path):
-    """缩略图实际尺寸（用 ffprobe 问，别靠算 —— 舍入差 1px 就拼不上）。"""
-    r = B.run(["-v", "error", "-i", path, "-f", "null", "-"])
+    """图片实际尺寸（必须问出来，不能算/不能兜默认值）。
+
+    ★ 踩过的坑：正则写死成 ", 430x228" 这种格式，PNG 的流日志是
+      "Video: png, rgb24(pc), 430x228" —— 匹配不上就静默退回默认 432x260，
+      补位的黑块于是比缩略图高 32px，hstack 直接报
+      "Input 1 height 260 does not match input 0 height 228"。
+      表现像「拼图代码坏了」，其实是尺寸探测失效。取所有 x 形数字里的最后一个。
+    """
+    # ⚠ 不能用 -v error：流信息是 info 级日志，压掉就什么都读不到
+    #   （曾经因此拿到空文本 → 退回默认尺寸 → 拼图高度不匹配）。
+    r = B.run(["-i", path, "-f", "null", "-"])
     txt = (r.stderr or b"").decode(errors="ignore")
-    m = re.search(r", (\d{2,5})x(\d{2,5})", txt)
-    return (int(m.group(1)), int(m.group(2))) if m else (432, 260)
+    ms = re.findall(r"(\d{2,5})x(\d{2,5})", txt)
+    if ms:
+        return int(ms[-1][0]), int(ms[-1][1])
+    raise SystemExit(f"探测不到图片尺寸：{path}\n{txt[-400:]}")
 
 
 # ---------------- 主流程 ----------------
