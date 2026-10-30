@@ -37,6 +37,7 @@ ROOT = os.path.dirname(BIN_DIR)
 sys.path.insert(0, BIN_DIR)
 
 import vstudio as V                              # noqa: E402
+import studio_algo as A                          # noqa: E402  （段数初值，须与出片一致）
 from prompt_guard import check, GuardRules       # noqa: E402
 
 CFG_PATH = os.path.join(ROOT, "config", "pipeline.json")
@@ -226,6 +227,19 @@ def _video_n(ip_root, setname, mp, target_segs=None):
     except Exception:
         pass
     ts = target_segs if target_segs is not None else dfl.get("target_segs")
+    if ts is None:
+        # ★ 必须与出片真跑用**同一个初值**，否则段数会对不上。
+        #   video 步骤的 env 传 TARGET_SEGS={segs}，而 {segs} 出自 A.plan()（见 pipeline.py）。
+        #   这里不传的话脚本走默认 5，自适应从另一个初值出发 → 两边算出不同段数。
+        #   2026-10-30 S01 实例：DRY 得 8 段、真跑得 10 段，第 9/10 段没有分镜，
+        #   静默退回默认描述（画面跟台词差一句）——最难查的一类假片。
+        try:
+            _p = A.plan(_asec or 0, mp,
+                        target_seg_secs=float(dfl.get("target_seg_secs") or 8.0),
+                        overlap=int(dfl.get("overlap") or 5))
+            ts = int(_p.get("segs") or 0) or None
+        except Exception:
+            ts = None
     out = os.path.join(dirs["05"], ".segplan.json")
     env = dict(os.environ, SRT=srt, AUDIO=apath, TAG=setname, MP=str(mp),
                DRY="1", PLAN_OUT=out, PROMPTS_EN="", MATERIALS="")
@@ -347,8 +361,13 @@ def llm_json(user, system=None, timeout=180):
     load_llm_env()
     from llm_router import LLMRouter
     r = LLMRouter()
+    # ★ max_tokens 默认 1024 对 8 段刚好够、10 段必被截断 —— 输出截在半句上，
+    #   JSON 解析失败且**每次都失败**（2026-10-30 S01：两次都报 char ~1760）。
+    #   所以按输入规模给足额度，别指望默认值。
+    _tok = max(2048, len(user) // 2 + 2048)
     d = r.chat([{"role": "system", "content": system or SYSTEM},
                 {"role": "user", "content": user}],
+               max_tokens=_tok,
                # ★ sensitive=True 是默认值，这里写出来是因为它是一条**安全边界**：
                 #   喂进去的是客户台词，一旦有人图省事改成 False，这些台词就会流进
                 #   「提示词可能被上游记录」的第三方免费池。显式写 = 改动时能被 review 到。
