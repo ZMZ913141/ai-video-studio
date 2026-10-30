@@ -37,6 +37,7 @@ CLOG="$D/comfyui.log"
 PIDF="$D/supervisor.pid"
 CPIDF="$D/comfy.pid"
 STOPF="$D/stop"
+LOCKF="$D/lock"
 STATF="$D/state.json"
 
 HEALTH_TIMEOUT="${COMFY_HEALTH_TIMEOUT:-300}"   # 冷启动要加载模型，给足 5 分钟
@@ -71,6 +72,7 @@ gpu_ok() {
 forensics() {
   local sig="$1" since="-5min"
   case "$sig" in
+    "") say "  ↳ 无退出码（这不是本守护拉起的实例，只能靠内核日志判死因）" ;;
     137) say "  ↳ 退出码 137 = 被 SIGKILL。两种可能：RAM 被内核 OOM 杀掉，或有人 kill -9" ;;
     129) say "  ↳ 退出码 129 = SIGHUP，通常是**启动它的终端被关掉了**" ;;
     143) say "  ↳ 退出码 143 = SIGTERM，被正常终止（有人 stop / 系统注销）" ;;
@@ -95,6 +97,13 @@ forensics() {
 
 start_comfy() {
   local why
+  rm -f "$CPIDF"
+  # ★ 端口已经有人服务着，就别再起一个：抢不到端口的那个会刷
+  #   「Port 8188 is already in use」+ 一串假 IMPORT FAILED，纯属自己给自己添乱。
+  if http_ok; then
+    say "端口已有服务在跑 —— 接管看护，不重复启动"
+    return 0
+  fi
   if ! why="$(gpu_ok 2>&1)"; then
     say "✗ 当前终端拿不到 GPU（$why）→ 不启动。"
     say "  这不是参数问题：沙箱/seccomp 会挡住 CUDA 驱动调用，起来的只会是个没显卡的空壳。"
@@ -120,6 +129,15 @@ start_comfy() {
 }
 
 cmd_run() {
+  # ★ 单实例锁。2026-10-30 实测：没这把锁时，`start` 连按两次（或两个终端同时敲）
+  #   会起两个守护、两个 ComfyUI —— 第二个抢不到 8188 只能报
+  #   「Port 8188 is already in use」然后去死，白跑一遍还刷一堆假报错
+  #   （用户看到的那条 SeedVR2 IMPORT FAILED 就是它刷的）。
+  exec 9>"$LOCKF"
+  if ! flock -n 9; then
+    say "已有一个守护在跑（锁 $LOCKF 被占），本进程直接退出"
+    exit 0
+  fi
   trap 'say "守护收到退出信号"; [ -f "$CPIDF" ] && kill "$(cat "$CPIDF")" 2>/dev/null; exit 0' INT TERM
   rm -f "$STOPF"
   # ★ GPU 拿不到就直接退出，**不能进重试循环** ——
@@ -131,31 +149,52 @@ cmd_run() {
     exit 3
   fi
   say "守护启动（pid $$）· 目标 $URL · 日志 $LOG"
-  local backoff=5 restarts=0 t_start t_end
+  local backoff=5 restarts=0 t_start t_end pid="" owned=0 misses=0
+  t_start=$(date +%s)
   while [ ! -f "$STOPF" ]; do
-    t_start=$(date +%s)
-    start_comfy
-    if [ $? -ne 0 ] && ! comfy_pid >/dev/null; then
-      say "启动失败，${backoff}s 后重试（连续失败 $((restarts + 1)) 次）"
-      sleep "$backoff"
-      backoff=$(( backoff * 2 > 120 ? 120 : backoff * 2 ))
-      restarts=$((restarts + 1))
+    # ---- 服务通：只做心跳，绝不另起一个去抢端口 ----
+    if http_ok; then
+      if [ "$owned" = "0" ]; then
+        say "接管：$URL 上已有实例在跑（不是本守护起的，退出码记不到）"
+        owned=1
+      fi
+      misses=0; backoff=5
+      sleep 5
       continue
     fi
-    backoff=5
-    # 守着，直到进程自己没了
-    local pid; pid="$(cat "$CPIDF" 2>/dev/null)"
-    while kill -0 "$pid" 2>/dev/null; do
-      sleep 5
-      [ -f "$STOPF" ] && break
-    done
-    [ -f "$STOPF" ] && break
-    wait "$pid" 2>/dev/null; local rc=$?
-    t_end=$(date +%s)
-    restarts=$((restarts + 1))
-    say "════ ComfyUI 退出（rc=$rc，存活 $((t_end - t_start))s，累计重启 $restarts 次）"
-    forensics "$rc"
+
+    # ---- 服务不通 ----
+    misses=$((misses + 1))
+
+    # 自己起的进程还活着 → 可能正在加载模型，给一个宽限窗口
+    if [ "$owned" = "1" ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      if [ "$misses" -le $((HEALTH_TIMEOUT / 5)) ]; then
+        sleep 5
+        continue
+      fi
+      say "⚠ 进程在，但 ${HEALTH_TIMEOUT}s 内一直没就绪 —— 判定卡死，重启"
+      kill "$pid" 2>/dev/null
+    fi
+
+    if [ "$owned" = "1" ] && [ -n "$pid" ]; then
+      wait "$pid" 2>/dev/null; local rc=$?
+      t_end=$(date +%s)
+      restarts=$((restarts + 1))
+      say "════ ComfyUI 退出（rc=$rc，存活 $((t_end - t_start))s，累计重启 $restarts 次）"
+      forensics "$rc"
+    elif [ "$owned" = "1" ] && [ "$misses" -ge 2 ]; then
+      # 接管来的实例没了：没有退出码可拿
+      restarts=$((restarts + 1))
+      say "════ 接管中的实例已消失（非本守护启动，拿不到退出码）"
+      forensics ""
+    fi
+
     sleep "$backoff"
+    backoff=$(( backoff * 2 > 120 ? 120 : backoff * 2 ))
+    t_start=$(date +%s)
+    start_comfy
+    if [ -f "$CPIDF" ]; then pid="$(cat "$CPIDF" 2>/dev/null)"; owned=1; fi
+    misses=0
   done
   say "守护退出"
 }
@@ -164,6 +203,11 @@ cmd_start() {
   if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
     echo "守护已在运行（pid $(cat "$PIDF")）"; return 0
   fi
+  # 锁检查：pid 文件可能过期/丢失，锁才是不说谎的那个（连按两次 start 也只起一个）
+  if ! { exec 8>"$LOCKF" && flock -n 8; } 2>/dev/null; then
+    echo "守护已在运行（锁被占）——不重复启动"; return 0
+  fi
+  exec 8>&-
   local why
   if ! why="$(gpu_ok 2>&1)"; then
     echo "✗ 当前终端拿不到 GPU（$why）—— 起了也没用。"
@@ -202,8 +246,13 @@ cmd_status() {
     # 进程存活时长（etimes 秒）
     local et; et="$(ps -o etimes= -p "$p" 2>/dev/null | tr -d ' ')"
     [ -n "${et:-}" ] && up="$((et / 60))分$((et % 60))秒"
+  elif http_ok; then
+    # 服务通、但 pid 不是本守护记的：说明是别处起的（旧守护/你手开的），已在接管中
+    cp="运行中（外部启动，pid 不可见）"
   fi
-  n="$(grep -c '════ ComfyUI 退出' "$LOG" 2>/dev/null || echo 0)"
+  # ★ grep -c 无匹配时会打印 0 并以 1 退出；以前写成 `|| echo 0` 会输出两行 "0"
+  #   → status 里出现「累计重启 : 0 / 0 次」。用 || true 兜住退出码即可。
+  n="$(grep -c '════ ComfyUI 退出' "$LOG" 2>/dev/null || true)"; n="${n:-0}"
   local healthy="✗ 不通"
   http_ok && healthy="✓ 通"
   printf '守护进程 : %s\n' "$sup"
