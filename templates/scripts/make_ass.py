@@ -273,17 +273,24 @@ def build(tag, srt_path, out_ass, dur=None):
     total = dur or (cues[-1]["t1"] + 0.4)
 
     # ---- 1. 开场钩子（前 2.6s，压在画面上部空白区）----
+    # 2026-10-30 标题升档：学 FootageCrate 的三件套（辉光/字距收拢/扫光），
+    # 替代旧的单层弹入 —— 弹入是剪映语法，收拢+扫光是电影语法。
+    # 退路：SUB_TITLE_FX=plain 恢复旧样式（对照用）。
     hook_txt = set()
     if d.get("hook"):
         main, sub = d["hook"]
         m2, _ = apply_hl(main, d.get("hl_title", []), color_only=True)
-        ev.append(S.dialog(2, 0.0, min(2.6, total), "Title",
-                           "{" + S.pop(7, 114) + "}" + m2))
+        if S.TITLE_FX:
+            ev.extend(S.cinematic_title(m2, 0.0, min(2.6, total)))
+        else:
+            ev.append(S.dialog(2, 0.0, min(2.6, total), "Title",
+                               "{" + S.pop(7, 114) + "}" + m2))
         hook_txt.add(strip_punct(main))
         if sub:
             s2, _ = apply_hl(sub, d.get("hl_sub", []), color_only=True)
-            ev.append(S.dialog(2, 0.20, min(2.6, total), "Sub",
-                               "{" + S.pop(5, 108) + "}" + s2))
+            _sub_fx = "{" + S.sub_in() + "}" if S.TITLE_FX \
+                else "{" + S.pop(5, 108) + "}"
+            ev.append(S.dialog(2, 0.20, min(2.6, total), "Sub", _sub_fx + s2))
             hook_txt.add(strip_punct(sub))
 
     # ---- 2. 正文逐条 ----

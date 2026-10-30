@@ -320,6 +320,92 @@ def rise(frames=8):
     return f"\\move(0,18,0,0)\\fad(0,0,{ms},0)\\t(0,{ms},\\alpha&H00&)"
 
 
+# ---------- 开场标题的「影视感」手法（2026-10-30，学自 FootageCrate） ----------
+# 手法出处（ProductionCrate/FootageCrate 的标题资产与设计原则）：
+#   1. Glow：他们有专门的 Easy Glow 插件 —— 文字后面垫一层**带颜色**的大半径
+#      柔光。纯白光晕发灰发脏，暖金光晕才显「贵」。
+#   2. Tracking-in 字距收拢：电影片头的标配语法（预告片标题全是它）。
+#      「弹跳放大」是短视频的语法，「收拢聚焦」是电影的语法 —— 用户要的
+#      「高级」就是后者。
+#   3. Light sweep：他们官网原话 "Sweep an anamorphic streak across a title
+#      as it appears, so the light pulls the eye to the words"。
+#      ASS 实现：金色文字副本被一条**移动的竖带 \\clip** 裁着，带子扫过哪里、
+#      哪里的字就亮成金色，然后回白 —— 等价于一道光从左到右拉过标题。
+#   4. 节制：他们建议 "One flare per shot, held only briefly"——
+#      一个镜头只扫一次、只持续 0.5s 左右。满屏都是光就成了特效集锦。
+#
+# 实现要点：三层全部沿用 Title 样式（同字体/字号/对齐），只加 override tag，
+# 这样 set_size() 的分辨率缩放对三层一视同仁，fast 试片不会错位。
+# 退路：SUB_TITLE_FX=plain 恢复旧的剪映式弹入（对照/回退用）。
+TITLE_FX = os.environ.get("SUB_TITLE_FX", "").strip().lower() \
+    not in ("plain", "0", "off", "false", "no")
+
+GLOW_COLOR = C_GOLD      # 辉光颜色：暖金（和关键词花字同一个金，全片一个强调色系）
+SWEEP_COLOR = "005CD1FF" # 扫光颜色：#FFD15C 亮金。
+# ⚠ 别用暖白：底色本身是白色，白上扫白等于没扫（2026-10-30 实测 #FFF3D9 完全看不见）。
+#   必须在白字上形成色差，金色调和辉光同色系，是全片唯一强调色。
+C_GRAD_BOTTOM = "00BFD9E6"  # 渐变下半：#E6D9BF 暖沙（顶部受光、底部收暗的伪渐变）
+SWEEP_T0 = 0.28          # 扫光起点（秒，相对标题出现）
+SWEEP_T1 = 0.82          # 扫光终点
+
+
+def cinematic_title(text, t0, t1):
+    """FootageCrate 式开场标题 → 返回 Dialogue 行列表（五层叠印）。
+
+    层 2 辉光：填充全透明 + 粗描边染色 + 大模糊 = 纯光晕（没有字芯，
+             不然和本体层叠出重影）。入场比本体慢半拍，像光「渗」出来。
+    层 3 描边：只要轮廓不要字芯（\\1a 全透明）。样式里 9px 的描边太厚，
+             收细让辉光露出来 —— 贴纸感消失，电影感才出来。
+    层 4/5 渐变字芯：上 55% 亮白、下 45% 暖沙色，模拟顶部受光
+             （FootageCrate 标题资产的标配）。两层各带完整的入场动画，
+             必须同步动，否则渐变缝和描边对不上。
+    层 6 扫光：亮暖白色副本 + 移动竖带 \\clip，一次、短促。
+    """
+    lines = []
+    glow_bord = int(round(OUT_TITLE * 1.8))
+    stroke_bord = max(4, int(round(OUT_TITLE * 0.7)))
+    # 入场动画（字距收拢 + 模糊聚焦 + 极轻放大）：三层本体共用，必须逐字一致
+    fsp0 = int(round(FS_TITLE * 0.30))
+    motion = ("\\fsp%d\\blur2\\fscx96\\fscy96\\fad(140,100)"
+              "\\t(0,460,\\fsp2\\blur0\\fscx100\\fscy100)" % fsp0)
+    # 1) 辉光层
+    lines.append(dialog(2, t0, t1, "Title",
+        "{\\bord%d\\blur8\\shad0\\1a&HFF&\\3c&H%s&\\3a&H38&"
+        "\\fad(280,170)\\t(0,600,\\bord%d\\blur4)}%s"
+        % (glow_bord, GLOW_COLOR, int(round(glow_bord * 0.6)), text)))
+    # 2) 描边层（只有轮廓）
+    lines.append(dialog(3, t0, t1, "Title",
+        "{\\bord%d\\shad0\\1a&HFF&%s}%s" % (stroke_bord, motion, text)))
+    # 3) 渐变字芯：上下两半各一层（ASS 没有真正的渐变填充，用 \\clip 二分）
+    y_top = max(0, TITLE_MARGIN_V - 40)
+    y_mid = TITLE_MARGIN_V + int(round(FS_TITLE * 0.55))
+    y_bot = TITLE_MARGIN_V + int(round(FS_TITLE * 1.5)) + 40
+    lines.append(dialog(4, t0, t1, "Title",
+        "{\\bord0\\shad0\\1c&H%s&\\blur1\\clip(0,%d,%d,%d)%s}%s"
+        % (C_WHITE, y_top, W, y_mid, motion, text)))
+    lines.append(dialog(5, t0, t1, "Title",
+        "{\\bord0\\shad0\\1c&H%s&\\blur1\\clip(0,%d,%d,%d)%s}%s"
+        % (C_GRAD_BOTTOM, y_mid, W, y_bot, motion, text)))
+    # 4) 扫光层：竖带从画面左外扫到右外，带子经过处字亮成暖白。
+    bw = int(round(W * 0.18))
+    y0 = max(0, TITLE_MARGIN_V - 80)
+    y1 = min(H, TITLE_MARGIN_V + int(round(FS_TITLE * 2.2)) + 80)
+    ta = int(round(SWEEP_T0 * 1000))
+    tb = int(round(SWEEP_T1 * 1000))
+    lines.append(dialog(6, t0, t1, "Title",
+        "{\\bord0\\shad0\\blur2\\1c&H%s&"
+        "\\clip(-%d,%d,0,%d)\\t(%d,%d,\\clip(%d,%d,%d,%d))}%s"
+        % (SWEEP_COLOR, bw, y0, y1, ta, tb, W, y0, W + bw, y1, text)))
+    return lines
+
+
+def sub_in():
+    """副标题入场：比主标慢半拍、更轻 —— 字距小收拢 + 轻模糊聚焦。"""
+    fsp0 = int(round(FS_SUB * 0.30))
+    return ("\\fad(200,120)\\fsp%d\\blur2"
+            "\\t(80,520,\\fsp3\\blur0)" % fsp0)
+
+
 def fade_only(ms_in=60, ms_out=40):
     """正文条的入场：只做极轻淡入，不做缩放。
 
