@@ -250,6 +250,22 @@
       "optional": true
     },
     {
+      "id": "mixchk",
+      "stage": "验收",
+      "desc": "配乐电平审计（说话段 vs 停顿段；不阻断流水线）",
+      "py": "numpy",
+      "script": "{tools}/audio_check.py",
+      "_argv_note": "成片在前、纯净原声在后。人声基准由脚本自己从**成片的说话段**量 ——拿原声当基准会差 8 dB（原声是 VO_FX 之前的电平），结果「配乐比人声响 4 dB」的片子也能判过（2026-10-30 实测）。",
+      "argv": [
+        "{final}",
+        "{audio}"
+      ],
+      "optional": true,
+      "depends": [
+        "final"
+      ]
+    },
+    {
       "id": "zone",
       "stage": "验收",
       "desc": "字幕安全区审计（逐帧减原片量真实包围盒；不阻断流水线）",
