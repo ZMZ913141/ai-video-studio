@@ -25,6 +25,7 @@ pipeline —— 一条龙编排器（引擎侧）
 """
 import argparse
 import glob
+import hashlib
 import json
 import os
 import random
@@ -453,6 +454,69 @@ class Pipeline:
     def _mp_file(self):
         return os.path.join(V.set_dirs(self.root, self.set)["08"], "_step_mp.json")
 
+    # ── 产出脚本指纹（判定「脚本改了但旧产物还在」） ─────────────────
+    def _sig_file(self):
+        return os.path.join(V.set_dirs(self.root, self.set)["08"], "_step_sig.json")
+
+    def _step_sig(self):
+        try:
+            with open(self._sig_file(), encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception:
+            return {}
+
+    def _save_step_sig(self, sid, sp):
+        """记下这一步的脚本内容指纹（sha1 前 16 位）。"""
+        d = self._step_sig()
+        try:
+            with open(sp, "rb") as f:
+                d[sid] = hashlib.sha1(f.read()).hexdigest()[:16]
+        except OSError:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._sig_file()), exist_ok=True)
+            with open(self._sig_file(), "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+
+    def _script_stale(self, st, hit):
+        """生成产物的那个脚本自己变了 → 产物作废。
+        ★ 为什么不用 mtime 而是内容指纹：scripts-sync 会把整目录按新 mtime 覆盖一遍，
+        用 mtime 判断的话，一次同步就让所有 IP 的每一步全部重做（video 一步 20 分钟）。
+        内容没变就不该重做，内容变了就必须重做 —— 只有哈希能分开这两件事。
+        ★ 2026-10-31 实测事故：make_ass.py 修好了「副标吃掉正文」，脚本已同步到 IP，
+        但 ass 步骤只声明 depends=['srt']，产物比 srt 新 → 一路 ⏭，烧出来的片子缺一句
+        字幕，五项格式审计全绿。改了工具却不出新片是最贵的假绿。
+        """
+        sp = st.get("script")
+        if not sp:
+            return None
+        m = set()
+        try:
+            sp = render(sp, self.ctx, m)
+        except Exception:
+            return None
+        if m or not sp or not os.path.isfile(sp):
+            return None
+        try:
+            with open(sp, "rb") as f:
+                cur = hashlib.sha1(f.read()).hexdigest()[:16]
+        except OSError:
+            return None
+        prev = self._step_sig().get(st["id"])
+        if prev and prev != cur:
+            return ("script", os.path.basename(sp))
+        if not prev:
+            # 老项目没有基线：这只说明「不知道」，不说明「没问题」。不静默放行，
+            # 打一条可见的警告再从这次起记基线；要确保一致就 --force 这一步。
+            if not getattr(self, "_sig_warned", False):
+                print("  ⚠ 本套没有脚本指纹基线（老项目），本步产物的来源无法证明；"
+                      "已从本次起记录，要强制一致请 --force")
+                self._sig_warned = True
+            self._save_step_sig(st["id"], sp)
+        return None
+
     def _step_mp(self):
         try:
             with open(self._mp_file(), encoding="utf-8") as f:
@@ -557,6 +621,12 @@ class Pipeline:
             #   会看到 video 被跳过（产物在），只有后面几步重做 —— 白跑还骗人。
             if hit and not stale and sid == "video" and self.seed_changed:
                 stale = ("seed", f"{self.seed_prev} → {self.seed}")
+            # ★ 生成它的脚本本身也是上游（2026-10-31 加）：脚本内容变了，旧产物就是用
+            #   旧逻辑做的，必须重做。判据是内容哈希，不是 mtime —— 见 _script_stale。
+            if hit and not stale:
+                s_stale = self._script_stale(st, hit)
+                if s_stale:
+                    stale = s_stale
             if hit and not stale:
                 rec["status"] = "skipped"
                 rec["out"] = hit
@@ -574,7 +644,11 @@ class Pipeline:
                 self.refresh()
                 return rec
             if stale:
-                print(f"  ↻ {sid} 重做（上游 {stale[0]} 已更新：{stale[1]}）")
+                # script 单独措辞：它不是「上游产物」，是「做这件事的工具」，说清楚人才能判断
+                if stale[0] == "script":
+                    print(f"  ↻ {sid} 重做（{stale[1]} 已换新版，产物需用新逻辑重做）")
+                else:
+                    print(f"  ↻ {sid} 重做（上游 {stale[0]} 已更新：{stale[1]}）")
 
         print(f"\n── {sid} · {st.get('desc','')}")
         if self.verbose:
@@ -672,6 +746,12 @@ class Pipeline:
                 if st.get("res_sensitive"):
                     # 记下这份产物是哪个分辨率出的，下次换档位才知道该作废
                     self._save_step_mp(sid)
+                # 记下这份产物是用哪一版脚本做的（内容哈希），脚本再改才知道该重做
+                if st.get("script"):
+                    _m = set()
+                    _sp = render(st["script"], self.ctx, _m)
+                    if not _m and _sp:
+                        self._save_step_sig(sid, _sp)
                 if st.get("set_var") and hit:
                     self.ctx[st["set_var"]] = hit
                 print(f"  ✓ {sid} 完成"
