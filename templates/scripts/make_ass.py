@@ -205,8 +205,12 @@ def auto_design(cues):
     """从 SRT 反推一份「心动设计」。返回结构与 DESIGN 的条目一致。
 
     规则保守，宁少勿多：
-    - 标题用第 1 句、副标用第 2 句 —— 短视频的钩子本来就是这两句，
-      强行另行提炼只会写出不搭的句子。
+    - 标题用第 1 句。**不截断**（截断 = 屏幕上出现半句话，比没有标题更糟），
+      超长就不做标题，交给 _title_fs 按字数缩小。
+    - **副标不再取正文第 2 句**（2026-10-31 修）：以前取第 2 句当副标，而
+      skipped_title 又会把正文轨里同文的那条跳过 —— 结果这句话只剩一行
+      FS_SUB 小字，正文轨彻底没有它。观众看到的是「少了一句字幕」。
+      副标是装饰层，不该承担信息；要副标就人工在 DESIGN 里写。
     - 花字只挑**数字+量词**（剪映模板的标配），全片 4~6 处，不碰形容词。
     - CTA 找含转化动词的那一条。
     """
@@ -218,8 +222,10 @@ def auto_design(cues):
         s = strip_punct(s)
         return s if len(s) <= n else s[:n]
 
-    main = cut(texts[0], 10)
-    sub = cut(texts[1], 14) if len(texts) > 1 and texts[1] != texts[0] else ""
+    first = strip_punct(texts[0])
+    # 标题最长 14 字（再不缩字号就看不清了），超长宁可不做标题，也不切半句
+    main = first if len(first) <= 14 else ""
+    sub = ""
 
     hl, seen = {}, set()
     for t in texts:
@@ -363,6 +369,23 @@ def build(tag, srt_path, out_ass, dur=None):
     if skipped_title:
         print(f"  · 开场标题已承担 {skipped_title} 条同文字幕，它们不再上屏（避免一句话看两遍）",
               file=sys.stderr)
+
+    # ★★ 字幕完整性闸门（2026-10-31 加）：正文轨少了任何一句都必须硬失败。
+    #   起因：auto_design 曾把正文第 2 句拿去当副标，skipped_title 又把正文轨里同文的那条
+    #   跳过 —— 这句只剩一行 FS_SUB 小字，正文轨彻底没有它，观众看到的就是「少了一句字幕」。
+    #   而 srt_sync_audit 只比对「时间轴对不对」，它以为 21 条全在，照样判满分。
+    #   所以必须在这里按条数核对，缺一句就非零退出，让流水线停下来。
+    body_n = sum(1 for e in ev if e.split(",")[3] in ("Cue", "CTA"))
+    expect = len(cues) - skipped_title
+    if body_n != expect:
+        print("✗ 字幕缺损：正文轨只有 %d 条，应为 %d 条"
+              "（SRT %d 条 - 开场标题承担 %d 条）" % (body_n, expect, len(cues), skipped_title),
+              file=sys.stderr)
+        print("  排查：是否有句子被 DESIGN/auto_design 拿去当副标，却没进正文轨"
+              "（副标是小字，不能替正文）", file=sys.stderr)
+        sys.exit(2)
+    print("  字幕完整：正文 %d 条（SRT %d，标题承担 %d）"
+          % (body_n, len(cues), skipped_title), file=sys.stderr)
 
     # ★ DESIGN.hl 的词如果没出现在定稿文案里，就是**静默丢花字**（文案改过就会这样）。
     #   2026-10-30 实测 S02：手工配了 9 个词，实际只染上 1 个（「换衣服化妆」），
